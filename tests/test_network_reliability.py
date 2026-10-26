@@ -5,6 +5,7 @@ assertions about request outcomes go through the public client surface.
 """
 
 import asyncio
+import json
 import time
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
@@ -24,6 +25,7 @@ from tests.helpers import make_http_client
 class Response:
     status_code = 200
     headers = {}
+    content = json.dumps({"finalizado": True, "datos": []}).encode()
 
     def json(self):
         return {"finalizado": True, "datos": []}
@@ -326,6 +328,10 @@ class FakeResponse:
         self.status_code = status_code
         self.headers = headers or {}
         self._payload = payload if payload is not None else {"finalizado": True, "datos": []}
+
+    @property
+    def content(self):
+        return json.dumps(self._payload).encode()
 
     def json(self):
         return self._payload

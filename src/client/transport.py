@@ -23,16 +23,11 @@ class Response:
     body: bytes = b""
     infos: Mapping[Any, float] = field(default_factory=dict)
     transport: str = ""
-    json_payload: Any = None
-    json_loaded: bool = False
-
     @property
     def text(self) -> str:
         return self.body.decode("utf-8", errors="replace")
 
     def json(self) -> Any:
-        if self.json_loaded:
-            return self.json_payload
         return json.loads(self.body)
 
 
@@ -115,29 +110,16 @@ class CurlTransport:
         body = bytes(content) if isinstance(content, (bytes, bytearray)) else b""
         if isinstance(content, (bytes, bytearray)):
             mark("response_bytes", len(body))
-        json_payload, json_loaded = _fallback_json_payload(response, body)
         return Response(
             status_code=response.status_code,
             headers=response.headers,
             body=body,
             infos=infos if isinstance(infos, Mapping) else {},
             transport=self.name,
-            json_payload=json_payload,
-            json_loaded=json_loaded,
         )
 
     async def close(self) -> None:
         await self.raw.close()
-
-
-def _fallback_json_payload(response: Any, body: bytes) -> tuple[Any, bool]:
-    """Recover JSON from duck-typed test doubles that expose only ``.json()``."""
-    if body:
-        return None, False
-    try:
-        return response.json(), True
-    except (ValueError, UnicodeError, TypeError, AttributeError):
-        return None, False
 
 
 def transport_for(session: Any) -> Transport:

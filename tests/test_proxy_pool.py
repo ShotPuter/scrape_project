@@ -58,6 +58,10 @@ class Response:
         self.data = data
         self.headers = headers or {}
 
+    @property
+    def content(self):
+        return json.dumps(self.data).encode()
+
     def json(self):
         return self.data
 

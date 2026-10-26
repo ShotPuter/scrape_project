@@ -59,7 +59,10 @@ def read_records(path: Path) -> dict[str, PublicationRecord]:
             return {}
 
         if tuple(csv_reader.fieldnames) != CSV_FIELDS:
-            raise ValueError(f"Unexpected publication CSV columns in {path}")
+            raise ValueError(
+                f"Unexpected publication CSV columns in {path}: "
+                f"found {list(csv_reader.fieldnames)!r}, expected {list(CSV_FIELDS)!r}"
+            )
 
         records: dict[str, PublicationRecord] = {}
         for row in csv_reader:

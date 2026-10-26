@@ -18,7 +18,7 @@ from src.services.proxy_collector import (
     clear_dead_proxies,
     read_candidates,
 )
-from src.services.proxy_verifier import CheckStats, Stage2Result, catalog_ready, search_ready
+from src.services.proxy_verifier import CheckStats, Stage2Result
 from src.storage.proxy_database import ProxyDatabase, VerifiedProxy
 
 
@@ -227,18 +227,6 @@ def test_read_candidates_skips_dead_and_invalid_rows(tmp_path):
         writer.writerow({"alive": "true", "protocol": "http", "proxy": "1.2.3.4:8080"})
 
     assert read_candidates(path) == ["http://1.2.3.4:8080", "socks5://10.0.0.1:1080"]
-
-
-def test_catalog_payload_requires_finalizado_and_list():
-    assert catalog_ready({"finalizado": True, "datos": []}) is True
-    assert catalog_ready({"finalizado": False, "datos": []}) is False
-    assert catalog_ready({"finalizado": True, "datos": {}}) is False
-
-
-def test_search_payload_requires_rows_and_total():
-    assert search_ready({"finalizado": True, "datos": {"filas": [], "total": 0}}) is True
-    assert search_ready({"finalizado": True, "datos": {"filas": []}}) is False
-    assert search_ready({"finalizado": False, "datos": {"filas": [], "total": 0}}) is False
 
 
 def test_parse_proxyscrape_metadata():

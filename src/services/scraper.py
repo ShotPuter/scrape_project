@@ -165,16 +165,6 @@ class SeprecScraper:
             )
             last_logged_timestamp = current_timestamp
 
-    def _start_run(self) -> tuple[str, datetime]:
-        run_identifier = uuid.uuid4().hex[:RUN_IDENTIFIER_LENGTH]
-        self._active_run_id = run_identifier
-        self.client.run_id = run_identifier
-        return run_identifier, datetime.utcnow()
-
-    def _capture_metrics_baseline(self) -> tuple[int, int]:
-        self.client.metrics_before_run = dict(self.client.metrics.counts) if hasattr(self.client, "metrics") else {}
-        return self.client.requests_made, self.client.retries_made
-
     async def _process_single_publication(
         self,
         summary: PublicationSummary,
@@ -293,7 +283,10 @@ class SeprecScraper:
             max_items=max_items,
             incremental=incremental,
         )
-        run_identifier, started_at = self._start_run()
+        run_identifier = uuid.uuid4().hex[:RUN_IDENTIFIER_LENGTH]
+        self._active_run_id = run_identifier
+        self.client.run_id = run_identifier
+        started_at = datetime.utcnow()
         category_name, sub_category_name = await self._categories.resolve(
             active_request.category, active_request.sub_category
         )
@@ -306,7 +299,8 @@ class SeprecScraper:
             active_request.date_filter or "any",
             active_request.incremental,
         )
-        http_requests_before, http_retries_before = self._capture_metrics_baseline()
+        self.client.metrics_before_run = dict(self.client.metrics.counts)
+        http_requests_before, http_retries_before = self.client.requests_made, self.client.retries_made
 
         pipeline = ScrapePipeline(
             client=self.client,

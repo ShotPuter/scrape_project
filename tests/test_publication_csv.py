@@ -6,7 +6,7 @@ import pytest
 
 from src.models.publication import STATUS_FAILED, PublicationRecord
 from src.storage import publication_csv
-from src.storage.integrity import CSV_FIELDS, file_problem, read_records
+from src.storage.integrity import file_problem, read_records
 from src.storage.publication_csv import PublicationCsv
 
 
@@ -57,20 +57,30 @@ async def test_updates_replace_existing_row_and_failures_are_not_stored(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_corrupted_header_is_repaired_with_a_snapshot(tmp_path):
+async def test_corrupted_header_fails_load_with_path_and_reason(tmp_path):
+    csv_path = tmp_path / "publications.csv"
+    csv_path.write_text("broken\n", encoding="utf-8")
+
+    with pytest.raises(ValueError) as error:
+        await PublicationCsv(csv_path).load()
+
+    message = str(error.value)
+    assert str(csv_path) in message
+    assert "broken" in message and "expected" in message
+
+
+@pytest.mark.asyncio
+async def test_corrupted_header_is_not_repaired_by_save(tmp_path):
     store = PublicationCsv(tmp_path / "publications.csv", verify_files=False)
     await store.save(PublicationRecord(id="1", title="first"))
-    assert store.path.exists()
 
-    # Simulate an external truncation/corruption after the index was loaded.
+    # Simulate external corruption after the index was loaded.
     store.path.write_text("broken\n", encoding="utf-8")
 
-    await store.save(PublicationRecord(id="2", title="second"))
+    with pytest.raises(ValueError, match="Unexpected publication CSV columns"):
+        await store.save(PublicationRecord(id="2", title="second"))
 
-    records = read_records(store.path)
-    assert set(records) == {"1", "2"}
-    with store.path.open(newline="", encoding="utf-8-sig") as handle:
-        assert tuple(csv.DictReader(handle).fieldnames or ()) == CSV_FIELDS
+    assert store.path.read_text(encoding="utf-8") == "broken\n"
 
 
 @pytest.mark.asyncio

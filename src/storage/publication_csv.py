@@ -88,7 +88,7 @@ def _extract_valid_identifiers(records: list[PublicationRecord], verify_files: b
 
 
 def _append_or_rewrite(path: Path, record: PublicationRecord, existing: list[PublicationRecord]) -> None:
-    """Append when the file is healthy, otherwise repair it with a full snapshot."""
+    """Append when healthy; rewrite only for recoverable write/format damage."""
     if _can_append_safely(path):
         try:
             _append_record(path, record)
@@ -122,9 +122,13 @@ def _can_append_safely(path: Path) -> bool:
     try:
         header = header_line.decode("utf-8-sig").rstrip("\r\n")
         fields = tuple(next(csv.reader([header])))
-    except (UnicodeDecodeError, csv.Error, StopIteration):
-        return False
-    return fields == CSV_FIELDS and last_byte in {b"\n", b"\r"}
+    except (UnicodeDecodeError, csv.Error, StopIteration) as exc:
+        raise ValueError(f"Corrupted publication CSV header in {path}: {exc}") from exc
+    if fields != CSV_FIELDS:
+        raise ValueError(
+            f"Unexpected publication CSV columns in {path}: found {list(fields)!r}, expected {list(CSV_FIELDS)!r}"
+        )
+    return last_byte in {b"\n", b"\r"}
 
 
 def _append_record(path: Path, record: PublicationRecord) -> None:

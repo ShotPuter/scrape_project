@@ -187,14 +187,6 @@ class _ResponseCheck:
     retry_after: float | None = None
 
 
-def catalog_ready(data: object) -> bool:
-    return is_catalog_payload(data)
-
-
-def search_ready(data: object) -> bool:
-    return is_search_payload(data)
-
-
 def classify_status(status: int) -> str:
     if 500 <= status <= 599:
         return "http_5xx"
@@ -365,7 +357,7 @@ async def _target_attempt(
 ) -> _AttemptOutcome:
     started = time.monotonic()
     catalog = await _request(session, "POST", f"{api_base_url}/{catalog_path}", payload={"codigo": ""}, timeout=policy.total)
-    check = _check_response(catalog, catalog_ready)
+    check = _check_response(catalog, is_catalog_payload)
     if not check.ok:
         latency_ms = round((time.monotonic() - started) * 1000, 2)
         return _AttemptOutcome(False, latency_ms, check.error_type, check.detail, check.retry_after)
@@ -374,7 +366,7 @@ async def _target_attempt(
     search = await _request(
         session, "POST", f"{api_base_url}/{search_path}", payload=filters.to_api_payload(), timeout=policy.total
     )
-    check = _check_response(search, search_ready)
+    check = _check_response(search, is_search_payload)
     latency_ms = round((time.monotonic() - started) * 1000, 2)
     return _AttemptOutcome(check.ok, latency_ms, check.error_type, check.detail, check.retry_after)
 

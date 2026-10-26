@@ -16,9 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -39,13 +37,6 @@ MAX_YEAR = 2100
 EXIT_SUCCESS = 0
 EXIT_FAILURE = 1
 EXIT_INTERRUPTED = 130
-
-
-@dataclass(frozen=True, slots=True)
-class DateRange:
-    start_date: str = ""
-    end_date: str = ""
-    date_filter: str = ""
 
 
 CATEGORY_CODES: dict[str, list[str]] = {"all": ["1", "2", "3", "4"], "1": ["1"], "2": ["2"], "3": ["3"], "4": ["4"]}
@@ -83,32 +74,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def _execute_scrape(scraper: SeprecScraper, args: argparse.Namespace) -> list[dict[str, Any]]:
-    date_range = _date_range(args)
+    start_date = f"{args.year}-01-01" if args.year else ""
+    end_date = f"{args.year}-12-31" if args.year else ""
+    date_filter = CUSTOM_RANGE_FILTER if args.year else ""
     reports: list[dict[str, Any]] = []
-
     for category in CATEGORY_CODES[args.category]:
         report = await scraper.run(
-            category=category,
-            date_filter=date_range.date_filter,
-            start_date=date_range.start_date,
-            end_date=date_range.end_date,
-            incremental=True,
+            category=category, date_filter=date_filter, start_date=start_date, end_date=end_date, incremental=True
         )
         reports.append(report)
-
     for report in reports:
-        _write_stdout(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+        print(json.dumps(report, ensure_ascii=False, indent=2, default=str), flush=True)
     return reports
-
-
-def _write_stdout(text: str) -> None:
-    sys.stdout.write(f"{text}\n")
-
-
-def _date_range(args: argparse.Namespace) -> DateRange:
-    if not args.year:
-        return DateRange()
-    return DateRange(start_date=f"{args.year}-01-01", end_date=f"{args.year}-12-31", date_filter=CUSTOM_RANGE_FILTER)
 
 
 async def _run_once(args: argparse.Namespace) -> list[dict[str, Any]]:

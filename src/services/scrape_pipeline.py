@@ -116,24 +116,58 @@ class ScrapePipeline:
         page_number = 1
         try:
             while not self.request.max_pages or page_number <= self.request.max_pages:
-                if self._is_item_budget_exhausted(counters):
+                if self.request.max_items is not None and counters.scheduled_count >= self.request.max_items:
+                    logger.info("Reached maximum scheduled item budget", extra={"max_items": self.request.max_items})
                     break
-
-                total_count, summaries = await self._fetch_page(page_number)
+                search_filter = PublicationSearchFilter(
+                    page=page_number,
+                    page_size=settings.page_size,
+                    category=self.request.category,
+                    subcategory=self.request.sub_category,
+                    date_filter=self.request.date_filter,
+                    start_date=self.request.start_date,
+                    end_date=self.request.end_date,
+                )
+                total_count, summaries = await self.client.search_publications(search_filter)
                 if not summaries:
                     break
-
                 counters.pages_processed += 1
-                self._log_page_retrieval(page_number, total_count, len(summaries), queue.qsize())
+                logger.info(
+                    "Retrieved search result page",
+                    extra={
+                        "page": page_number,
+                        "total_pages": math.ceil(total_count / settings.page_size) if total_count else page_number,
+                        "items_on_page": len(summaries),
+                        "queue_backlog": queue.qsize(),
+                    },
+                )
 
-                candidates = await self._select_candidates(summaries, counters)
-                if candidates is None:
-                    break
+                candidates = summaries
+                if self.request.incremental:
+                    candidates, skipped_count = await self.filter_new_summaries(summaries)
+                    counters.items_skipped += skipped_count
+                    counters.consecutive_skipped_pages = (
+                        counters.consecutive_skipped_pages + 1 if not candidates else 0
+                    )
+                    if counters.consecutive_skipped_pages >= MAX_CONSECUTIVE_SKIPPED_PAGES and not self.request.date_filter:
+                        logger.info(
+                            "Consecutive skip threshold reached; incremental run caught up",
+                            extra={"skipped_pages": counters.consecutive_skipped_pages},
+                        )
+                        break
 
-                await self._enqueue_summaries(candidates, queue, scheduled_identifiers, counters)
+                for summary in candidates:
+                    if summary.id in scheduled_identifiers:
+                        counters.items_skipped += 1
+                        continue
+                    if self.request.max_items is not None and counters.scheduled_count >= self.request.max_items:
+                        break
+                    scheduled_identifiers.add(summary.id)
+                    counters.scheduled_count += 1
+                    self._queued_timestamps[summary.id] = time.monotonic()
+                    await queue.put(summary)
                 page_number += 1
                 await self.polite_delay()
-
         except Exception as error:  # noqa: BLE001 - producer boundary records fatal pagination errors
             counters.fatal_error = str(error)
             logger.error(
@@ -143,86 +177,6 @@ class ScrapePipeline:
             for _ in range(self.max_concurrency):
                 await queue.put(None)
 
-    def _is_item_budget_exhausted(self, counters: RunCounters) -> bool:
-        """Guard clause: checks if scheduled items have met or exceeded user limits."""
-        if self.request.max_items is None:
-            return False
-        if counters.scheduled_count < self.request.max_items:
-            return False
-
-        logger.info("Reached maximum scheduled item budget", extra={"max_items": self.request.max_items})
-        return True
-
-    async def _fetch_page(self, page_number: int) -> tuple[int, list[PublicationSummary]]:
-        """Query remote API for a single paginated results batch."""
-        search_filter = PublicationSearchFilter(
-            page=page_number,
-            page_size=settings.page_size,
-            category=self.request.category,
-            subcategory=self.request.sub_category,
-            date_filter=self.request.date_filter,
-            start_date=self.request.start_date,
-            end_date=self.request.end_date,
-        )
-        return await self.client.search_publications(search_filter)
-
-    def _log_page_retrieval(self, page_number: int, total_count: int, count_on_page: int, queued_count: int) -> None:
-        """Record structured telemetry for page fetch."""
-        total_pages = math.ceil(total_count / settings.page_size) if total_count else page_number
-        logger.info(
-            "Retrieved search result page",
-            extra={
-                "page": page_number,
-                "total_pages": total_pages,
-                "items_on_page": count_on_page,
-                "queue_backlog": queued_count,
-            },
-        )
-
-    async def _select_candidates(
-        self, summaries: list[PublicationSummary], counters: RunCounters
-    ) -> list[PublicationSummary] | None:
-        """Filter out already persisted items in incremental runs."""
-        if not self.request.incremental:
-            return summaries
-
-        candidates, skipped_count = await self.filter_new_summaries(summaries)
-        counters.items_skipped += skipped_count
-        counters.consecutive_skipped_pages = counters.consecutive_skipped_pages + 1 if not candidates else 0
-
-        should_stop_early = (
-            counters.consecutive_skipped_pages >= MAX_CONSECUTIVE_SKIPPED_PAGES and not self.request.date_filter
-        )
-        if should_stop_early:
-            logger.info(
-                "Consecutive skip threshold reached; incremental run caught up",
-                extra={"skipped_pages": counters.consecutive_skipped_pages},
-            )
-            return None
-
-        return candidates
-
-    async def _enqueue_summaries(
-        self,
-        summaries: list[PublicationSummary],
-        queue: asyncio.Queue[PublicationSummary | None],
-        scheduled_identifiers: set[str],
-        counters: RunCounters,
-    ) -> None:
-        """Enqueue unique summaries for worker processing."""
-        for summary in summaries:
-            if summary.id in scheduled_identifiers:
-                counters.items_skipped += 1
-                continue
-
-            if self.request.max_items is not None and counters.scheduled_count >= self.request.max_items:
-                break
-
-            scheduled_identifiers.add(summary.id)
-            counters.scheduled_count += 1
-            self._queued_timestamps[summary.id] = time.monotonic()
-            await queue.put(summary)
-
     async def _consume_queue(self, queue: asyncio.Queue[PublicationSummary | None], counters: RunCounters) -> None:
         """Worker loop consuming items until sentinel value (None) is encountered."""
         while True:
@@ -230,47 +184,37 @@ class ScrapePipeline:
             queued_at = (
                 self._queued_timestamps.pop(summary.id, time.monotonic()) if summary is not None else time.monotonic()
             )
-
             queue_wait_duration = round((time.monotonic() - queued_at) * MILLISECONDS_PER_SECOND, 3)
             reset_token = work_context.set({"worker_queue_ms": queue_wait_duration})
-
             try:
                 if summary is None:
                     return
-                await self._process_publication_summary(summary, counters, queue)
+                record = await self.process_publication(
+                    summary,
+                    category_code=self.category_code,
+                    category_name=self.category_name,
+                    sub_category_name=self.sub_category_name,
+                )
+                if record is None:
+                    counters.items_failed += 1
+                else:
+                    counters.items_scraped += 1
+                    counters.original_files += int(record.has_original_file)
+                    counters.generated_files += int(not record.has_original_file)
+                    counters.file_bytes += record.file_size_bytes or 0
+                completed_count = counters.items_scraped + counters.items_failed
+                if completed_count % PROGRESS_NOTIFICATION_INTERVAL == 0:
+                    elapsed_minutes = max(0.01, (time.monotonic() - self._pipeline_start_time) / 60.0)
+                    rate_per_minute = round(counters.items_scraped / elapsed_minutes, 1)
+                    logger.info(
+                        "Progress: %d saved (%d orig, %d gen) | %d failed | Queue: %d | Rate: %.1f docs/min",
+                        counters.items_scraped,
+                        counters.original_files,
+                        counters.generated_files,
+                        counters.items_failed,
+                        queue.qsize(),
+                        rate_per_minute,
+                    )
             finally:
                 work_context.reset(reset_token)
                 queue.task_done()
-
-    async def _process_publication_summary(
-        self, summary: PublicationSummary, counters: RunCounters, queue: asyncio.Queue[PublicationSummary | None]
-    ) -> None:
-        """Process a single summary, update metrics, and log batch progress."""
-        record = await self.process_publication(
-            summary,
-            category_code=self.category_code,
-            category_name=self.category_name,
-            sub_category_name=self.sub_category_name,
-        )
-
-        if record is None:
-            counters.items_failed += 1
-        else:
-            counters.items_scraped += 1
-            counters.original_files += int(record.has_original_file)
-            counters.generated_files += int(not record.has_original_file)
-            counters.file_bytes += record.file_size_bytes or 0
-
-        completed_count = counters.items_scraped + counters.items_failed
-        if completed_count % PROGRESS_NOTIFICATION_INTERVAL == 0:
-            elapsed_minutes = max(0.01, (time.monotonic() - self._pipeline_start_time) / 60.0)
-            rate_per_minute = round(counters.items_scraped / elapsed_minutes, 1)
-            logger.info(
-                "Progress: %d saved (%d orig, %d gen) | %d failed | Queue: %d | Rate: %.1f docs/min",
-                counters.items_scraped,
-                counters.original_files,
-                counters.generated_files,
-                counters.items_failed,
-                queue.qsize(),
-                rate_per_minute,
-            )
