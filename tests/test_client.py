@@ -5,12 +5,12 @@ from contextlib import asynccontextmanager
 import pytest
 from aiohttp import web
 
-from src.client.config import RetryConfig
+from src.client.base_client import HttpClient
+from src.client.config import ClientConfig, RetryConfig
 from src.client.network import TimeoutPolicy
 from src.client.seprec_client import SeprecClient
 from src.models.publication import PublicationSearchFilter
 from src.utils.helpers import SeprecAPIError
-from tests.helpers import make_client_config, make_http_client
 
 
 @asynccontextmanager
@@ -28,7 +28,8 @@ async def local_api(app: web.Application):
 
 
 def make_client(base_url: str, retry_attempts: int = 3) -> SeprecClient:
-    return SeprecClient(config=make_client_config(base_url, attempts=retry_attempts, backoff_factor=0.01))
+    retry = RetryConfig(attempts=retry_attempts, backoff_factor=0.01, jitter_seconds=0.0)
+    return SeprecClient(config=ClientConfig(base_url=base_url, retry=retry))
 
 
 @pytest.mark.asyncio
@@ -254,7 +255,7 @@ async def test_transport_retries_network_errors_and_propagates_cancellation(monk
 
     from curl_cffi.requests.exceptions import ConnectionError
 
-    client = make_http_client("http://localhost")
+    client = HttpClient(ClientConfig(base_url="http://localhost"))
     request = AsyncMock(side_effect=[ConnectionError("disconnected"), {"ok": True}])
     monkeypatch.setattr(client, "_request_once", request)
     assert await client.request("GET", "test") == {"ok": True}

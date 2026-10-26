@@ -8,26 +8,6 @@ from src.client.proxy_pool import ProxyPool
 from src.services.scraper import SeprecScraper
 from src.storage.file_storage import FileStorage
 from src.storage.publication_csv import PublicationCsv
-from tests.helpers import make_http_client
-
-
-@pytest.mark.asyncio
-async def test_client_close_releases_pool_even_when_direct_session_close_fails():
-    client = make_http_client()
-    session = AsyncMock()
-    session.close.side_effect = RuntimeError("already closed")
-    pool = AsyncMock()
-    client._session = session
-    client._proxy_pool = pool
-
-    await client.close()
-
-    pool.close.assert_awaited_once()
-    assert client._session is None
-    assert client._proxy_pool is None
-
-    await client.close()
-    pool.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio

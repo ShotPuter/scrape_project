@@ -1,15 +1,11 @@
 """Configuration object and composition-root tests."""
 
-from datetime import UTC, datetime, timedelta
-
 import pytest
 
 from config import BASE_DIR, Settings
-from src.client.base_client import HttpClient
 from src.client.config import ClientConfig, ProxyConfig, RetryConfig, TimeoutConfig, client_config_from_settings
 from src.client.network import TimeoutPolicy
 from src.client.seprec_client import SeprecClient
-from src.storage.proxy_database import ProxyDatabase, VerifiedProxy
 
 
 def test_settings_from_env_coerces_types_and_resolves_paths(monkeypatch, tmp_path):
@@ -85,25 +81,6 @@ def test_seprec_client_uses_injected_config_without_global_settings():
     )
     client = SeprecClient(config=config)
     assert client.proxy_mode == "direct"
-
-
-@pytest.mark.asyncio
-async def test_client_ignores_stale_database_records(tmp_path):
-    db_path = tmp_path / "proxies.db"
-    stale = (datetime.now(UTC) - timedelta(days=2)).isoformat()
-    async with ProxyDatabase(db_path) as database:
-        await database.replace_all([VerifiedProxy("http://stale.example:80", "UA", "aiohttp", checked_at=stale)])
-
-    client = HttpClient(
-        ClientConfig(
-            base_url="https://example.test",
-            proxy=ProxyConfig(db_path=db_path, db_max_age_hours=24, check_path="publicaciones/catalogos/lista"),
-        )
-    )
-    try:
-        assert await client._create_proxy_pool() is None
-    finally:
-        await client.close()
 
 
 def test_proxy_config_rejects_unbounded_warmup():

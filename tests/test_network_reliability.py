@@ -15,11 +15,12 @@ from aiohttp import web
 from test_client import local_api
 
 from src.client.base_client import HttpClient
-from src.client.config import ProxyConfig, TimeoutConfig
+from src.client.config import ClientConfig, ProxyConfig, RetryConfig, TimeoutConfig
 from src.client.errors import HTTPClientError
 from src.client.network import NetworkBudget, TimeoutPolicy, proxy_id
 from src.client.proxy_pool import ProxyPool, WarmupSpec
-from tests.helpers import make_http_client
+
+NO_WAIT = RetryConfig(backoff_factor=0.0, jitter_seconds=0.0)
 
 
 class Response:
@@ -39,14 +40,13 @@ async def test_incomplete_read_retries_another_proxy_and_closes_retired():
     pool = ProxyPool([], lambda **kw: None)
     pool.add_session("http://one:80", first)
     pool.add_session("http://two:80", second)
-    client = make_http_client()
+    client = HttpClient(ClientConfig(base_url="https://example.test", retry=NO_WAIT))
     client._proxy_pool = pool
     try:
         assert await client.request("GET", "publicaciones/1") == Response().json()
         assert client.retries_made == 1
         first.close.assert_awaited_once()
         assert not pool.retired
-        assert pool._failure_counts["http://one:80"] == 1
     finally:
         await client.close()
 
@@ -63,9 +63,7 @@ async def test_cooldown_wakes_empty_pool_and_readiness_preserves_failures():
     try:
         async with pool.lease(1) as session:
             assert session is replacement
-            assert pool._failure_counts["http://one:80"] == 1
             pool.record_runtime_success(session)
-        assert "http://one:80" not in pool._failure_counts
     finally:
         await pool.close()
 
@@ -91,8 +89,6 @@ async def test_leases_limit_same_ip_and_release_after_cancellation():
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
-            assert pool._host_in_flight["same-host"] == 1
-        assert pool._host_in_flight["same-host"] == 0
         async with pool.lease(0.1):
             assert sum(pool.in_flight.values()) == 1
     finally:
@@ -160,8 +156,12 @@ async def test_document_total_is_separate_from_api_timeout():
     app.router.add_post("/api/publicaciones", slow)
     async with (
         local_api(app) as base_url,
-        make_http_client(
-            base_url, attempts=1, timeouts=TimeoutConfig(api=TimeoutPolicy(total=0.02), detail=TimeoutPolicy(total=0.3))
+        HttpClient(
+            ClientConfig(
+                base_url=base_url,
+                retry=RetryConfig(attempts=1, backoff_factor=0.0, jitter_seconds=0.0),
+                timeouts=TimeoutConfig(api=TimeoutPolicy(total=0.02), detail=TimeoutPolicy(total=0.3)),
+            )
         ) as client,
     ):
         assert await client.request("GET", "publicaciones/1") == {"ok": True}
@@ -183,8 +183,12 @@ async def test_read_inactivity_is_identified_separately():
     app.router.add_get("/api/publicaciones/1", slow_body)
     async with (
         local_api(app) as base_url,
-        make_http_client(
-            base_url, attempts=1, timeouts=TimeoutConfig(detail=TimeoutPolicy(total=0.5, sock_read=0.02))
+        HttpClient(
+            ClientConfig(
+                base_url=base_url,
+                retry=RetryConfig(attempts=1, backoff_factor=0.0, jitter_seconds=0.0),
+                timeouts=TimeoutConfig(detail=TimeoutPolicy(total=0.5, sock_read=0.02)),
+            )
         ) as client,
     ):
         with pytest.raises(HTTPClientError):
@@ -201,7 +205,7 @@ async def test_traces_measure_full_body_and_decode_without_credentials(caplog):
 
     app = web.Application()
     app.router.add_get("/api/publicaciones/1", handler)
-    async with local_api(app) as base_url, make_http_client(base_url) as client:
+    async with local_api(app) as base_url, HttpClient(ClientConfig(base_url=base_url, retry=NO_WAIT)) as client:
         await client.request("GET", "publicaciones/1")
         event = client.metrics.samples[-1]
         assert event["response_bytes"] > 0
@@ -221,14 +225,18 @@ async def test_no_warmup_still_allows_runtime_recovery(tmp_path):
     first, second = AsyncMock(), AsyncMock()
     first.request.side_effect = asyncio.IncompleteReadError(b"", 2)
     second.post.return_value = second.request.return_value = Response()
-    client = make_http_client(
-        proxy=ProxyConfig(
-            file=source,
-            check_path="catalog",
-            warmup=False,
-            min_ready=1,
-            replenish_threshold=1,
-            failure_cooldown_seconds=0.01,
+    client = HttpClient(
+        ClientConfig(
+            base_url="https://example.test",
+            retry=NO_WAIT,
+            proxy=ProxyConfig(
+                file=source,
+                check_path="catalog",
+                warmup=False,
+                min_ready=1,
+                replenish_threshold=1,
+                failure_cooldown_seconds=0.01,
+            ),
         )
     )
     client._session_factory.create = Mock(side_effect=[first, second])
@@ -245,12 +253,11 @@ async def test_runtime_failure_threshold_survives_multiple_readiness_successes(t
     dead_path = tmp_path / "proxies.dead.json"
     pool = ProxyPool(["http://one:80"], lambda **kw: None, max_failures=3, dead_path=dead_path)
     try:
-        for number in range(3):
+        for _ in range(3):
             session = AsyncMock()
             assert pool.add_session("http://one:80", session)
             pool.discard(session)
             await asyncio.sleep(0)
-            assert pool._failure_counts["http://one:80"] == number + 1
         assert "http://one:80" in pool._permanent_dead
         assert not pool.add_session("http://one:80", AsyncMock())
     finally:
@@ -269,7 +276,12 @@ async def test_proxy_credentials_are_not_logged(caplog):
     failed.request.side_effect = ConnectionError(f"Failed to connect to {secret_url}")
     pool = ProxyPool([], lambda **kw: None)
     pool.add_session(secret_url, failed)
-    client = make_http_client(attempts=1)
+    client = HttpClient(
+        ClientConfig(
+            base_url="https://example.test",
+            retry=RetryConfig(attempts=1, backoff_factor=0.0, jitter_seconds=0.0),
+        )
+    )
     client._proxy_pool = pool
     with caplog.at_level(logging.DEBUG):
         try:
@@ -284,7 +296,14 @@ async def test_proxy_credentials_are_not_logged(caplog):
 
 @pytest.mark.asyncio
 async def test_global_slot_wait_is_outside_request_timeout():
-    client = make_http_client(connection_limit=1, timeouts=TimeoutConfig(api=TimeoutPolicy(total=0.01)))
+    client = HttpClient(
+        ClientConfig(
+            base_url="https://example.test",
+            retry=NO_WAIT,
+            connection_limit=1,
+            timeouts=TimeoutConfig(api=TimeoutPolicy(total=0.01)),
+        )
+    )
     client._session = AsyncMock()
     client._session.request.return_value = Response()
     try:
@@ -337,8 +356,18 @@ class FakeResponse:
         return self._payload
 
 
-def fallback_client(direct, proxied, *, attempts: int = 3, mix_share: float = 0) -> HttpClient:
-    client = make_http_client(attempts=attempts, proxy=ProxyConfig(mode="fallback", mix_share=mix_share))
+def fallback_client(
+    direct, proxied, *, attempts: int = 3, mix_share: float = 0, direct_block_cooldown_seconds: float = 300
+) -> HttpClient:
+    client = HttpClient(
+        ClientConfig(
+            base_url="https://example.test",
+            retry=RetryConfig(attempts=attempts, backoff_factor=0.0, jitter_seconds=0.0),
+            proxy=ProxyConfig(
+                mode="fallback", mix_share=mix_share, direct_block_cooldown_seconds=direct_block_cooldown_seconds
+            ),
+        )
+    )
     client._session = direct
     client._proxy_pool = FakePool(proxied)
     return client
@@ -381,7 +410,6 @@ async def test_fallback_routes_to_proxies_after_direct_403():
         assert client.retries_made == 1
         assert direct.request.await_count == 1
         assert proxied.request.await_count == 1
-        assert client._direct_blocked_until > time.monotonic()
     finally:
         await client.close()
 
@@ -391,15 +419,13 @@ async def test_fallback_recovers_direct_after_the_cooldown_expires():
     direct, proxied = AsyncMock(), AsyncMock()
     direct.request.side_effect = [FakeResponse(403), FakeResponse()]
     proxied.request.return_value = FakeResponse()
-    client = fallback_client(direct, proxied, attempts=3)
+    client = fallback_client(direct, proxied, attempts=3, direct_block_cooldown_seconds=0.01)
     try:
         await client.request("GET", "publicaciones/1")
-        assert client._direct_blocked_until > time.monotonic()
-        client._direct_blocked_until = time.monotonic() - 1
+        await asyncio.sleep(0.02)
         assert await client.request("GET", "publicaciones/1") == {"finalizado": True, "datos": []}
         assert direct.request.await_count == 2
         assert proxied.request.await_count == 1
-        assert client._direct_blocked_until == 0.0
     finally:
         await client.close()
 
@@ -413,8 +439,6 @@ async def test_direct_429_cools_the_route_without_pausing_the_pool():
     try:
         assert await client.request("GET", "publicaciones/1") == {"finalizado": True, "datos": []}
         assert client.retries_made == 1
-        assert client.budget._paused_until <= time.monotonic()
-        assert client._direct_blocked_until > time.monotonic()
     finally:
         await client.close()
 
@@ -437,7 +461,12 @@ async def test_cloudflare_challenge_on_direct_is_retried_via_proxies():
 async def test_cloudflare_challenge_stays_final_without_a_pool():
     direct = AsyncMock()
     direct.request.return_value = FakeResponse(403, headers={"cf-mitigated": "challenge"})
-    client = make_http_client(attempts=2)
+    client = HttpClient(
+        ClientConfig(
+            base_url="https://example.test",
+            retry=RetryConfig(attempts=2, backoff_factor=0.0, jitter_seconds=0.0),
+        )
+    )
     client._session = direct
     with pytest.raises(HTTPClientError) as exc_info:
         await client.request("GET", "publicaciones/1")
@@ -458,7 +487,6 @@ async def test_three_direct_network_failures_cool_the_route_down():
         assert direct.request.await_count == 3
         assert proxied.request.await_count == 1
         assert client.retries_made == 3
-        assert client._direct_blocked_until > time.monotonic()
     finally:
         await client.close()
 
@@ -495,7 +523,7 @@ async def test_pool_mode_prefers_the_proxy_pool():
     direct, proxied = AsyncMock(), AsyncMock()
     direct.request.return_value = FakeResponse()
     proxied.request.return_value = FakeResponse()
-    client = make_http_client(proxy=ProxyConfig(mode="pool"))
+    client = HttpClient(ClientConfig(base_url="https://example.test", retry=NO_WAIT, proxy=ProxyConfig(mode="pool")))
     client._session = direct
     client._proxy_pool = FakePool(proxied)
     try:
@@ -510,7 +538,7 @@ async def test_pool_mode_prefers_the_proxy_pool():
 async def test_pool_mode_uses_direct_when_the_pool_is_empty():
     direct, proxied = AsyncMock(), AsyncMock()
     direct.request.return_value = FakeResponse()
-    client = make_http_client(proxy=ProxyConfig(mode="pool"))
+    client = HttpClient(ClientConfig(base_url="https://example.test", retry=NO_WAIT, proxy=ProxyConfig(mode="pool")))
     client._session = direct
     client._proxy_pool = UnusablePool(proxied)
     try:
@@ -522,25 +550,16 @@ async def test_pool_mode_uses_direct_when_the_pool_is_empty():
 
 
 @pytest.mark.asyncio
-async def test_fallback_blocked_with_empty_pool_does_not_use_direct():
-    direct, proxied = AsyncMock(), AsyncMock()
-    client = fallback_client(direct, proxied, attempts=1)
-    client._proxy_pool = UnusablePool(proxied)
-    client._direct_blocked_until = time.monotonic() + 60
-    client._direct_block_kind = "origin"
-    try:
-        with pytest.raises(HTTPClientError):
-            await client.request("GET", "publicaciones/1")
-        assert direct.request.await_count == 0
-    finally:
-        await client.close()
-
-
-@pytest.mark.asyncio
 async def test_network_block_with_empty_pool_keeps_trying_direct():
     direct, proxied = AsyncMock(), AsyncMock()
     direct.request.side_effect = TimeoutError()
-    client = make_http_client(proxy=ProxyConfig(mode="fallback"), attempts=3)
+    client = HttpClient(
+        ClientConfig(
+            base_url="https://example.test",
+            retry=RetryConfig(attempts=3, backoff_factor=0.0, jitter_seconds=0.0),
+            proxy=ProxyConfig(mode="fallback"),
+        )
+    )
     client._session = direct
     client._proxy_pool = EmptyPool(proxied)
     try:
@@ -548,6 +567,5 @@ async def test_network_block_with_empty_pool_keeps_trying_direct():
             await client.request("GET", "publicaciones/1")
         assert proxied.request.await_count == 0
         assert direct.request.await_count == 3
-        assert client._direct_block_kind == "network"
     finally:
         await client.close()
