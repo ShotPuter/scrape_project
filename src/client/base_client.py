@@ -289,12 +289,7 @@ class HttpClient:
             network_budget=self.budget,
             metrics=self.metrics,
         )
-        pool.configure_warmup(
-            f"{self.base_url}/{self.proxy_check_path.lstrip('/')}",
-            self.proxy_check_payload,
-            min(self.proxy_check_concurrency, self.proxy_probe_concurrency),
-            self.proxy_check_timeout,
-        )
+        pool.configure_warmup(*self._pool_warmup_args())
         if not self.proxy_warmup:
             try:
                 self._add_proxy_sessions(pool, proxies)
@@ -325,14 +320,17 @@ class HttpClient:
                 return None
         return pool
 
-    def _start_background_warmup(self, pool: ProxyPool, candidate_count: int) -> None:
-        self.logger.info("Warming %d proxy candidates in the background; direct requests start immediately", candidate_count)
-        pool.start_warmup(
+    def _pool_warmup_args(self) -> tuple[str, dict[str, Any], int, float]:
+        return (
             f"{self.base_url}/{self.proxy_check_path.lstrip('/')}",
             self.proxy_check_payload,
             min(self.proxy_check_concurrency, self.proxy_probe_concurrency),
             self.proxy_check_timeout,
         )
+
+    def _start_background_warmup(self, pool: ProxyPool, candidate_count: int) -> None:
+        self.logger.info("Warming %d proxy candidates in the background; direct requests start immediately", candidate_count)
+        pool.start_warmup(*self._pool_warmup_args())
 
         async def watch() -> None:
             try:
@@ -353,12 +351,7 @@ class HttpClient:
             len(proxies),
             self.proxy_warmup_timeout_seconds,
         )
-        pool.start_warmup(
-            f"{self.base_url}/{self.proxy_check_path.lstrip('/')}",
-            self.proxy_check_payload,
-            min(self.proxy_check_concurrency, self.proxy_probe_concurrency),
-            self.proxy_check_timeout,
-        )
+        pool.start_warmup(*self._pool_warmup_args())
         try:
             async with asyncio.timeout(self.proxy_warmup_timeout_seconds):
                 await pool.wait_until_ready()

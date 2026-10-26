@@ -21,7 +21,7 @@ from src.client.network import NetworkBudget, RequestMetrics, attempt_context, p
 from src.client.readiness import is_ready_response
 from src.utils.atomic import atomic_write_json
 from src.utils.http import parse_retry_after
-from src.utils.proxy_url import normalize_proxy_url, proxy_host
+from src.utils.proxy_url import proxy_host, proxy_url_from_row
 
 logger = logging.getLogger(__name__)
 
@@ -102,13 +102,7 @@ def load_proxies(
 def _parse_proxy_row(row: dict[str, str]) -> str | None:
     if row.get("alive", "true").lower() == "false":
         return None
-
-    protocol = row.get("protocol", "http").strip().lower()
-    address = row.get("proxy", "").strip() or f"{row.get('ip', '')}:{row.get('port', '')}"
-    if not address.strip():
-        return None
-    url = address if "://" in address else f"{protocol}://{address}"
-    return normalize_proxy_url(url)
+    return proxy_url_from_row(row)
 
 
 class ProxyPool:

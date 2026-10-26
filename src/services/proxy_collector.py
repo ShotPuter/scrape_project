@@ -24,6 +24,7 @@ from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from config import settings
 from src.client.free_proxy_source import load_free_proxy_candidates
@@ -42,7 +43,7 @@ from src.client.proxy_source import ProxySourceError, sync_proxy_source
 from src.services.proxy_verifier import Stage1Result, Stage2Result, compatible_transports, verify_stage1, verify_stage2
 from src.storage.proxy_database import ProxyDatabase, VerifiedProxy
 from src.utils.atomic import atomic_write_json
-from src.utils.proxy_url import normalize_proxy_url, parse_proxy_url, proxy_host
+from src.utils.proxy_url import parse_proxy_url, proxy_host, proxy_url_from_row
 
 PROGRESS_EVERY = 25
 DEFAULT_USER_AGENTS = (
@@ -78,23 +79,14 @@ class Stage2Check:
     result: Stage2Result
 
 
-def proxy_url(row: dict[str, str]) -> str | None:
-    if row.get("alive", "true").strip().lower() == "false":
-        return None
-    protocol = row.get("protocol", "http").strip().lower()
-    address = row.get("proxy", "").strip() or f"{row.get('ip', '')}:{row.get('port', '')}"
-    if not address.strip():
-        return None
-    url = address if "://" in address else f"{protocol}://{address}"
-    return normalize_proxy_url(url)
-
-
 def read_candidates(path: Path, limit: int | None = None) -> list[str]:
     candidates: list[str] = []
     seen: set[str] = set()
     with path.open(encoding="utf-8-sig", newline="") as handle:
         for row in csv.DictReader(handle):
-            url = proxy_url(row)
+            if row.get("alive", "true").strip().lower() == "false":
+                continue
+            url = proxy_url_from_row(row)
             if url is None or url in seen:
                 continue
             seen.add(url)
@@ -439,14 +431,7 @@ async def _stage1_scan(
         flush=True,
     )
     tasks = [asyncio.create_task(worker()) for _ in range(worker_count)]
-    try:
-        for _ in tasks:
-            queue.put_nowait(None)
-        await asyncio.gather(*tasks)
-    finally:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+    await _drain_workers(tasks, queue)
     return successes, failures
 
 
@@ -518,14 +503,7 @@ async def _stage2_scan(
         flush=True,
     )
     tasks = [asyncio.create_task(worker()) for _ in range(worker_count)]
-    try:
-        for _ in tasks:
-            queue.put_nowait(None)
-        await asyncio.gather(*tasks)
-    finally:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+    await _drain_workers(tasks, queue)
     return checks
 
 
@@ -664,6 +642,18 @@ def _report_progress(checked: int, total: int, verified: int, active: int, *, pr
     if checked % PROGRESS_EVERY and checked != total:
         return
     print(f"{prefix} {checked}/{total}, verified combinations={verified}, active_checks={active}", flush=True)
+
+
+async def _drain_workers(tasks: list[asyncio.Task[None]], queue: asyncio.Queue[Any]) -> None:
+    """Send one stop sentinel per worker, wait for completion, then cancel leftovers."""
+    try:
+        for _ in tasks:
+            queue.put_nowait(None)
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def build_parser() -> argparse.ArgumentParser:

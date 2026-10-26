@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -25,6 +26,16 @@ class ProxyAddress:
         """Return ``host:port`` with IPv6 hosts wrapped in brackets."""
         host = f"[{self.host}]" if ":" in self.host else self.host
         return f"{host}:{self.port}"
+
+
+def proxy_url_from_row(row: Mapping[str, str]) -> str | None:
+    """Normalize a proxy CSV row that uses ``protocol``/``proxy`` or ``ip``/``port``."""
+    protocol = row.get("protocol", "http").strip().lower()
+    address = row.get("proxy", "").strip() or f"{row.get('ip', '')}:{row.get('port', '')}"
+    if not address.strip():
+        return None
+    url = address if "://" in address else f"{protocol}://{address}"
+    return normalize_proxy_url(url)
 
 
 def parse_proxy_url(raw_value: str, *, default_scheme: str = DEFAULT_PROXY_SCHEME) -> ProxyAddress | None:

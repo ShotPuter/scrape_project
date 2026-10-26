@@ -31,6 +31,21 @@ def _preserve_mode(source: Path, destination: Path) -> None:
 
 
 @contextmanager
+def _temporary_file(destination: Path) -> Iterator[tuple[int, Path]]:
+    descriptor, temp_path = _create_temporary_file(destination)
+    try:
+        yield descriptor, temp_path
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _commit_temp(temp_path: Path, destination: Path, *, preserve_mode: bool) -> None:
+    if preserve_mode:
+        _preserve_mode(temp_path, destination)
+    os.replace(temp_path, destination)
+
+
+@contextmanager
 def atomic_text_writer(
     path: Path | str, *, encoding: str = "utf-8", newline: str | None = None, preserve_mode: bool = True
 ) -> Iterator[TextIO]:
@@ -41,33 +56,23 @@ def atomic_text_writer(
     the temporary file is removed.
     """
     destination = Path(path)
-    descriptor, temp_path = _create_temporary_file(destination)
-    try:
+    with _temporary_file(destination) as (descriptor, temp_path):
         with os.fdopen(descriptor, "w", encoding=encoding, newline=newline) as handle:
             yield handle
             handle.flush()
             os.fsync(handle.fileno())
-        if preserve_mode:
-            _preserve_mode(temp_path, destination)
-        os.replace(temp_path, destination)
-    finally:
-        temp_path.unlink(missing_ok=True)
+        _commit_temp(temp_path, destination, preserve_mode=preserve_mode)
 
 
 def atomic_write_bytes(path: Path | str, payload: bytes, *, preserve_mode: bool = True) -> None:
     """Atomically replace ``path`` with ``payload``."""
     destination = Path(path)
-    descriptor, temp_path = _create_temporary_file(destination)
-    try:
+    with _temporary_file(destination) as (descriptor, temp_path):
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        if preserve_mode:
-            _preserve_mode(temp_path, destination)
-        os.replace(temp_path, destination)
-    finally:
-        temp_path.unlink(missing_ok=True)
+        _commit_temp(temp_path, destination, preserve_mode=preserve_mode)
 
 
 def atomic_write_text(
