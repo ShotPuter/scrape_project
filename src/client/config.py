@@ -14,7 +14,6 @@ from src.utils.http import parse_retry_after
 MAX_RETRY_DELAY_SECONDS = 60.0
 TRANSPORT_CHOICES = frozenset({"aiohttp", "curl_cffi", "auto"})
 PROXY_MODES = frozenset({"direct", "fallback", "always", "pool"})
-PROJECT_DIR = Path(__file__).resolve().parents[2]
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,57 +133,33 @@ class ClientConfig:
 
 
 def client_config_from_settings(
-    app_settings: Any,
-    *,
-    base_url: str | None = None,
-    headers: Mapping[str, str] | None = None,
-    timeout_seconds: float | None = None,
-    retry_attempts: int | None = None,
-    retry_backoff_factor: float | None = None,
-    retry_jitter_seconds: float | None = None,
-    connection_limit: int | None = None,
-    proxy_warmup: bool | None = None,
-    proxy_file: Path | None = None,
-    proxy_db_path: Path | None = None,
-    transport: str | None = None,
-    proxy_mode: str | None = None,
-    proxy_mix_share: float | None = None,
-    proxy_check_path: str = "",
-    proxy_check_payload: Mapping[str, Any] | None = None,
-    project_dir: Path = PROJECT_DIR,
+    app_settings: Any, *, proxy_check_path: str = "", proxy_check_payload: Mapping[str, Any] | None = None, project_dir: Path
 ) -> ClientConfig:
-    """Build a ``ClientConfig`` from application settings plus explicit overrides."""
+    """Build a ``ClientConfig`` from application settings and the site readiness probe."""
 
-    def pick(override: Any, fallback: Any) -> Any:
-        return fallback if override is None else override
-
-    api_total = pick(timeout_seconds, app_settings.request_timeout_seconds)
-    detail_total = pick(timeout_seconds, app_settings.detail_timeout_seconds)
     stage_timeouts = {
         "connect": app_settings.connect_timeout_seconds,
         "sock_connect": app_settings.sock_connect_timeout_seconds,
         "sock_read": app_settings.sock_read_timeout_seconds,
     }
     cookie_file = project_dir / app_settings.cookies_file if app_settings.cookies_file else None
-    resolved_proxy_file = proxy_file
-    if resolved_proxy_file is None and app_settings.proxy_file:
-        resolved_proxy_file = project_dir / app_settings.proxy_file
+    proxy_file = project_dir / app_settings.proxy_file if app_settings.proxy_file else None
 
     return ClientConfig(
-        base_url=pick(base_url, app_settings.api_base_url),
-        headers={**app_settings.default_headers, **dict(headers or {})},
+        base_url=app_settings.api_base_url,
+        headers=dict(app_settings.default_headers),
         timeouts=TimeoutConfig(
-            api=TimeoutPolicy(total=api_total, **stage_timeouts), detail=TimeoutPolicy(total=detail_total, **stage_timeouts)
+            api=TimeoutPolicy(total=app_settings.request_timeout_seconds, **stage_timeouts),
+            detail=TimeoutPolicy(total=app_settings.detail_timeout_seconds, **stage_timeouts),
         ),
         retry=RetryConfig(
-            attempts=pick(retry_attempts, app_settings.retry_attempts),
-            backoff_factor=pick(retry_backoff_factor, app_settings.retry_backoff_factor),
-            jitter_seconds=pick(retry_jitter_seconds, app_settings.retry_jitter_seconds),
+            attempts=app_settings.retry_attempts,
+            backoff_factor=app_settings.retry_backoff_factor,
+            jitter_seconds=app_settings.retry_jitter_seconds,
         ),
         proxy=ProxyConfig(
-            file=resolved_proxy_file,
-            db_path=proxy_db_path,
-            mode=pick(proxy_mode, app_settings.proxy_mode),
+            file=proxy_file,
+            mode=app_settings.proxy_mode,
             sample_size=app_settings.proxy_sample_size,
             check_concurrency=app_settings.proxy_check_concurrency,
             check_timeout=app_settings.proxy_check_timeout,
@@ -197,16 +172,16 @@ def client_config_from_settings(
             warmup_timeout_seconds=app_settings.proxy_warmup_timeout_seconds,
             check_path=proxy_check_path,
             check_payload=dict(proxy_check_payload or {}),
-            warmup=pick(proxy_warmup, app_settings.proxy_warmup),
+            warmup=app_settings.proxy_warmup,
             per_ip_limit=app_settings.proxy_per_ip_limit,
             probe_concurrency=app_settings.proxy_probe_concurrency,
             acquire_timeout=app_settings.proxy_acquire_timeout,
             direct_block_cooldown_seconds=app_settings.direct_block_cooldown_seconds,
-            mix_share=pick(proxy_mix_share, app_settings.proxy_mix_share),
+            mix_share=app_settings.proxy_mix_share,
         ),
-        connection_limit=pick(connection_limit, app_settings.max_concurrent_requests),
+        connection_limit=app_settings.max_concurrent_requests,
         impersonate=app_settings.browser_profile,
         cookies_file=cookie_file,
-        transport=pick(transport, app_settings.http_transport),
+        transport=app_settings.http_transport,
         requests_per_second=app_settings.http_requests_per_second,
     )

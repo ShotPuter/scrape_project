@@ -7,10 +7,11 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from src.client.base_client import HttpClient
+from src.client.config import ProxyConfig
 from src.client.network import attempt_context
 from src.client.proxy_pool import ProxyPool, dead_proxy_path, load_proxies
 from src.client.session_factory import SessionFactory
+from tests.helpers import make_http_client
 
 
 def test_text_candidates_respect_validation_deduplication_and_dead_list(tmp_path):
@@ -69,7 +70,7 @@ async def test_warmup_timeout_starts_with_already_ready_sessions():
         async def wait_until_ready(self):
             await asyncio.Event().wait()
 
-    client = HttpClient("https://example.test", proxy_warmup_timeout_seconds=0.01)
+    client = make_http_client(proxy=ProxyConfig(warmup_timeout_seconds=0.01))
 
     await asyncio.wait_for(client._warm_up_pool(SlowPool(), ["http://proxy.test:80"]), 1)
 
@@ -86,7 +87,7 @@ async def test_warmup_timeout_without_ready_sessions_raises():
         async def wait_until_ready(self):
             await asyncio.Event().wait()
 
-    client = HttpClient("https://example.test", proxy_warmup_timeout_seconds=0.01)
+    client = make_http_client(proxy=ProxyConfig(warmup_timeout_seconds=0.01))
 
     with pytest.raises(RuntimeError, match="No proxy became ready"):
         await asyncio.wait_for(client._warm_up_pool(SlowPool(), ["http://proxy.test:80"]), 1)
@@ -291,7 +292,7 @@ async def test_network_failure_removes_proxy_and_retry_uses_another():
     second.request.return_value = Response(200, {"ok": True})
     pool = ProxyPool([], lambda **kwargs: None)
     pool.sessions = [first, second]
-    client = HttpClient("https://example.test", retry_backoff_factor=0, retry_jitter_seconds=0)
+    client = make_http_client()
     client._proxy_pool = pool
     assert await client._request("GET", "/test") == {"ok": True}
     assert pool.sessions == [second]
@@ -314,7 +315,7 @@ async def test_exhausted_proxy_pool_does_not_fall_back_to_direct_connection():
     session.request.side_effect = ConnectionError("failed")
     pool = ProxyPool([], lambda **kwargs: None)
     pool.sessions = [session]
-    client = HttpClient("https://example.test", proxy_mode="always", retry_backoff_factor=0, retry_jitter_seconds=0)
+    client = make_http_client(proxy=ProxyConfig(mode="always"))
     client._proxy_pool = pool
     with pytest.raises(HTTPClientError, match="pool is empty"):
         await client._request("GET", "/test")

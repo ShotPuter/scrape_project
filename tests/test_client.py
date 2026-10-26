@@ -6,9 +6,11 @@ import pytest
 from aiohttp import web
 
 from src.client.config import RetryConfig
+from src.client.network import TimeoutPolicy
 from src.client.seprec_client import SeprecClient
 from src.models.publication import PublicationSearchFilter
 from src.utils.helpers import SeprecAPIError
+from tests.helpers import make_client_config, make_http_client
 
 
 @asynccontextmanager
@@ -25,14 +27,8 @@ async def local_api(app: web.Application):
         await runner.cleanup()
 
 
-def make_client(base_url: str, **kwargs) -> SeprecClient:
-    return SeprecClient(
-        base_url=base_url,
-        retry_attempts=kwargs.pop("retry_attempts", 3),
-        retry_backoff_factor=0.01,
-        retry_jitter_seconds=0,
-        **kwargs,
-    )
+def make_client(base_url: str, retry_attempts: int = 3) -> SeprecClient:
+    return SeprecClient(config=make_client_config(base_url, attempts=retry_attempts, backoff_factor=0.01))
 
 
 @pytest.mark.asyncio
@@ -258,9 +254,7 @@ async def test_transport_retries_network_errors_and_propagates_cancellation(monk
 
     from curl_cffi.requests.exceptions import ConnectionError
 
-    from src.client.base_client import HttpClient
-
-    client = HttpClient("http://localhost", retry_backoff_factor=0, retry_jitter_seconds=0)
+    client = make_http_client("http://localhost")
     request = AsyncMock(side_effect=[ConnectionError("disconnected"), {"ok": True}])
     monkeypatch.setattr(client, "_request_once", request)
     assert await client._request("GET", "test") == {"ok": True}
@@ -271,7 +265,9 @@ async def test_transport_retries_network_errors_and_propagates_cancellation(monk
     assert client.retries_made == 1
 
 
-@pytest.mark.parametrize("kwargs", [{"retry_attempts": 0}, {"timeout_seconds": 0}, {"retry_backoff_factor": -1}])
-def test_invalid_client_configuration_is_rejected(kwargs):
+@pytest.mark.parametrize(
+    "build_config", [lambda: RetryConfig(attempts=0), lambda: TimeoutPolicy(total=0), lambda: RetryConfig(backoff_factor=-1)]
+)
+def test_invalid_client_configuration_is_rejected(build_config):
     with pytest.raises(ValueError):
-        SeprecClient(**kwargs)
+        build_config()

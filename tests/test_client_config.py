@@ -50,31 +50,33 @@ def test_client_config_rejects_invalid_values():
         ClientConfig(base_url="https://example.test", transport="ftp")
 
 
-def test_settings_mapping_keeps_defaults_and_explicit_overrides(monkeypatch):
+def test_settings_mapping_uses_settings_and_readiness_probe(monkeypatch):
     monkeypatch.setenv("RETRY_ATTEMPTS", "5")
     resolved_settings = Settings.from_env()
     config = client_config_from_settings(
-        resolved_settings, base_url="https://example.test/api", timeout_seconds=7, proxy_mode="direct", proxy_mix_share=0.25
+        resolved_settings, proxy_check_path="catalog", proxy_check_payload={"codigo": ""}, project_dir=BASE_DIR
     )
 
-    assert config.base_url == "https://example.test/api"
+    assert config.base_url == resolved_settings.api_base_url
     assert config.timeouts == TimeoutConfig(
         api=TimeoutPolicy(
-            total=7,
+            total=resolved_settings.request_timeout_seconds,
             connect=resolved_settings.connect_timeout_seconds,
             sock_connect=resolved_settings.sock_connect_timeout_seconds,
             sock_read=resolved_settings.sock_read_timeout_seconds,
         ),
         detail=TimeoutPolicy(
-            total=7,
+            total=resolved_settings.detail_timeout_seconds,
             connect=resolved_settings.connect_timeout_seconds,
             sock_connect=resolved_settings.sock_connect_timeout_seconds,
             sock_read=resolved_settings.sock_read_timeout_seconds,
         ),
     )
     assert config.retry.attempts == 5
-    assert config.proxy.mode == "direct"
-    assert config.proxy.mix_share == 0.25
+    assert config.proxy.mode == resolved_settings.proxy_mode
+    assert config.proxy.mix_share == resolved_settings.proxy_mix_share
+    assert config.proxy.check_path == "catalog"
+    assert config.proxy.check_payload == {"codigo": ""}
 
 
 def test_seprec_client_uses_injected_config_without_global_settings():
@@ -84,7 +86,7 @@ def test_seprec_client_uses_injected_config_without_global_settings():
     client = SeprecClient(config=config)
     assert client.http.config is config
     assert client.proxy_mode == "direct"
-    assert client.http.base_url == "http://localhost/api"
+    assert client.http.config.base_url == "http://localhost/api"
 
 
 @pytest.mark.asyncio
@@ -95,10 +97,10 @@ async def test_client_ignores_stale_database_records(tmp_path):
         await database.replace_all([VerifiedProxy("http://stale.example:80", "UA", "aiohttp", checked_at=stale)])
 
     client = HttpClient(
-        "https://example.test",
-        proxy_db_path=db_path,
-        proxy_db_max_age_hours=24,
-        proxy_check_path="publicaciones/catalogos/lista",
+        ClientConfig(
+            base_url="https://example.test",
+            proxy=ProxyConfig(db_path=db_path, db_max_age_hours=24, check_path="publicaciones/catalogos/lista"),
+        )
     )
     try:
         assert await client._create_proxy_pool() is None

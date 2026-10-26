@@ -93,7 +93,7 @@ async def test_fresh_database_is_used_without_starting_the_collector(monkeypatch
 
     class FakeScraper:
         def __init__(self, **kwargs):
-            assert kwargs["proxy_db_path"] == db_path
+            assert kwargs["client_config"].proxy.db_path == db_path
             events.append("scraper_open")
 
         async def __aenter__(self):
@@ -133,7 +133,7 @@ async def test_partial_fresh_database_is_used_without_waiting_for_more(monkeypat
 
     class FakeScraper:
         def __init__(self, **kwargs):
-            assert kwargs["proxy_db_path"] == db_path
+            assert kwargs["client_config"].proxy.db_path == db_path
 
         async def __aenter__(self):
             return self
@@ -179,7 +179,7 @@ async def test_stale_database_starts_bounded_collection_then_falls_back_to_direc
 
     class FakeScraper:
         def __init__(self, **kwargs):
-            assert kwargs["proxy_db_path"] is None
+            assert kwargs["client_config"].proxy.db_path is None
             events.append("scraper_open")
 
         async def __aenter__(self):
@@ -242,7 +242,7 @@ async def test_collector_is_terminated_when_startup_timeout_expires(monkeypatch,
 
     class FakeScraper:
         def __init__(self, **kwargs):
-            assert kwargs["proxy_db_path"] is None
+            assert kwargs["client_config"].proxy.db_path is None
 
         async def __aenter__(self):
             return self

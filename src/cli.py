@@ -23,6 +23,7 @@ from typing import Any
 
 from config import settings
 from src import __version__
+from src.client.seprec_client import SeprecClient
 from src.models.publication import STATUS_FAILED
 from src.services.proxy_bootstrap import count_fresh_proxies, proxy_collector, wait_for_proxies
 from src.services.scraper import SeprecScraper
@@ -139,7 +140,8 @@ async def _run_once(args: argparse.Namespace) -> list[dict[str, Any]]:
 
 
 async def _run_scraper(args: argparse.Namespace, proxy_db: Path | None) -> list[dict[str, Any]]:
-    async with SeprecScraper(max_concurrency=settings.max_concurrent_requests, proxy_db_path=proxy_db) as scraper:
+    client_config = SeprecClient.config_from_settings(proxy_db_path=proxy_db)
+    async with SeprecScraper(client_config=client_config) as scraper:
         return await _execute_scrape(scraper, args)
 
 

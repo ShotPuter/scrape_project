@@ -7,17 +7,16 @@ import logging
 import random
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from enum import StrEnum
-from pathlib import Path
 from typing import Any, Self
 
 from curl_cffi.requests.exceptions import RequestException
 
 from src.client.aiohttp_session import NETWORK_ERRORS as AIOHTTP_NETWORK_ERRORS
-from src.client.config import ClientConfig, ProxyConfig, RetryConfig, TimeoutConfig
+from src.client.config import ClientConfig
 from src.client.errors import HTTPClientError
 from src.client.network import NetworkBudget, RequestMetrics, TimeoutPolicy, attempt_context, mark, proxy_id, work_context
 from src.client.proxy_pool import ProxyEndpoint, ProxyPool, dead_proxy_path, load_dead_proxies, load_proxies
@@ -44,134 +43,29 @@ class Route(StrEnum):
 
 
 class HttpClient:
-    def __init__(
-        self,
-        base_url: str = "",
-        headers: Mapping[str, str] | None = None,
-        timeout_seconds: float = 30,
-        retry_attempts: int = 3,
-        retry_backoff_factor: float = 1.5,
-        retry_jitter_seconds: float = 0.3,
-        connection_limit: int = 9,
-        impersonate: str = "chrome",
-        proxy_file: Path | None = None,
-        proxy_db_path: Path | None = None,
-        proxy_sample_size: int = 0,
-        proxy_check_concurrency: int = 5,
-        proxy_check_timeout: float = 10,
-        proxy_min_ready: int = 20,
-        proxy_replenish_threshold: int = 10,
-        proxy_failure_cooldown_seconds: float = 120,
-        proxy_max_failures: int = 3,
-        proxy_dead_ttl_hours: float = 1,
-        proxy_check_path: str = "",
-        proxy_check_payload: dict | None = None,
-        cookies_file: Path | None = None,
-        proxy_warmup: bool = True,
-        transport: str = "aiohttp",
-        api_timeout_policy: TimeoutPolicy | None = None,
-        detail_timeout_policy: TimeoutPolicy | None = None,
-        requests_per_second: float = 0,
-        proxy_per_ip_limit: int = 1,
-        proxy_probe_concurrency: int = 2,
-        proxy_acquire_timeout: float = 150,
-        direct_block_cooldown_seconds: float = 300,
-        proxy_mode: str = "pool",
-        proxy_mix_share: float = 0,
-        proxy_db_max_age_hours: float = 24,
-        proxy_warmup_timeout_seconds: float = 90,
-        config: ClientConfig | None = None,
-    ):
-        if config is None:
-            api_policy = api_timeout_policy or TimeoutPolicy(total=timeout_seconds)
-            config = ClientConfig(
-                base_url=base_url,
-                headers=dict(headers or {}),
-                timeouts=TimeoutConfig(api=api_policy, detail=detail_timeout_policy or api_policy),
-                retry=RetryConfig(retry_attempts, retry_backoff_factor, retry_jitter_seconds),
-                proxy=ProxyConfig(
-                    file=proxy_file,
-                    db_path=proxy_db_path,
-                    mode=proxy_mode,
-                    sample_size=proxy_sample_size,
-                    check_concurrency=proxy_check_concurrency,
-                    check_timeout=proxy_check_timeout,
-                    min_ready=proxy_min_ready,
-                    replenish_threshold=proxy_replenish_threshold,
-                    failure_cooldown_seconds=proxy_failure_cooldown_seconds,
-                    max_failures=proxy_max_failures,
-                    dead_ttl_hours=proxy_dead_ttl_hours,
-                    check_path=proxy_check_path,
-                    check_payload=dict(proxy_check_payload or {}),
-                    warmup=proxy_warmup,
-                    per_ip_limit=proxy_per_ip_limit,
-                    probe_concurrency=proxy_probe_concurrency,
-                    acquire_timeout=proxy_acquire_timeout,
-                    direct_block_cooldown_seconds=direct_block_cooldown_seconds,
-                    mix_share=proxy_mix_share,
-                    db_max_age_hours=proxy_db_max_age_hours,
-                    warmup_timeout_seconds=proxy_warmup_timeout_seconds,
-                ),
-                connection_limit=connection_limit,
-                impersonate=impersonate,
-                cookies_file=cookies_file,
-                transport=transport,
-                requests_per_second=requests_per_second,
-            )
+    def __init__(self, config: ClientConfig):
         self.config = config
-        proxy = config.proxy
-        self.retry_policy = config.retry
-        self.base_url = config.base_url
-        self.headers = dict(config.headers)
-        self.timeout = config.timeouts.api.total
-        self.api_timeout_policy = config.timeouts.api
-        self.detail_timeout_policy = config.timeouts.policy_for("detail")
         self.budget = NetworkBudget(config.connection_limit, config.requests_per_second)
         self.metrics = RequestMetrics()
-        self.proxy_per_ip_limit = proxy.per_ip_limit
-        self.proxy_probe_concurrency = proxy.probe_concurrency
-        self.proxy_acquire_timeout = proxy.acquire_timeout
-        self.proxy_mode = proxy.mode
-        self.direct_block_cooldown_seconds = proxy.direct_block_cooldown_seconds
-        self.proxy_mix_share = proxy.mix_share
         self._direct_blocked_until = 0.0
         self._direct_block_kind: str | None = None
         self._direct_net_failures = 0
         self._pool_watch_task: asyncio.Task[None] | None = None
         self._direct_retired: list[Any] = []
-        self.retry_attempts = self.retry_policy.attempts
-        self.retry_backoff_factor = self.retry_policy.backoff_factor
-        self.retry_jitter_seconds = self.retry_policy.jitter_seconds
-        self.proxy_file = proxy.file
-        self.proxy_db_path = proxy.db_path
-        self.proxy_sample_size = proxy.sample_size
-        self.proxy_check_concurrency = proxy.check_concurrency
-        self.proxy_check_timeout = proxy.check_timeout
-        self.proxy_min_ready = proxy.min_ready
-        self.proxy_replenish_threshold = proxy.replenish_threshold
-        self.proxy_failure_cooldown_seconds = proxy.failure_cooldown_seconds
-        self.proxy_max_failures = proxy.max_failures
-        self.proxy_dead_ttl_hours = proxy.dead_ttl_hours
-        self.proxy_db_max_age_hours = proxy.db_max_age_hours
-        self.proxy_warmup_timeout_seconds = proxy.warmup_timeout_seconds
-        self.proxy_check_path = proxy.check_path
-        self.proxy_check_payload = dict(proxy.check_payload)
-        self.proxy_warmup = proxy.warmup
         self.logger = logger
         self._session_factory = SessionFactory(
-            headers=self.headers,
-            timeout=self.timeout,
+            headers=dict(config.headers),
+            timeout=config.timeouts.api.total,
             connection_limit=config.connection_limit,
             impersonate=config.impersonate,
             cookies_file=config.cookies_file,
             transport=config.transport,
-            sock_read_timeout=self.api_timeout_policy.sock_read,
+            sock_read_timeout=config.timeouts.api.sock_read,
         )
         self._session = None
         self._proxy_pool: ProxyPool | None = None
         self._open_lock = asyncio.Lock()
         self._transport_lock = asyncio.Lock()
-        self.connection_limit = config.connection_limit
         self.requests_made = 0
         self.retries_made = 0
         self.run_id: str | None = None
@@ -187,16 +81,16 @@ class HttpClient:
         async with self._open_lock:
             if self._session is not None or self._proxy_pool is not None:
                 return
-            if not self.proxy_file and not self.proxy_db_path:
+            if not self.config.proxy.file and not self.config.proxy.db_path:
                 self._session = self._session_factory.create()
                 return
-            if self.proxy_mode == "direct":
+            if self.config.proxy.mode == "direct":
                 self.logger.warning("PROXY_MODE=direct: proxy configuration ignored, scraping without proxies")
                 self._session = self._session_factory.create()
                 return
             pool = await self._create_proxy_pool()
             self._proxy_pool = pool
-            if self.proxy_mode == "fallback" or pool is None:
+            if self.config.proxy.mode == "fallback" or pool is None:
                 # Fallback keeps a healthy direct session; the pool is only used when
                 # the origin blocks the direct route. Pool mode creates its direct
                 # fallback lazily, only if the pool turns out to be empty.
@@ -240,22 +134,22 @@ class HttpClient:
 
     async def _create_proxy_pool(self) -> ProxyPool | None:
         proxies: Sequence[ProxyEndpoint | str]
-        if self.proxy_db_path is not None:
-            max_age = self.proxy_db_max_age_hours if self.proxy_db_max_age_hours > 0 else None
-            async with ProxyDatabase(self.proxy_db_path) as database:
-                records = await database.list_active(limit=self.proxy_sample_size or None, max_age_hours=max_age)
-            dead_path = dead_proxy_path(self.proxy_db_path)
-            dead = load_dead_proxies(dead_path, self.proxy_dead_ttl_hours)
+        if self.config.proxy.db_path is not None:
+            max_age = self.config.proxy.db_max_age_hours if self.config.proxy.db_max_age_hours > 0 else None
+            async with ProxyDatabase(self.config.proxy.db_path) as database:
+                records = await database.list_active(limit=self.config.proxy.sample_size or None, max_age_hours=max_age)
+            dead_path = dead_proxy_path(self.config.proxy.db_path)
+            dead = load_dead_proxies(dead_path, self.config.proxy.dead_ttl_hours)
             records = [record for record in records if record.url not in dead]
             if not records:
-                if self.proxy_mode == "always":
+                if self.config.proxy.mode == "always":
                     raise RuntimeError(
                         "No fresh verified proxies found in the database; run `python main.py --collect-proxies`"
                     )
-                age = f"{self.proxy_db_max_age_hours:.0f}h" if max_age else "disabled"
+                age = f"{self.config.proxy.db_max_age_hours:.0f}h" if max_age else "disabled"
                 self.logger.warning(
                     "No fresh verified proxies in %s (freshness window: %s); continuing with direct requests only",
-                    self.proxy_db_path,
+                    self.config.proxy.db_path,
                     age,
                 )
                 return None
@@ -266,31 +160,31 @@ class HttpClient:
                 for record in records
             ]
         else:
-            if self.proxy_file is None:
+            if self.config.proxy.file is None:
                 raise ValueError("Proxy mode requires a proxy file or proxy database")
-            dead_path = dead_proxy_path(self.proxy_file)
+            dead_path = dead_proxy_path(self.config.proxy.file)
             proxies = load_proxies(
-                self.proxy_file,
-                self.proxy_sample_size or None,
+                self.config.proxy.file,
+                self.config.proxy.sample_size or None,
                 dead_path=dead_path,
-                dead_ttl_hours=self.proxy_dead_ttl_hours,
+                dead_ttl_hours=self.config.proxy.dead_ttl_hours,
             )
 
         pool = ProxyPool(
             proxies,
             self._session_factory.create,
             dead_path=dead_path,
-            dead_ttl_hours=self.proxy_dead_ttl_hours,
-            min_ready=self.proxy_min_ready,
-            replenish_threshold=self.proxy_replenish_threshold,
-            failure_cooldown_seconds=self.proxy_failure_cooldown_seconds,
-            max_failures=self.proxy_max_failures,
-            per_ip_limit=self.proxy_per_ip_limit,
+            dead_ttl_hours=self.config.proxy.dead_ttl_hours,
+            min_ready=self.config.proxy.min_ready,
+            replenish_threshold=self.config.proxy.replenish_threshold,
+            failure_cooldown_seconds=self.config.proxy.failure_cooldown_seconds,
+            max_failures=self.config.proxy.max_failures,
+            per_ip_limit=self.config.proxy.per_ip_limit,
             network_budget=self.budget,
             metrics=self.metrics,
         )
         pool.configure_warmup(*self._pool_warmup_args())
-        if not self.proxy_warmup:
+        if not self.config.proxy.warmup:
             try:
                 self._add_proxy_sessions(pool, proxies)
             except asyncio.CancelledError:
@@ -298,11 +192,11 @@ class HttpClient:
                 raise
             except Exception as exc:  # noqa: BLE001 - direct-only fallback stays usable
                 await pool.close()
-                if self.proxy_mode == "always":
+                if self.config.proxy.mode == "always":
                     raise
                 self.logger.warning("Proxy pool unusable (%s); continuing with direct requests", exc)
                 return None
-        elif self.proxy_mode == "fallback":
+        elif self.config.proxy.mode == "fallback":
             # Fallback must not gate the run on warmup: direct requests start
             # immediately while the background watch reports ready/failure later.
             self._start_background_warmup(pool, len(proxies))
@@ -314,7 +208,7 @@ class HttpClient:
                 raise
             except Exception as exc:  # noqa: BLE001 - pool mode still has a direct fallback
                 await pool.close()
-                if self.proxy_mode == "always":
+                if self.config.proxy.mode == "always":
                     raise
                 self.logger.warning("Proxy pool unusable (%s); continuing with direct requests", exc)
                 return None
@@ -322,10 +216,10 @@ class HttpClient:
 
     def _pool_warmup_args(self) -> tuple[str, dict[str, Any], int, float]:
         return (
-            f"{self.base_url}/{self.proxy_check_path.lstrip('/')}",
-            self.proxy_check_payload,
-            min(self.proxy_check_concurrency, self.proxy_probe_concurrency),
-            self.proxy_check_timeout,
+            f"{self.config.base_url}/{self.config.proxy.check_path.lstrip('/')}",
+            dict(self.config.proxy.check_payload),
+            min(self.config.proxy.check_concurrency, self.config.proxy.probe_concurrency),
+            self.config.proxy.check_timeout,
         )
 
     def _start_background_warmup(self, pool: ProxyPool, candidate_count: int) -> None:
@@ -349,18 +243,18 @@ class HttpClient:
         self.logger.info(
             "Checking %d proxy candidates against the API (timeout %.0fs)...",
             len(proxies),
-            self.proxy_warmup_timeout_seconds,
+            self.config.proxy.warmup_timeout_seconds,
         )
         pool.start_warmup(*self._pool_warmup_args())
         try:
-            async with asyncio.timeout(self.proxy_warmup_timeout_seconds):
+            async with asyncio.timeout(self.config.proxy.warmup_timeout_seconds):
                 await pool.wait_until_ready()
         except TimeoutError as exc:
             if not pool.sessions:
-                raise RuntimeError(f"No proxy became ready within {self.proxy_warmup_timeout_seconds:.0f}s") from exc
+                raise RuntimeError(f"No proxy became ready within {self.config.proxy.warmup_timeout_seconds:.0f}s") from exc
             self.logger.warning(
                 "Proxy warmup did not finish within %.0fs; starting with %d ready proxy(s) while warmup continues",
-                self.proxy_warmup_timeout_seconds,
+                self.config.proxy.warmup_timeout_seconds,
                 len(pool.sessions),
             )
             return
@@ -396,7 +290,7 @@ class HttpClient:
                 self._direct_retired.append(transport.raw)
 
     def _backoff_seconds(self, attempt: int, retry_after: str | None = None) -> float:
-        return self.retry_policy.delay_for(attempt, retry_after)
+        return self.config.retry.delay_for(attempt, retry_after)
 
     def _timeout_policy_for(self, session, policy: TimeoutPolicy) -> TimeoutPolicy:
         latency_ms = self._proxy_pool.latency_for(session) if self._proxy_pool is not None else 0.0
@@ -428,23 +322,28 @@ class HttpClient:
 
         route, reason = self._route_decision(ready, blocked)
         self.logger.debug(
-            "route=%s reason=%s blocked=%s pool_ready=%d mode=%s", route.value, reason, blocked, ready, self.proxy_mode
+            "route=%s reason=%s blocked=%s pool_ready=%d mode=%s",
+            route.value,
+            reason,
+            blocked,
+            ready,
+            self.config.proxy.mode,
         )
         return route
 
     def _route_decision(self, ready: int, blocked: bool) -> tuple[Route, str]:
-        if self.proxy_mode == "direct":
+        if self.config.proxy.mode == "direct":
             return Route.DIRECT, "direct mode"
         if self._proxy_pool is None:
             return Route.DIRECT, "no pool"
-        if self.proxy_mode != "fallback":
+        if self.config.proxy.mode != "fallback":
             reason = "pool primary" if ready else "pool primary, waiting for capacity"
             return Route.POOL, reason
         if blocked and self._direct_block_kind == "network" and not ready:
             return Route.DIRECT, "network block with empty pool"
         if blocked:
             return Route.POOL, "direct blocked"
-        if ready and self.proxy_mix_share > 0 and random.random() < self.proxy_mix_share:
+        if ready and self.config.proxy.mix_share > 0 and random.random() < self.config.proxy.mix_share:
             return Route.POOL, "mix share"
         return Route.DIRECT, "direct primary"
 
@@ -453,7 +352,11 @@ class HttpClient:
         if route is Route.POOL and self._proxy_pool is not None:
             # In fallback mode waiting for a proxy must never stall a worker for
             # minutes: direct downtime is bounded, so the lease wait is bounded too.
-            timeout = min(self.proxy_acquire_timeout, 20.0) if self.proxy_mode == "fallback" else self.proxy_acquire_timeout
+            timeout = (
+                min(self.config.proxy.acquire_timeout, 20.0)
+                if self.config.proxy.mode == "fallback"
+                else self.config.proxy.acquire_timeout
+            )
             event = attempt_context.get() or {}
             leased = False
             try:
@@ -463,7 +366,7 @@ class HttpClient:
                     yield session
                     return
             except HTTPClientError:
-                if leased or self.proxy_mode != "pool":
+                if leased or self.config.proxy.mode != "pool":
                     raise
                 self.logger.warning("Proxy pool has no usable sessions; using a direct request")
         session = await self._direct_session()
@@ -488,9 +391,9 @@ class HttpClient:
         if self._proxy_pool is None:
             return
         seconds = (
-            self.direct_block_cooldown_seconds
+            self.config.proxy.direct_block_cooldown_seconds
             if cooldown_seconds is None
-            else max(1.0, min(cooldown_seconds, self.direct_block_cooldown_seconds))
+            else max(1.0, min(cooldown_seconds, self.config.proxy.direct_block_cooldown_seconds))
         )
         now = time.monotonic()
         if kind == "network" and now < self._direct_blocked_until:
@@ -578,7 +481,9 @@ class HttpClient:
 
     async def _send(self, transport: Transport, method: str, url: str, json_data, params):
         event = attempt_context.get() or {}
-        policy = self.detail_timeout_policy if event.get("endpoint_kind") == "detail" else self.api_timeout_policy
+        policy = (
+            self.config.timeouts.policy_for("detail") if event.get("endpoint_kind") == "detail" else self.config.timeouts.api
+        )
         if self._proxy_pool is not None:
             latency_ms = self._proxy_pool.latency_for(transport.raw)
             if latency_ms:
@@ -624,12 +529,12 @@ class HttpClient:
     async def _request(
         self, method: str, path: str, json_data: dict[str, Any] | None = None, params: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        url = f"{self.base_url}/{path.lstrip('/')}"
+        url = f"{self.config.base_url}/{path.lstrip('/')}"
         previous_proxy = None
         path_parts = path.strip("/").split("/")
         kind = "detail" if method == "GET" and len(path_parts) == 2 and path_parts[0] == "publicaciones" else "api"
         request_id = uuid.uuid4().hex
-        for attempt in range(1, self.retry_attempts + 1):
+        for attempt in range(1, self.config.retry.attempts + 1):
             self.requests_made += 1
             if attempt > 1:
                 self.retries_made += 1
@@ -650,13 +555,13 @@ class HttpClient:
                 return data
             except HTTPClientError as exc:
                 event["error_class"] = event.get("error_class", type(exc).__name__)
-                if not exc.retryable or attempt == self.retry_attempts:
+                if not exc.retryable or attempt == self.config.retry.attempts:
                     raise
                 error = exc
             except NETWORK_ERRORS as exc:
                 event["error_class"] = type(exc).__name__
                 error = HTTPClientError(f"Network error: {type(exc).__name__}", retryable=True)
-                if attempt == self.retry_attempts:
+                if attempt == self.config.retry.attempts:
                     raise error from exc
             except asyncio.CancelledError:
                 event["error_class"] = "CancelledError"
@@ -674,7 +579,7 @@ class HttpClient:
 
     async def _wait_before_retry(self, error: HTTPClientError, attempt: int) -> None:
         delay = self._backoff_seconds(attempt, error.retry_after)
-        self.logger.warning("%s. Retrying in %.2fs (attempt %d/%d)", error, delay, attempt + 1, self.retry_attempts)
+        self.logger.warning("%s. Retrying in %.2fs (attempt %d/%d)", error, delay, attempt + 1, self.config.retry.attempts)
         await asyncio.sleep(delay)
 
 

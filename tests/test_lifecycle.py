@@ -4,16 +4,16 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.client.base_client import HttpClient
 from src.client.proxy_pool import ProxyPool
 from src.services.scraper import SeprecScraper
 from src.storage.file_storage import FileStorage
 from src.storage.publication_csv import PublicationCsv
+from tests.helpers import make_http_client
 
 
 @pytest.mark.asyncio
 async def test_client_close_releases_pool_even_when_direct_session_close_fails():
-    client = HttpClient("https://example.test")
+    client = make_http_client()
     session = AsyncMock()
     session.close.side_effect = RuntimeError("already closed")
     pool = AsyncMock()

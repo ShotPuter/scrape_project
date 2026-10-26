@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from config import settings
+from src.client.config import ClientConfig
 from src.client.network import work_context
 from src.client.seprec_client import SeprecClient
 from src.models.publication import (
@@ -86,21 +87,12 @@ class SeprecScraper:
         store: PublicationCsv | None = None,
         file_storage: FileStorage | None = None,
         max_concurrency: int | None = None,
-        proxy_warmup: bool | None = None,
-        proxy_file: str | None = None,
-        proxy_db_path: str | Path | None = None,
-        transport: str | None = None,
-        proxy_mode: str | None = None,
+        client_config: ClientConfig | None = None,
     ):
-        self.max_concurrency = max_concurrency or settings.max_concurrent_requests
-        self.client = client or SeprecClient(
-            connection_limit=self.max_concurrency,
-            proxy_warmup=proxy_warmup,
-            proxy_file=Path(proxy_file) if proxy_file else None,
-            proxy_db_path=Path(proxy_db_path) if proxy_db_path else None,
-            transport=transport,
-            proxy_mode=proxy_mode,
+        self.max_concurrency = max_concurrency or (
+            client_config.connection_limit if client_config else settings.max_concurrent_requests
         )
+        self.client = client or SeprecClient(config=client_config)
         self.store = store or PublicationCsv()
         self.file_storage = file_storage or FileStorage()
         self.semaphore = asyncio.Semaphore(self.max_concurrency)

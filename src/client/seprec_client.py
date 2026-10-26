@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Self, TypeVar
 
@@ -23,6 +23,7 @@ CATALOGS_ADAPTER = TypeAdapter(list[CatalogItem])
 SUMMARIES_ADAPTER = TypeAdapter(list[PublicationSummary])
 DETAIL_ADAPTER = TypeAdapter(PublicationDetail)
 CATALOGS_ENDPOINT = "publicaciones/catalogos/lista"
+CATALOGS_PAYLOAD = {"codigo": ""}
 PUBLICATIONS_SEARCH_ENDPOINT = "publicaciones"
 RATE_LIMIT_STATUS_CODE = 429
 
@@ -36,49 +37,25 @@ class SeprecClient:
     root as a ``ClientConfig`` (or from ``Settings`` as a convenience default).
     """
 
-    def __init__(
-        self,
-        base_url: str | None = None,
-        headers: Mapping[str, str] | None = None,
-        timeout_seconds: int | None = None,
-        retry_attempts: int | None = None,
-        retry_backoff_factor: float | None = None,
-        retry_jitter_seconds: float | None = None,
-        connection_limit: int | None = None,
-        proxy_warmup: bool | None = None,
-        proxy_file: Path | None = None,
-        proxy_db_path: Path | None = None,
-        transport: str | None = None,
-        proxy_mode: str | None = None,
-        proxy_mix_share: float | None = None,
-        config: ClientConfig | None = None,
-        app_settings: Settings | None = None,
-    ) -> None:
-        resolved_settings = app_settings or settings
-        self._client = HttpClient(
-            config=config
-            or client_config_from_settings(
-                resolved_settings,
-                base_url=base_url,
-                headers=headers,
-                timeout_seconds=timeout_seconds,
-                retry_attempts=retry_attempts,
-                retry_backoff_factor=retry_backoff_factor,
-                retry_jitter_seconds=retry_jitter_seconds,
-                connection_limit=connection_limit,
-                proxy_warmup=proxy_warmup,
-                proxy_file=proxy_file,
-                proxy_db_path=proxy_db_path,
-                transport=transport,
-                proxy_mode=proxy_mode,
-                proxy_mix_share=proxy_mix_share,
-                proxy_check_path=CATALOGS_ENDPOINT,
-                proxy_check_payload={"codigo": ""},
-                project_dir=BASE_DIR,
-            )
-        )
+    def __init__(self, config: ClientConfig | None = None, app_settings: Settings | None = None) -> None:
+        self._client = HttpClient(config=config or self.config_from_settings(app_settings))
         self.logger = logger
         self.metrics_before_run: dict[str, int] = {}
+
+    @classmethod
+    def config_from_settings(
+        cls, app_settings: Settings | None = None, *, proxy_db_path: Path | None = None
+    ) -> ClientConfig:
+        """Build the site-specific client config from application settings."""
+        config = client_config_from_settings(
+            app_settings or settings,
+            proxy_check_path=CATALOGS_ENDPOINT,
+            proxy_check_payload=CATALOGS_PAYLOAD,
+            project_dir=BASE_DIR,
+        )
+        if proxy_db_path is None:
+            return config
+        return replace(config, proxy=replace(config.proxy, db_path=proxy_db_path))
 
     @property
     def http(self) -> HttpClient:
@@ -102,7 +79,7 @@ class SeprecClient:
 
     @property
     def proxy_mode(self) -> str:
-        return self._client.proxy_mode
+        return self._client.config.proxy.mode
 
     @property
     def run_id(self) -> str | None:
@@ -127,7 +104,7 @@ class SeprecClient:
 
     async def get_catalogs(self) -> list[CatalogItem]:
         """Fetch categories and subcategories definitions from SEPREC catalog."""
-        response_payload = await self._request_data("POST", CATALOGS_ENDPOINT, {"codigo": ""})
+        response_payload = await self._request_data("POST", CATALOGS_ENDPOINT, CATALOGS_PAYLOAD)
         return self._validate_response(CATALOGS_ADAPTER, response_payload, CATALOGS_ENDPOINT)
 
     async def search_publications(self, filters: PublicationSearchFilter) -> tuple[int, list[PublicationSummary]]:
