@@ -9,7 +9,7 @@ import pytest
 from aiohttp import web
 from test_client import local_api
 
-from src.client.base_client import BaseHTTPClient, Route
+from src.client.base_client import HttpClient, Route
 from src.client.errors import HTTPClientError
 from src.client.network import NetworkBudget, TimeoutPolicy, proxy_id
 from src.client.proxy_pool import ProxyEndpoint, ProxyPool
@@ -31,7 +31,7 @@ async def test_incomplete_read_retries_another_proxy_and_closes_retired():
     pool = ProxyPool([], lambda **kw: None)
     pool.add_session("http://one:80", first)
     pool.add_session("http://two:80", second)
-    client = BaseHTTPClient("https://example.test", retry_backoff_factor=0, retry_jitter_seconds=0)
+    client = HttpClient("https://example.test", retry_backoff_factor=0, retry_jitter_seconds=0)
     client._proxy_pool = pool
     try:
         assert await client._request("GET", "publicaciones/1") == Response().json()
@@ -53,9 +53,10 @@ async def test_cooldown_wakes_empty_pool_and_readiness_preserves_failures():
     pool.add_session("http://one:80", original)
     pool.discard(original)
     try:
-        assert await pool.wait_for_session(1)
-        assert pool._failure_counts["http://one:80"] == 1
-        pool.record_runtime_success(replacement)
+        async with pool.lease(1) as session:
+            assert session is replacement
+            assert pool._failure_counts["http://one:80"] == 1
+            pool.record_runtime_success(session)
         assert "http://one:80" not in pool._failure_counts
     finally:
         await pool.close()
@@ -151,7 +152,7 @@ async def test_document_total_is_separate_from_api_timeout():
     app.router.add_post("/api/publicaciones", slow)
     async with (
         local_api(app) as base_url,
-        BaseHTTPClient(
+        HttpClient(
             base_url,
             retry_attempts=1,
             api_timeout_policy=TimeoutPolicy(total=0.02),
@@ -177,7 +178,7 @@ async def test_read_inactivity_is_identified_separately():
     app.router.add_get("/api/publicaciones/1", slow_body)
     async with (
         local_api(app) as base_url,
-        BaseHTTPClient(base_url, retry_attempts=1, detail_timeout_policy=TimeoutPolicy(total=0.5, sock_read=0.02)) as client,
+        HttpClient(base_url, retry_attempts=1, detail_timeout_policy=TimeoutPolicy(total=0.5, sock_read=0.02)) as client,
     ):
         with pytest.raises(HTTPClientError):
             await client._request("GET", "publicaciones/1")
@@ -193,7 +194,7 @@ async def test_traces_measure_full_body_and_decode_without_credentials(caplog):
 
     app = web.Application()
     app.router.add_get("/api/publicaciones/1", handler)
-    async with local_api(app) as base_url, BaseHTTPClient(base_url) as client:
+    async with local_api(app) as base_url, HttpClient(base_url) as client:
         await client._request("GET", "publicaciones/1")
         event = client.metrics.samples[-1]
         assert event["response_bytes"] > 0
@@ -213,7 +214,7 @@ async def test_no_warmup_still_allows_runtime_recovery(tmp_path):
     first, second = AsyncMock(), AsyncMock()
     first.request.side_effect = asyncio.IncompleteReadError(b"", 2)
     second.post.return_value = second.request.return_value = Response()
-    client = BaseHTTPClient(
+    client = HttpClient(
         "https://example.test",
         proxy_file=source,
         proxy_check_path="catalog",
@@ -262,7 +263,7 @@ async def test_proxy_credentials_are_not_logged(caplog):
     failed.request.side_effect = ConnectionError(f"Failed to connect to {secret_url}")
     pool = ProxyPool([], lambda **kw: None)
     pool.add_session(secret_url, failed)
-    client = BaseHTTPClient("https://example.test", retry_attempts=1)
+    client = HttpClient("https://example.test", retry_attempts=1)
     client._proxy_pool = pool
     with caplog.at_level(logging.DEBUG):
         try:
@@ -277,7 +278,7 @@ async def test_proxy_credentials_are_not_logged(caplog):
 
 @pytest.mark.asyncio
 async def test_global_slot_wait_is_outside_request_timeout():
-    client = BaseHTTPClient("https://example.test", connection_limit=1, api_timeout_policy=TimeoutPolicy(total=0.01))
+    client = HttpClient("https://example.test", connection_limit=1, api_timeout_policy=TimeoutPolicy(total=0.01))
     client._session = AsyncMock()
     client._session.request.return_value = Response()
     try:
@@ -326,8 +327,8 @@ class FakeResponse:
         return self._payload
 
 
-def fallback_client(direct, proxied, **overrides) -> BaseHTTPClient:
-    client = BaseHTTPClient(
+def fallback_client(direct, proxied, **overrides) -> HttpClient:
+    client = HttpClient(
         "https://example.test",
         proxy_mode="fallback",
         retry_attempts=overrides.pop("attempts", 3),
@@ -433,7 +434,7 @@ async def test_cloudflare_challenge_on_direct_is_retried_via_proxies():
 async def test_cloudflare_challenge_stays_final_without_a_pool():
     direct = AsyncMock()
     direct.request.return_value = FakeResponse(403, headers={"cf-mitigated": "challenge"})
-    client = BaseHTTPClient("https://example.test", retry_attempts=2, retry_backoff_factor=0, retry_jitter_seconds=0)
+    client = HttpClient("https://example.test", retry_attempts=2, retry_backoff_factor=0, retry_jitter_seconds=0)
     client._session = direct
     with pytest.raises(HTTPClientError) as exc_info:
         await client._request("GET", "publicaciones/1")
@@ -466,7 +467,7 @@ async def test_mix_share_routes_share_of_attempts_through_pool():
     proxied.request.return_value = FakeResponse()
     client = fallback_client(direct, proxied, proxy_mix_share=1)
     try:
-        assert await client._use_direct_for_attempt() is False
+        assert client._route() is Route.POOL
     finally:
         await client.close()
 
@@ -477,7 +478,7 @@ async def test_zero_mix_share_keeps_all_attempts_direct():
     direct.request.return_value = FakeResponse()
     client = fallback_client(direct, proxied)
     try:
-        assert await client._use_direct_for_attempt() is True
+        assert client._route() is Route.DIRECT
     finally:
         await client.close()
 
@@ -501,7 +502,7 @@ async def test_pool_mode_prefers_the_proxy_pool():
     direct, proxied = AsyncMock(), AsyncMock()
     direct.request.return_value = FakeResponse()
     proxied.request.return_value = FakeResponse()
-    client = BaseHTTPClient("https://example.test", proxy_mode="pool", retry_backoff_factor=0, retry_jitter_seconds=0)
+    client = HttpClient("https://example.test", proxy_mode="pool", retry_backoff_factor=0, retry_jitter_seconds=0)
     client._session = direct
     client._proxy_pool = FakePool(proxied)
     try:
@@ -517,7 +518,7 @@ async def test_pool_mode_prefers_the_proxy_pool():
 async def test_pool_mode_uses_direct_when_the_pool_is_empty():
     direct, proxied = AsyncMock(), AsyncMock()
     direct.request.return_value = FakeResponse()
-    client = BaseHTTPClient("https://example.test", proxy_mode="pool", retry_backoff_factor=0, retry_jitter_seconds=0)
+    client = HttpClient("https://example.test", proxy_mode="pool", retry_backoff_factor=0, retry_jitter_seconds=0)
     client._session = direct
     client._proxy_pool = UnusablePool(proxied)
     try:
@@ -548,7 +549,7 @@ async def test_fallback_blocked_with_empty_pool_does_not_use_direct():
 async def test_network_block_with_empty_pool_keeps_trying_direct():
     direct, proxied = AsyncMock(), AsyncMock()
     direct.request.side_effect = TimeoutError()
-    client = BaseHTTPClient(
+    client = HttpClient(
         "https://example.test", proxy_mode="fallback", retry_attempts=3, retry_backoff_factor=0, retry_jitter_seconds=0
     )
     client._session = direct
@@ -567,7 +568,7 @@ def test_slow_proxy_gets_a_larger_timeout_policy():
     session = object()
     pool = ProxyPool([], lambda **kw: None)
     pool.add_session(ProxyEndpoint("http://slow:80", latency_ms=10_000), session)
-    client = BaseHTTPClient("https://example.test")
+    client = HttpClient("https://example.test")
     client._proxy_pool = pool
     base = TimeoutPolicy(total=30, connect=10, sock_connect=10, sock_read=30)
 
@@ -583,7 +584,7 @@ def test_fast_proxy_keeps_the_base_timeout_policy():
     session = object()
     pool = ProxyPool([], lambda **kw: None)
     pool.add_session(ProxyEndpoint("http://fast:80", latency_ms=1_000), session)
-    client = BaseHTTPClient("https://example.test")
+    client = HttpClient("https://example.test")
     client._proxy_pool = pool
     base = TimeoutPolicy(total=30, connect=10, sock_connect=10, sock_read=30)
 

@@ -26,11 +26,6 @@ class ProxyAddress:
         host = f"[{self.host}]" if ":" in self.host else self.host
         return f"{host}:{self.port}"
 
-    @property
-    def masked(self) -> str:
-        """Return a log-safe URL that omits credentials."""
-        return f"{self.scheme}://{self.host_port}"
-
 
 def parse_proxy_url(raw_value: str, *, default_scheme: str = DEFAULT_PROXY_SCHEME) -> ProxyAddress | None:
     """Validate a proxy line and return its structured representation.
@@ -90,9 +85,3 @@ def is_socks_proxy(raw_value: str | None) -> bool:
         return urlsplit(raw_value).scheme.lower().startswith("socks")
     except ValueError:
         return False
-
-
-def mask_proxy_url(raw_value: str) -> str:
-    """Return a proxy URL safe for logs (credentials stripped)."""
-    address = parse_proxy_url(raw_value)
-    return address.masked if address is not None else "<invalid-proxy>"

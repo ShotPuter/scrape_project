@@ -455,9 +455,6 @@ class HttpClient:
             return Route.POOL, "mix share"
         return Route.DIRECT, "direct primary"
 
-    async def _use_direct_for_attempt(self) -> bool:
-        return self._route() is Route.DIRECT
-
     @asynccontextmanager
     async def _lease(self, route: Route):
         if route is Route.POOL and self._proxy_pool is not None:
@@ -689,7 +686,6 @@ class HttpClient:
 
 
 # Backwards-compatible name: the client is designed for composition, not subclassing.
-BaseHTTPClient = HttpClient
 
 
 def _retry_after_from_response(response) -> str | None:

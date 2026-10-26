@@ -10,7 +10,7 @@ import pytest
 from src.client.readiness import is_catalog_payload, is_ready_response, is_search_payload
 from src.utils.atomic import atomic_text_writer, atomic_write_bytes, atomic_write_json, atomic_write_text
 from src.utils.http import parse_retry_after
-from src.utils.proxy_url import is_socks_proxy, mask_proxy_url, normalize_proxy_url, parse_proxy_url, proxy_host
+from src.utils.proxy_url import is_socks_proxy, normalize_proxy_url, parse_proxy_url, proxy_host
 
 
 def test_parse_proxy_url_accepts_supported_addresses():
@@ -24,7 +24,6 @@ def test_parse_proxy_url_accepts_supported_addresses():
     assert address.username == "user"
     assert address.password == "pass"
     assert address.host_port == "proxy.example:1080"
-    assert address.masked == "socks5://proxy.example:1080"
     assert normalize_proxy_url("127.0.0.1:8080") == "http://127.0.0.1:8080"
     assert normalize_proxy_url("HTTP://Proxy.Example:3128") == "http://Proxy.Example:3128"
 
@@ -42,14 +41,22 @@ def test_parse_proxy_url_supports_ipv6_and_rejects_bad_values():
     assert normalize_proxy_url("   ") is None
 
 
-def test_proxy_display_and_scheme_helpers():
+def test_proxy_scheme_and_parse_helpers():
     assert proxy_host("http://user:pass@proxy.example:8080") == "proxy.example"
     assert proxy_host("not-a-url") == "not-a-url"
     assert is_socks_proxy("socks5h://proxy.example:1080") is True
     assert is_socks_proxy("http://proxy.example:8080") is False
     assert is_socks_proxy(None) is False
-    assert mask_proxy_url("http://user:pass@proxy.example:8080") == "http://proxy.example:8080"
-    assert mask_proxy_url("bad") == "<invalid-proxy>"
+    address = parse_proxy_url("http://user:pass@proxy.example:8080")
+    assert address is not None
+    assert (address.scheme, address.host, address.port, address.username, address.password) == (
+        "http",
+        "proxy.example",
+        8080,
+        "user",
+        "pass",
+    )
+    assert parse_proxy_url("bad") is None
 
 
 def test_atomic_write_helpers_replace_content_and_clean_temporary_files(tmp_path):

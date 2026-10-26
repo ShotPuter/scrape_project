@@ -42,10 +42,9 @@ from src.client.proxy_source import ProxySourceError, sync_proxy_source
 from src.services.proxy_verifier import Stage1Result, Stage2Result, compatible_transports, verify_stage1, verify_stage2
 from src.storage.proxy_database import ProxyDatabase, VerifiedProxy
 from src.utils.atomic import atomic_write_json
-from src.utils.proxy_url import SUPPORTED_PROXY_SCHEMES, normalize_proxy_url, parse_proxy_url, proxy_host
+from src.utils.proxy_url import normalize_proxy_url, parse_proxy_url, proxy_host
 
 PROGRESS_EVERY = 25
-SUPPORTED_SCHEMES = SUPPORTED_PROXY_SCHEMES
 DEFAULT_USER_AGENTS = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",

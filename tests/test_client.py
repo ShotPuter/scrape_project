@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 import pytest
 from aiohttp import web
 
+from src.client.config import RetryConfig
 from src.client.seprec_client import SeprecClient
 from src.models.publication import PublicationSearchFilter
 from src.utils.helpers import SeprecAPIError
@@ -243,11 +244,11 @@ def test_retry_after_supports_http_dates():
     from datetime import UTC, datetime, timedelta
     from email.utils import format_datetime
 
-    client = make_client("http://localhost")
+    retry = RetryConfig(backoff_factor=0.01, jitter_seconds=0)
     deadline = datetime.now(UTC) + timedelta(seconds=30)
-    assert 28 <= client._backoff_seconds(1, format_datetime(deadline, usegmt=True)) <= 30
-    assert client._backoff_seconds(1, "invalid") == 0.01
-    assert client._backoff_seconds(1, "1562") == 60
+    assert 28 <= retry.delay_for(1, format_datetime(deadline, usegmt=True)) <= 30
+    assert retry.delay_for(1, "invalid") == 0.01
+    assert retry.delay_for(1, "1562") == 60
 
 
 @pytest.mark.asyncio
@@ -257,9 +258,9 @@ async def test_transport_retries_network_errors_and_propagates_cancellation(monk
 
     from curl_cffi.requests.exceptions import ConnectionError
 
-    from src.client.base_client import BaseHTTPClient
+    from src.client.base_client import HttpClient
 
-    client = BaseHTTPClient("http://localhost", retry_backoff_factor=0, retry_jitter_seconds=0)
+    client = HttpClient("http://localhost", retry_backoff_factor=0, retry_jitter_seconds=0)
     request = AsyncMock(side_effect=[ConnectionError("disconnected"), {"ok": True}])
     monkeypatch.setattr(client, "_request_once", request)
     assert await client._request("GET", "test") == {"ok": True}

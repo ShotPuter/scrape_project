@@ -48,19 +48,6 @@ def file_problem(path: str | None, expected_size: int | None) -> str | None:
     return None
 
 
-def inspect_storage(csv_path: Path) -> dict[str, Any]:
-    """Audit all saved records in CSV index against actual files on disk."""
-    records = read_records(csv_path)
-    problems = []
-
-    for record in records.values():
-        issue_reason = file_problem(record.file_path, record.file_size_bytes)
-        if issue_reason is not None:
-            problems.append({"id": record.id, "file_path": record.file_path, "reason": issue_reason})
-
-    return {"checked": len(records), "invalid": len(problems), "problems": problems}
-
-
 def read_records(path: Path) -> dict[str, PublicationRecord]:
     """Read CSV storage index into in-memory dictionary of verified PublicationRecords."""
     if not path.exists():

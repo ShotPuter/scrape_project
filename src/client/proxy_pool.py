@@ -21,11 +21,10 @@ from src.client.network import NetworkBudget, RequestMetrics, attempt_context, p
 from src.client.readiness import is_ready_response
 from src.utils.atomic import atomic_write_json
 from src.utils.http import parse_retry_after
-from src.utils.proxy_url import SUPPORTED_PROXY_SCHEMES as _SUPPORTED_PROXY_SCHEMES, normalize_proxy_url, proxy_host
+from src.utils.proxy_url import normalize_proxy_url, proxy_host
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_PROXY_SCHEMES = _SUPPORTED_PROXY_SCHEMES
 DEAD_PROXY_TTL_HOURS = 1.0
 WARMUP_PROGRESS_EVERY = 25
 WARMUP_PROGRESS_SECONDS = 10.0
@@ -539,13 +538,6 @@ class ProxyPool:
         self.in_flight.pop(session, None)
         await _close_quietly(session)
 
-    def choose(self) -> AsyncSession:
-        if not self.sessions:
-            raise RuntimeError("Proxy pool is empty")
-        session = self.sessions[self.next_index % len(self.sessions)]
-        self.next_index += 1
-        return session
-
     def discard(self, session: AsyncSession) -> bool:
         """Exclude immediately; close later so in-flight requests can finish."""
         if session not in self.sessions:
@@ -621,16 +613,6 @@ class ProxyPool:
         except BaseException:
             await self._cancel(tasks)
             raise
-
-    async def wait_for_session(self, timeout: float) -> bool:  # noqa: ASYNC109
-        deadline = time.monotonic() + max(0, timeout)
-        while not self.sessions and not self._closed:
-            self._changed.clear()
-            self.ensure_capacity()
-            if not self._recoverable() or time.monotonic() >= deadline:
-                return False
-            await self._wait_changed(min(0.25, deadline - time.monotonic()))
-        return bool(self.sessions)
 
     async def close(self) -> None:
         """Stop background work and close every owned session exactly once."""

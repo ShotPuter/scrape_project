@@ -125,9 +125,6 @@ class SeprecClient:
     async def close(self) -> None:
         await self._client.close()
 
-    def _backoff_seconds(self, attempt: int, retry_after: str | None = None) -> float:
-        return self._client._backoff_seconds(attempt, retry_after)
-
     async def get_catalogs(self) -> list[CatalogItem]:
         """Fetch categories and subcategories definitions from SEPREC catalog."""
         response_payload = await self._request_data("POST", CATALOGS_ENDPOINT, {"codigo": ""})

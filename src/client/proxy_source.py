@@ -11,10 +11,9 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from src.utils.atomic import atomic_text_writer, atomic_write_json
-from src.utils.proxy_url import SUPPORTED_PROXY_SCHEMES, parse_proxy_url
+from src.utils.proxy_url import parse_proxy_url
 
 DEFAULT_SOURCE_URL = "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/all-proxies.txt"
-SUPPORTED_SCHEMES = SUPPORTED_PROXY_SCHEMES
 DEFAULT_REFRESH_MINUTES = 30.0
 DEFAULT_TIMEOUT_SECONDS = 30.0
 CSV_FIELDNAMES = ("alive", "protocol", "proxy")

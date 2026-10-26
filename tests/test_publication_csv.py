@@ -6,7 +6,7 @@ import pytest
 
 from src.models.publication import STATUS_FAILED, PublicationRecord
 from src.storage import publication_csv
-from src.storage.integrity import CSV_FIELDS, inspect_storage, read_records
+from src.storage.integrity import CSV_FIELDS, file_problem, read_records
 from src.storage.publication_csv import PublicationCsv
 
 
@@ -22,7 +22,9 @@ async def test_saved_publication_survives_restart(tmp_path):
 
     assert await reopened.get_all_records() == [record]
     assert await reopened.filter_unprocessed_ids(["1", "2"]) == ["2"]
-    assert inspect_storage(csv_path) == {"checked": 1, "invalid": 0, "problems": []}
+    records = read_records(csv_path)
+    assert list(records) == ["1"]
+    assert all(file_problem(item.file_path, item.file_size_bytes) is None for item in records.values())
 
 
 @pytest.mark.asyncio
@@ -35,7 +37,8 @@ async def test_missing_pdf_is_scheduled_again(tmp_path):
     document.unlink()
 
     assert await store.filter_unprocessed_ids(["1"]) == ["1"]
-    assert inspect_storage(store.path)["problems"][0]["reason"] == "missing_file"
+    [record] = read_records(store.path).values()
+    assert file_problem(record.file_path, record.file_size_bytes) == "missing_file"
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from config import BASE_DIR, Settings
-from src.client.base_client import BaseHTTPClient
+from src.client.base_client import HttpClient
 from src.client.config import ClientConfig, ProxyConfig, RetryConfig, TimeoutConfig, client_config_from_settings
 from src.client.network import TimeoutPolicy
 from src.client.seprec_client import SeprecClient
@@ -94,7 +94,7 @@ async def test_client_ignores_stale_database_records(tmp_path):
     async with ProxyDatabase(db_path) as database:
         await database.replace_all([VerifiedProxy("http://stale.example:80", "UA", "aiohttp", checked_at=stale)])
 
-    client = BaseHTTPClient(
+    client = HttpClient(
         "https://example.test",
         proxy_db_path=db_path,
         proxy_db_max_age_hours=24,

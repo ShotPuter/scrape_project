@@ -31,7 +31,6 @@ HPROXY_URL = "https://hproxy.com/api/proxy-list?format=json"
 PROXIFLY_URL = "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/all/data.json"
 SOURCE_URLS = {"proxyscrape": PROXYSCRAPE_URL, "hproxy": HPROXY_URL, "proxifly": PROXIFLY_URL}
 PUBLIC_SOURCES = tuple(SOURCE_URLS)
-SUPPORTED_SCHEMES = SUPPORTED_PROXY_SCHEMES
 DEAD_STATUSES = {"dead", "down", "offline", "inactive", "removed", "failed", "unreachable"}
 SOURCE_RANK = {"proxyscrape": 0, "hproxy": 0, "iplocate": 1, "free-proxy": 1, "proxifly": 2}
 USER_AGENT = "gaceta-scraper/1.0"
@@ -514,7 +513,7 @@ def _candidate_priority(
 def _rejection_reason(
     candidate: ProxyCandidate, now: datetime, min_uptime: float, max_latency_ms: float, max_age_minutes: float
 ) -> str | None:
-    if candidate.protocol not in SUPPORTED_SCHEMES:
+    if candidate.protocol not in SUPPORTED_PROXY_SCHEMES:
         return "unsupported_protocol"
     if candidate.uptime_percent is not None and candidate.uptime_percent < min_uptime:
         return "low_uptime"
