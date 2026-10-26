@@ -29,7 +29,6 @@ from src.utils.http import parse_retry_after as _parse_retry_after
 logger = logging.getLogger(__name__)
 
 NETWORK_ERRORS = (RequestException, asyncio.TimeoutError) + AIOHTTP_NETWORK_ERRORS
-MAX_ERROR_BODY_CHARS = 2000
 HARD_TIMEOUT_GRACE_SECONDS = 1.0
 # Only connect-level (fast) direct failures prove an IP block; slow body reads
 # are ordinary server throttling and must not cool the direct route down.
@@ -42,10 +41,6 @@ MAX_PROXY_TIMEOUT_SCALE = 2.5
 class Route(StrEnum):
     DIRECT = "direct"
     POOL = "pool"
-
-
-# Kept as an alias: the validated retry data now lives in ``RetryConfig``.
-RetryPolicy = RetryConfig
 
 
 class HttpClient:
@@ -177,7 +172,6 @@ class HttpClient:
         self._open_lock = asyncio.Lock()
         self._transport_lock = asyncio.Lock()
         self.connection_limit = config.connection_limit
-        self._semaphore = self.budget.semaphore
         self.requests_made = 0
         self.retries_made = 0
         self.run_id: str | None = None
@@ -186,7 +180,7 @@ class HttpClient:
         await self.open()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    async def __aexit__(self, _exc_type, _exc_val, _exc_tb) -> None:
         await self.close()
 
     async def open(self) -> None:
@@ -591,14 +585,6 @@ class HttpClient:
             return
         # Proxy route or a direct-only client: pause the shared origin budget.
         self.budget.pause(delay)
-
-    async def _select_session(self):
-        # Kept for callers inspecting the selected transport. Requests use leases.
-        if self._route() is not Route.POOL or self._proxy_pool is None:
-            return await self._direct_session()
-        if not await self._proxy_pool.wait_for_session(self.proxy_acquire_timeout):
-            raise HTTPClientError("All proxies have failed; working proxy pool is empty")
-        return self._proxy_pool.choose()
 
     async def _send(self, transport: Transport, method: str, url: str, json_data, params):
         event = attempt_context.get() or {}

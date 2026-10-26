@@ -140,18 +140,18 @@ def trace_config():
         ("connection_create", "connection_setup", "connection_setup_ms"),
     ):
 
-        async def start(session, ctx, params, phase=phase):
+        async def start(_session, ctx, _params, phase=phase):
             setattr(ctx, phase, time.monotonic())
             mark("stage", phase)
 
-        async def end(session, ctx, params, phase=phase, key=key):
+        async def end(_session, ctx, _params, phase=phase, key=key):
             mark(key, round((time.monotonic() - getattr(ctx, phase)) * 1000, 3))
             mark("stage", "response_headers")
 
         getattr(trace, f"on_{signal}_start").append(start)
         getattr(trace, f"on_{signal}_end").append(end)
 
-    async def reused(session, ctx, params):
+    async def reused(_session, _ctx, _params):
         mark("connection_reused", True)
         mark("stage", "response_headers")
 

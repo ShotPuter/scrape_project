@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import os
-from collections.abc import AsyncIterator, Iterable, Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from config import settings
@@ -70,11 +70,6 @@ class PublicationCsv:
         await self.load()
         records_by_id = sorted(self._records.values(), key=lambda record: record.id)
         return sorted(records_by_id, key=lambda record: record.publication_date or "", reverse=True)
-
-    async def iter_records(self) -> AsyncIterator[PublicationRecord]:
-        """Asynchronously yield records one by one."""
-        for record in await self.get_all_records():
-            yield record
 
     async def get_stats(self) -> dict[str, int | float]:
         """Compute aggregated volume and storage statistics across index."""

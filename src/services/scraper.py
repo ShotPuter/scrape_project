@@ -135,7 +135,7 @@ class SeprecScraper:
         )
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    async def __aexit__(self, _exc_type, _exc_val, _exc_tb) -> None:
         if self._monitor_task:
             self._monitor_task.cancel()
             await asyncio.gather(self._monitor_task, return_exceptions=True)
