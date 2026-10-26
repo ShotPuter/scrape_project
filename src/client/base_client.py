@@ -7,10 +7,11 @@ import logging
 import random
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from enum import StrEnum
+from types import TracebackType
 from typing import Any, Self
 
 from curl_cffi.requests.exceptions import RequestException
@@ -19,9 +20,17 @@ from src.client.aiohttp_session import NETWORK_ERRORS as AIOHTTP_NETWORK_ERRORS
 from src.client.config import ClientConfig
 from src.client.errors import HTTPClientError
 from src.client.network import NetworkBudget, RequestMetrics, TimeoutPolicy, attempt_context, mark, proxy_id, work_context
-from src.client.proxy_pool import ProxyEndpoint, ProxyPool, WarmupSpec, dead_proxy_path, load_dead_proxies, load_proxies
+from src.client.proxy_pool import (
+    ProxyEndpoint,
+    ProxyPool,
+    ProxySession,
+    WarmupSpec,
+    dead_proxy_path,
+    load_dead_proxies,
+    load_proxies,
+)
 from src.client.session_factory import SessionFactory
-from src.client.transport import Transport, transport_for
+from src.client.transport import Response, Transport, transport_for
 from src.storage.proxy_database import ProxyDatabase
 from src.utils.http import parse_retry_after as _parse_retry_after
 
@@ -62,7 +71,7 @@ class HttpClient:
             transport=config.transport,
             sock_read_timeout=config.timeouts.api.sock_read,
         )
-        self._session = None
+        self._session: ProxySession | None = None
         self._proxy_pool: ProxyPool | None = None
         self._open_lock = asyncio.Lock()
         self._transport_lock = asyncio.Lock()
@@ -74,7 +83,9 @@ class HttpClient:
         await self.open()
         return self
 
-    async def __aexit__(self, _exc_type, _exc_val, _exc_tb) -> None:
+    async def __aexit__(
+        self, _exc_type: type[BaseException] | None, _exc_val: BaseException | None, _exc_tb: TracebackType | None
+    ) -> None:
         await self.close()
 
     async def open(self) -> None:
@@ -317,7 +328,7 @@ class HttpClient:
         return route
 
     @asynccontextmanager
-    async def _lease(self, route: Route):
+    async def _lease(self, route: Route) -> AsyncIterator[ProxySession]:
         if route is Route.POOL and self._proxy_pool is not None:
             # In fallback mode waiting for a proxy must never stall a worker for
             # minutes: direct downtime is bounded, so the lease wait is bounded too.
@@ -367,7 +378,9 @@ class HttpClient:
         self._direct_block_kind = kind
         self._direct_net_failures = 0
 
-    async def _request_once(self, method, url, json_data, params) -> dict[str, Any]:
+    async def _request_once(
+        self, method: str, url: str, json_data: dict[str, Any] | None, params: dict[str, Any] | None
+    ) -> dict[str, Any]:
         await self.open()
         route = self._route()
 
@@ -409,7 +422,15 @@ class HttpClient:
             return data
 
     async def _handle_error_response(
-        self, transport: Transport, method, url, json_data, params, response, status, route: Route
+        self,
+        transport: Transport,
+        method: str,
+        url: str,
+        json_data: dict[str, Any] | None,
+        params: dict[str, Any] | None,
+        response: Response,
+        status: int,
+        route: Route,
     ) -> dict[str, Any]:
         is_direct = route is Route.DIRECT
         challenge = status == 403 and response.headers.get("cf-mitigated") == "challenge"
@@ -441,7 +462,9 @@ class HttpClient:
             raise HTTPClientError(f"HTTP {status} from API", status, _retry_after_from_response(response))
         raise HTTPClientError(f"Unhandled error response from API: HTTP {status}", status)
 
-    async def _send(self, transport: Transport, method: str, url: str, json_data, params):
+    async def _send(
+        self, transport: Transport, method: str, url: str, json_data: dict[str, Any] | None, params: dict[str, Any] | None
+    ) -> Response:
         event = attempt_context.get() or {}
         policy = (
             self.config.timeouts.policy_for("detail") if event.get("endpoint_kind") == "detail" else self.config.timeouts.api
@@ -485,7 +508,7 @@ class HttpClient:
                 self._discard_proxy(transport.raw)
             raise
 
-    def _discard_proxy(self, session) -> None:
+    def _discard_proxy(self, session: Any) -> None:
         if self._proxy_pool is not None and self._proxy_pool.discard(session):
             self.logger.warning("Removed failed proxy from rotation; %d remain", len(self._proxy_pool.sessions))
 
@@ -547,7 +570,7 @@ class HttpClient:
         await asyncio.sleep(delay)
 
 
-def _retry_after_from_response(response) -> str | None:
+def _retry_after_from_response(response: Response) -> str | None:
     """Prefer an explicit API ``retry_after`` value over the HTTP header."""
     header = response.headers.get("Retry-After")
     try:
@@ -560,7 +583,7 @@ def _retry_after_from_response(response) -> str | None:
     return str(value) if value is not None else header
 
 
-def _decode_json(response, url: str, status: int) -> dict[str, Any]:
+def _decode_json(response: Response, url: str, status: int) -> dict[str, Any]:
     try:
         data = response.json()
     except (ValueError, UnicodeError) as exc:

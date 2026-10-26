@@ -8,11 +8,12 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from curl_cffi.requests import AsyncSession
 
@@ -32,7 +33,8 @@ HARD_TIMEOUT_GRACE_SECONDS = 1.0
 DEFAULT_FAILURE_COOLDOWN_SECONDS = 120.0
 DEFAULT_MAX_FAILURES = 3
 
-SessionFactory = Callable[..., AsyncSession]
+ProxySession = AsyncSession[Any]
+SessionFactory = Callable[..., ProxySession]
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +52,7 @@ class WarmupSpec:
     """The readiness probe shared by every proxy warmup."""
 
     url: str
-    payload: dict = field(default_factory=dict)
+    payload: dict[str, Any] = field(default_factory=dict)
     concurrency: int = 5
     timeout: float = 10
 
@@ -130,10 +132,10 @@ class ProxyPool:
     ):
         self.proxies = _dedupe_endpoints(proxies)
         self.session_factory = session_factory
-        self.sessions: list[AsyncSession] = []
-        self.session_proxies: dict[AsyncSession, str] = {}
-        self.session_latency: dict[AsyncSession, float] = {}
-        self.retired: list[AsyncSession] = []
+        self.sessions: list[ProxySession] = []
+        self.session_proxies: dict[ProxySession, str] = {}
+        self.session_latency: dict[ProxySession, float] = {}
+        self.retired: list[ProxySession] = []
         self.next_index = 0
         self.checked = 0
         self.dead_path = dead_path
@@ -145,7 +147,7 @@ class ProxyPool:
         self.per_ip_limit = per_ip_limit
         self.budget = network_budget or NetworkBudget(5)
         self.metrics = metrics or RequestMetrics()
-        self.in_flight: dict[AsyncSession, int] = {}
+        self.in_flight: dict[ProxySession, int] = {}
         self._host_in_flight: dict[str, int] = {}
         self._changed = asyncio.Event()
         self._closed = False
@@ -153,7 +155,7 @@ class ProxyPool:
         self._probe_slots = asyncio.Semaphore(1)
         self._persist_task: asyncio.Task[None] | None = None
         self._dirty = False
-        self._close_tasks: set[asyncio.Task] = set()
+        self._close_tasks: set[asyncio.Task[None]] = set()
         self._active: set[str] = set()
         self._scheduled: set[str] = set()
         self._failure_counts: dict[str, int] = {}
@@ -164,7 +166,7 @@ class ProxyPool:
         self._replenish_task: asyncio.Task[None] | None = None
         self._warmup_candidates: list[ProxyEndpoint] = []
         self._warmup_url: str | None = None
-        self._warmup_payload: dict = {}
+        self._warmup_payload: dict[str, Any] = {}
         self._warmup_concurrency = 1
         self._warmup_timeout = 10.0
         self._warmup_error: RuntimeError | None = None
@@ -184,7 +186,7 @@ class ProxyPool:
             await asyncio.wait_for(self._changed.wait(), max(0.001, seconds))
 
     @asynccontextmanager
-    async def _host_slot(self, proxy: str):
+    async def _host_slot(self, proxy: str) -> AsyncIterator[None]:
         host = proxy_host(proxy)
         while self._host_in_flight.get(host, 0) >= self.per_ip_limit:
             self._changed.clear()
@@ -197,7 +199,7 @@ class ProxyPool:
             self._changed.set()
 
     @asynccontextmanager
-    async def lease(self, timeout: float, avoid: str | None = None):  # noqa: ASYNC109 - bounded pool acquisition
+    async def lease(self, timeout: float, avoid: str | None = None) -> AsyncIterator[ProxySession]:  # noqa: ASYNC109
         started = time.monotonic()
         deadline = started + timeout
         while True:
@@ -233,14 +235,14 @@ class ProxyPool:
             if session in self.retired and not self.in_flight[session]:
                 await self._close_retired(session)
 
-    def _session_host(self, session) -> str:
+    def _session_host(self, session: ProxySession) -> str:
         proxy = self.session_proxies.get(session, str(id(session)))
         return proxy_host(proxy)
 
-    def _session_load(self, session) -> int:
+    def _session_load(self, session: ProxySession) -> int:
         return self._host_in_flight.get(self._session_host(session), 0)
 
-    def _choose_available_session(self, avoid: str | None):
+    def _choose_available_session(self, avoid: str | None) -> ProxySession | None:
         available = [session for session in self.sessions if self._session_load(session) < self.per_ip_limit]
         if not available:
             return None
@@ -260,12 +262,12 @@ class ProxyPool:
             return True
         return self._warmup_url is not None and any(p.url not in self._permanent_dead for p in self.proxies)
 
-    def record_runtime_success(self, session) -> None:
+    def record_runtime_success(self, session: ProxySession) -> None:
         proxy = self.session_proxies.get(session)
         if proxy is not None and session in self.sessions:
             self._failure_counts.pop(proxy, None)
 
-    def latency_for(self, session) -> float:
+    def latency_for(self, session: ProxySession) -> float:
         return self.session_latency.get(session, 0.0)
 
     def start_warmup(self, spec: WarmupSpec) -> asyncio.Task[None]:
@@ -317,7 +319,7 @@ class ProxyPool:
                 "Proxy warmup finished: %d/%d checked, %d usable", self.checked, len(self.proxies), len(self.sessions)
             )
 
-    def create_session(self, proxy: str | ProxyEndpoint):
+    def create_session(self, proxy: str | ProxyEndpoint) -> ProxySession:
         endpoint = _as_endpoint(proxy)
         return self.session_factory(proxy=endpoint.url, user_agent=endpoint.user_agent, transport=endpoint.transport)
 
@@ -325,7 +327,7 @@ class ProxyPool:
         self,
         proxy: str | ProxyEndpoint,
         url: str,
-        payload: dict,
+        payload: dict[str, Any],
         semaphore: asyncio.Semaphore,
         timeout: float,  # noqa: ASYNC109 - forwarded to the readiness request
         *,
@@ -380,7 +382,7 @@ class ProxyPool:
             self.metrics.record(event)
             attempt_context.reset(token)
 
-    async def _send_probe(self, session, url: str, payload: dict, timeout: float):  # noqa: ASYNC109
+    async def _send_probe(self, session: ProxySession, url: str, payload: dict[str, Any], timeout: float) -> Any:  # noqa: ASYNC109
         # Readiness checks share the connection cap but bypass pacing so they
         # cannot hold rate-limiter slots needed by publication downloads.
         async with self.budget.slot(apply_rate=False):
@@ -390,7 +392,7 @@ class ProxyPool:
                 session.post(url, json=payload, timeout=timeout), timeout=timeout + HARD_TIMEOUT_GRACE_SECONDS
             )
 
-    def _pause_if_rate_limited(self, response) -> None:
+    def _pause_if_rate_limited(self, response: Any) -> None:
         if response.status_code != 429:
             return
         delay = parse_retry_after(str(response.headers.get("Retry-After", "1")))
@@ -429,7 +431,7 @@ class ProxyPool:
             eta,
         )
 
-    def add_session(self, proxy: str | ProxyEndpoint, session: AsyncSession) -> bool:
+    def add_session(self, proxy: str | ProxyEndpoint, session: ProxySession) -> bool:
         endpoint = _as_endpoint(proxy)
         proxy_url = endpoint.url
         if proxy_url in self._active or proxy_url in self._permanent_dead:
@@ -481,7 +483,7 @@ class ProxyPool:
             except OSError:
                 logger.warning("Could not persist proxy exclusions")
 
-    async def _close_retired(self, session) -> None:
+    async def _close_retired(self, session: ProxySession) -> None:
         if session not in self.retired:
             return
         self.retired.remove(session)
@@ -490,7 +492,7 @@ class ProxyPool:
         self.in_flight.pop(session, None)
         await _close_quietly(session)
 
-    def discard(self, session: AsyncSession) -> bool:
+    def discard(self, session: ProxySession) -> bool:
         """Exclude immediately; close later so in-flight requests can finish."""
         if session not in self.sessions:
             return False
@@ -604,7 +606,7 @@ class ProxyPool:
             await asyncio.gather(*(session.close() for session in sessions), return_exceptions=True)
 
 
-async def _close_quietly(session) -> None:
+async def _close_quietly(session: ProxySession | None) -> None:
     if session is None:
         return
     with suppress(Exception):  # noqa: BLE001 - cleanup must not mask the original failure

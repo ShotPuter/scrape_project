@@ -54,9 +54,11 @@ show_error_codes = true
 [[tool.mypy.overrides]]
 module = [
     "src.cli",
+    "src.client.base_client",
     "src.client.config",
     "src.client.errors",
     "src.client.readiness",
+    "src.client.proxy_pool",
     "src.client.seprec_client",
     "src.client.transport",
     "src.services.category_resolver",
