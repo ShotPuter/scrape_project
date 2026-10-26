@@ -24,7 +24,6 @@ from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 from config import settings
 from src.client.free_proxy_source import load_free_proxy_candidates
@@ -226,17 +225,6 @@ async def collect(
     report_path: Path | None = None,
     publish_after: int | None = None,
 ) -> dict:
-    if concurrency < 1 or timeout <= 0:
-        raise ValueError("concurrency must be positive and timeout must be > 0")
-    if limit is not None and limit < 0:
-        raise ValueError("limit must be >= 0 (0 = all)")
-    if max_per_source is not None and max_per_source < 0:
-        raise ValueError("max_per_source must be >= 0 (0 = all)")
-    if requests_per_second is not None and requests_per_second < 0:
-        raise ValueError("requests_per_second must be >= 0")
-    if publish_after is not None and publish_after < 1:
-        raise ValueError("publish_after must be >= 1")
-
     providers = resolve_providers(provider)
     catalog = await _load_candidate_sources(providers, csv_path, source_url)
     raw_candidates = catalog.candidates
@@ -331,12 +319,10 @@ async def collect(
         records=records,
         db_path=db_path,
         database_replaced=database_replaced,
-        csv_candidates=catalog.source_counts.get("iplocate", 0),
-        free_proxy_candidates=catalog.source_counts.get("free-proxy", 0),
     )
     if report_path is not None:
         report["report_path"] = str(report_path)
-        _write_report(report_path, report)
+        atomic_write_json(report_path, report, indent=2, sort_keys=True)
     return report
 
 
@@ -349,15 +335,11 @@ async def _stage1_scan(
     timeout: float | None,  # noqa: ASYNC109 - forwarded to stage 1
     connect_timeout: float | None,
 ) -> tuple[list[Stage1Success], list[Stage1Failure]]:
-    queue: asyncio.Queue[ProxyCandidate | None] = asyncio.Queue()
-    for candidate in candidates:
-        queue.put_nowait(candidate)
-
     successes: list[Stage1Success] = []
     failures: list[Stage1Failure] = []
-    checked = 0
-    active = 0
+    checked = active = 0
     lock = asyncio.Lock()
+    slots = asyncio.Semaphore(concurrency)
     budget = NetworkBudget(concurrency, 0)
     host_locks: dict[str, asyncio.Lock] = {}
 
@@ -365,10 +347,9 @@ async def _stage1_scan(
         compatible = compatible_transports(candidate.protocol, transports)
         if not compatible:
             return [], Stage1Failure(candidate, "unsupported_protocol", "no compatible HTTP transport")
-        host = proxy_host(candidate.url)
         found: list[Stage1Success] = []
         last_failure: Stage1Result | None = None
-        async with host_locks.setdefault(host, asyncio.Lock()):
+        async with host_locks.setdefault(proxy_host(candidate.url), asyncio.Lock()):
             for transport in compatible:
                 for user_agent in user_agents():
                     result = await verify_stage1(
@@ -390,38 +371,30 @@ async def _stage1_scan(
             return [], Stage1Failure(candidate, "unknown_error", "no stage-1 attempt was made")
         return [], Stage1Failure(candidate, last_failure.error_type, last_failure.detail)
 
-    async def worker() -> None:
+    async def run(candidate: ProxyCandidate) -> None:
         nonlocal checked, active
-        while True:
-            candidate = await queue.get()
+        async with slots:
+            async with lock:
+                active += 1
             try:
-                if candidate is None:
-                    return
-                async with lock:
-                    active += 1
-                try:
-                    found, failure = await check(candidate)
-                finally:
-                    async with lock:
-                        active -= 1
-                async with lock:
-                    successes.extend(found)
-                    if failure is not None:
-                        failures.append(failure)
-                    checked += 1
-                    _report_progress(checked, len(candidates), len(successes), active, prefix="Stage 1")
+                found, failure = await check(candidate)
             finally:
-                queue.task_done()
+                async with lock:
+                    active -= 1
+            async with lock:
+                successes.extend(found)
+                if failure is not None:
+                    failures.append(failure)
+                checked += 1
+                _report_progress(checked, len(candidates), len(successes), active, prefix="Stage 1")
 
-    worker_count = min(concurrency, len(candidates))
     print(
-        f"Starting stage 1: candidates={len(candidates)}, "
-        f"concurrent_checks={worker_count}, "
+        f"Starting stage 1: candidates={len(candidates)}, ",
+        f"concurrent_checks={min(concurrency, len(candidates))}, ",
         f"transports={','.join(transports)}",
         flush=True,
     )
-    tasks = [asyncio.create_task(worker()) for _ in range(worker_count)]
-    await _drain_workers(tasks, queue)
+    await asyncio.gather(*(run(candidate) for candidate in candidates))
     return successes, failures
 
 
@@ -436,64 +409,51 @@ async def _stage2_scan(
     max_retry_delay: float | None,
     on_check: Callable[[Stage2Check], Awaitable[None]] | None = None,
 ) -> list[Stage2Check]:
-    queue: asyncio.Queue[Stage1Success | None] = asyncio.Queue()
-    for success in stage1_successes:
-        queue.put_nowait(success)
-
     checks: list[Stage2Check] = []
-    checked = 0
-    active = 0
+    checked = active = 0
     lock = asyncio.Lock()
+    slots = asyncio.Semaphore(concurrency)
     budget = NetworkBudget(concurrency, requests_per_second)
     host_locks: dict[str, asyncio.Lock] = {}
 
-    async def worker() -> None:
+    async def run(success: Stage1Success) -> None:
         nonlocal checked, active
-        while True:
-            success = await queue.get()
+        async with slots:
+            async with lock:
+                active += 1
             try:
-                if success is None:
-                    return
-                async with lock:
-                    active += 1
-                try:
-                    host = proxy_host(success.candidate.url)
-                    async with host_locks.setdefault(host, asyncio.Lock()):
-                        result = await verify_stage2(
-                            success.candidate.url,
-                            transport=success.transport,
-                            user_agent=success.user_agent,
-                            attempts=attempts,
-                            timeout=timeout,
-                            connect_timeout=min(timeout, settings.proxy_stage2_connect_timeout),
-                            retry_delay=retry_delay,
-                            max_retry_delay=max_retry_delay,
-                            budget=budget,
-                        )
-                finally:
-                    async with lock:
-                        active -= 1
-                check = Stage2Check(success, result)
-                async with lock:
-                    checks.append(check)
-                    if on_check is not None:
-                        await on_check(check)
-                    checked += 1
-                    _report_progress(
-                        checked, len(stage1_successes), sum(1 for item in checks if item.result.ok), active, prefix="Stage 2"
+                async with host_locks.setdefault(proxy_host(success.candidate.url), asyncio.Lock()):
+                    result = await verify_stage2(
+                        success.candidate.url,
+                        transport=success.transport,
+                        user_agent=success.user_agent,
+                        attempts=attempts,
+                        timeout=timeout,
+                        connect_timeout=min(timeout, settings.proxy_stage2_connect_timeout),
+                        retry_delay=retry_delay,
+                        max_retry_delay=max_retry_delay,
+                        budget=budget,
                     )
             finally:
-                queue.task_done()
+                async with lock:
+                    active -= 1
+            check = Stage2Check(success, result)
+            async with lock:
+                checks.append(check)
+                if on_check is not None:
+                    await on_check(check)
+                checked += 1
+                _report_progress(
+                    checked, len(stage1_successes), sum(1 for item in checks if item.result.ok), active, prefix="Stage 2"
+                )
 
-    worker_count = min(concurrency, len(stage1_successes))
     print(
-        f"Starting stage 2: combinations={len(stage1_successes)}, "
-        f"concurrent_checks={worker_count}, "
+        f"Starting stage 2: combinations={len(stage1_successes)}, ",
+        f"concurrent_checks={min(concurrency, len(stage1_successes))}, ",
         f"attempts={attempts or settings.proxy_stage2_attempts}",
         flush=True,
     )
-    tasks = [asyncio.create_task(worker()) for _ in range(worker_count)]
-    await _drain_workers(tasks, queue)
+    await asyncio.gather(*(run(success) for success in stage1_successes))
     return checks
 
 
@@ -557,9 +517,9 @@ def _build_report(
     records: list[VerifiedProxy],
     db_path: Path,
     database_replaced: bool,
-    csv_candidates: int,
-    free_proxy_candidates: int,
 ) -> dict:
+    csv_candidates = raw_source_counts.get("iplocate", 0)
+    free_proxy_candidates = raw_source_counts.get("free-proxy", 0)
     verified_keys = {(record.url, record.user_agent, record.transport) for record in records}
     stage2_error_counts: Counter[str] = Counter()
     for check in stage2_checks:
@@ -578,55 +538,58 @@ def _build_report(
         }
         for check in stage2_checks
     ]
+    catalog = {
+        "raw_candidates": len(raw_candidates),
+        "selected_candidates": len(selection.candidates),
+        "raw_source_counts": raw_source_counts,
+        "source_counts": selection.source_counts,
+        "rejected": dict(selection.rejected),
+        "errors": catalog_errors,
+        "csv_candidates": csv_candidates,
+        "free_proxy_candidates": free_proxy_candidates,
+    }
+    stage1 = {
+        "passed": len(stage1_successes),
+        "failed": len(stage1_failures),
+        "error_types": dict(Counter(failure.error_type for failure in stage1_failures)),
+        "successes": [
+            {
+                "candidate": candidate_as_dict(success.candidate),
+                "transport": success.transport,
+                "user_agent": success.user_agent,
+                "latency_ms": success.latency_ms,
+            }
+            for success in stage1_successes
+        ],
+        "failures": [
+            {
+                "candidate": candidate_as_dict(failure.candidate),
+                "error_type": failure.error_type,
+                "detail": failure.detail,
+            }
+            for failure in stage1_failures
+        ],
+    }
+    stage2 = {
+        "checked": len(stage2_checks),
+        "verified": len(records),
+        "error_types": dict(stage2_error_counts),
+        "results": stage2_results,
+    }
     return {
         "generated_at": datetime.now(UTC).isoformat(),
         "provider": provider,
         "providers": providers,
-        "catalog": {
-            "raw_candidates": len(raw_candidates),
-            "selected_candidates": len(selection.candidates),
-            "raw_source_counts": raw_source_counts,
-            "source_counts": selection.source_counts,
-            "rejected": dict(selection.rejected),
-            "errors": catalog_errors,
-            "csv_candidates": csv_candidates,
-            "free_proxy_candidates": free_proxy_candidates,
-        },
-        "stage1": {
-            "passed": len(stage1_successes),
-            "failed": len(stage1_failures),
-            "error_types": dict(Counter(failure.error_type for failure in stage1_failures)),
-            "successes": [
-                {
-                    "candidate": candidate_as_dict(success.candidate),
-                    "transport": success.transport,
-                    "user_agent": success.user_agent,
-                    "latency_ms": success.latency_ms,
-                }
-                for success in stage1_successes
-            ],
-            "failures": [
-                {
-                    "candidate": candidate_as_dict(failure.candidate),
-                    "error_type": failure.error_type,
-                    "detail": failure.detail,
-                }
-                for failure in stage1_failures
-            ],
-        },
-        "stage2": {
-            "checked": len(stage2_checks),
-            "verified": len(records),
-            "error_types": dict(stage2_error_counts),
-            "results": stage2_results,
-        },
-        "candidates": len(selection.candidates),
+        "catalog": catalog,
+        "stage1": stage1,
+        "stage2": stage2,
+        "candidates": catalog["selected_candidates"],
         "csv_candidates": csv_candidates,
         "free_proxy_candidates": free_proxy_candidates,
         "source_counts": selection.source_counts,
-        "stage1_passed": len(stage1_successes),
-        "stage1_failed": len(stage1_failures),
-        "stage2_checked": len(stage2_checks),
+        "stage1_passed": stage1["passed"],
+        "stage1_failed": stage1["failed"],
+        "stage2_checked": stage2["checked"],
         "verified_combinations": len(records),
         "verified_proxies": len({record.url for record in records}),
         "by_transport": dict(Counter(record.transport for record in records)),
@@ -635,26 +598,10 @@ def _build_report(
     }
 
 
-def _write_report(path: Path, report: dict) -> None:
-    atomic_write_json(path, report, indent=2, sort_keys=True)
-
-
 def _report_progress(checked: int, total: int, verified: int, active: int, *, prefix: str = "Checked") -> None:
     if checked % PROGRESS_EVERY and checked != total:
         return
     print(f"{prefix} {checked}/{total}, verified combinations={verified}, active_checks={active}", flush=True)
-
-
-async def _drain_workers(tasks: list[asyncio.Task[None]], queue: asyncio.Queue[Any]) -> None:
-    """Send one stop sentinel per worker, wait for completion, then cancel leftovers."""
-    try:
-        for _ in tasks:
-            queue.put_nowait(None)
-        await asyncio.gather(*tasks)
-    finally:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
