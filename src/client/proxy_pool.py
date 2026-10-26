@@ -76,17 +76,13 @@ def dead_proxy_path(proxy_path: Path) -> Path:
     return proxy_path.with_suffix(".dead.json")
 
 
-def load_dead_proxies(path: Path | None, ttl_hours: float) -> set[str]:
-    return set(_load_dead_proxies(path, ttl_hours))
-
-
 def load_proxies(
     path: Path, limit: int | None = None, dead_path: Path | None = None, dead_ttl_hours: float = DEAD_PROXY_TTL_HOURS
 ) -> list[str]:
     if limit is not None and limit < 0:
         raise ValueError("Proxy sample size must be >= 0 (0 = all)")
 
-    dead = set(_load_dead_proxies(dead_path, dead_ttl_hours))
+    dead = set(load_dead_proxies(dead_path, dead_ttl_hours))
     proxies: list[str] = []
     seen: set[str] = set()
     with path.open(encoding="utf-8-sig", newline="") as handle:
@@ -132,17 +128,6 @@ class ProxyPool:
         network_budget: NetworkBudget | None = None,
         metrics: RequestMetrics | None = None,
     ):
-        if per_ip_limit < 1:
-            raise ValueError("per_ip_limit must be positive")
-        if min_ready < 1:
-            raise ValueError("min_ready must be >= 1")
-        if replenish_threshold < 0:
-            raise ValueError("replenish_threshold must be >= 0")
-        if failure_cooldown_seconds < 0:
-            raise ValueError("failure_cooldown_seconds must be >= 0")
-        if max_failures < 1:
-            raise ValueError("max_failures must be >= 1")
-
         self.proxies = _dedupe_endpoints(proxies)
         self.session_factory = session_factory
         self.sessions: list[AsyncSession] = []
@@ -152,7 +137,7 @@ class ProxyPool:
         self.next_index = 0
         self.checked = 0
         self.dead_path = dead_path
-        self._dead = _load_dead_proxies(dead_path, dead_ttl_hours)
+        self._dead = load_dead_proxies(dead_path, dead_ttl_hours)
         self.min_ready = min_ready
         self.replenish_threshold = replenish_threshold
         self.failure_cooldown_seconds = failure_cooldown_seconds
@@ -169,9 +154,6 @@ class ProxyPool:
         self._persist_task: asyncio.Task[None] | None = None
         self._dirty = False
         self._close_tasks: set[asyncio.Task] = set()
-        self._successes: dict[str, int] = {}
-        self._failures_total: dict[str, int] = {}
-
         self._active: set[str] = set()
         self._scheduled: set[str] = set()
         self._failure_counts: dict[str, int] = {}
@@ -197,17 +179,13 @@ class ProxyPool:
         self._warmup_timeout = spec.timeout
         self._probe_slots = asyncio.Semaphore(self._warmup_concurrency)
 
-    @staticmethod
-    def _host(proxy: str) -> str:
-        return proxy_host(proxy)
-
     async def _wait_changed(self, seconds: float) -> None:
         with suppress(TimeoutError):
             await asyncio.wait_for(self._changed.wait(), max(0.001, seconds))
 
     @asynccontextmanager
     async def _host_slot(self, proxy: str):
-        host = self._host(proxy)
+        host = proxy_host(proxy)
         while self._host_in_flight.get(host, 0) >= self.per_ip_limit:
             self._changed.clear()
             await self._wait_changed(0.25)
@@ -257,7 +235,7 @@ class ProxyPool:
 
     def _session_host(self, session) -> str:
         proxy = self.session_proxies.get(session, str(id(session)))
-        return self._host(proxy)
+        return proxy_host(proxy)
 
     def _session_load(self, session) -> int:
         return self._host_in_flight.get(self._session_host(session), 0)
@@ -286,26 +264,9 @@ class ProxyPool:
         proxy = self.session_proxies.get(session)
         if proxy is not None and session in self.sessions:
             self._failure_counts.pop(proxy, None)
-            self._successes[proxy] = self._successes.get(proxy, 0) + 1
 
     def latency_for(self, session) -> float:
         return self.session_latency.get(session, 0.0)
-
-    def snapshot(self) -> dict:
-        return {
-            "ready": len(self.sessions),
-            "retired": len(self.retired),
-            "cooldown": sum(until > time.monotonic() for until in self._cooldown_until.values()),
-            "proxies": {
-                proxy_id(url): {
-                    "active": self._host_in_flight.get(self._host(url), 0),
-                    "successes": self._successes.get(url, 0),
-                    "failures": self._failures_total.get(url, 0),
-                    "consecutive_failures": self._failure_counts.get(url, 0),
-                }
-                for url in self._active
-            },
-        }
 
     def start_warmup(self, spec: WarmupSpec) -> asyncio.Task[None]:
         if self._warmup_task and not self._warmup_task.done():
@@ -329,12 +290,6 @@ class ProxyPool:
         )
         self._warmup_task = asyncio.create_task(self._run_warmup())
         return self._warmup_task
-
-    async def warmup(self, spec: WarmupSpec) -> None:
-        task = self.start_warmup(spec)
-        await task
-        if self._warmup_error:
-            raise self._warmup_error
 
     async def wait_until_ready(self) -> None:
         await self._ready.wait()
@@ -394,7 +349,7 @@ class ProxyPool:
             async with semaphore, self._probe_slots, self._host_slot(proxy_url):
                 session = self.create_session(endpoint)
                 response = await self._send_probe(session, url, payload, timeout)
-                keep_session = _is_ready_response(response)
+                keep_session = is_ready_response(response)
                 event.update(http_status=response.status_code, ok=keep_session)
                 self._pause_if_rate_limited(response)
                 if not keep_session:
@@ -442,7 +397,6 @@ class ProxyPool:
         self.budget.pause(1 if delay is None else delay)
 
     def _handle_failure(self, proxy: str, *, persist: bool) -> None:
-        self._failures_total[proxy] = self._failures_total.get(proxy, 0) + 1
         failures = self._failure_counts.get(proxy, 0) + 1
         self._failure_counts[proxy] = failures
         self._cooldown_until[proxy] = time.monotonic() + self.failure_cooldown_seconds
@@ -609,7 +563,9 @@ class ProxyPool:
         try:
             await asyncio.gather(*tasks)
         except BaseException:
-            await self._cancel(tasks)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             raise
 
     async def close(self) -> None:
@@ -647,16 +603,6 @@ class ProxyPool:
             self._active.clear()
             await asyncio.gather(*(session.close() for session in sessions), return_exceptions=True)
 
-    @staticmethod
-    async def _cancel(tasks: list[asyncio.Task]) -> None:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-
-def _is_ready_response(response) -> bool:
-    return is_ready_response(response)
-
 
 async def _close_quietly(session) -> None:
     if session is None:
@@ -665,7 +611,7 @@ async def _close_quietly(session) -> None:
         await session.close()
 
 
-def _load_dead_proxies(path: Path | None, ttl_hours: float) -> dict[str, str]:
+def load_dead_proxies(path: Path | None, ttl_hours: float) -> dict[str, str]:
     if path is None:
         return {}
     try:

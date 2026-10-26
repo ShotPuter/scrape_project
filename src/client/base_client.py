@@ -197,8 +197,8 @@ class HttpClient:
             network_budget=self.budget,
             metrics=self.metrics,
         )
-        pool.configure_warmup(self._pool_warmup_spec())
         if not self.config.proxy.warmup:
+            pool.configure_warmup(self._pool_warmup_spec())
             try:
                 self._add_proxy_sessions(pool, source.endpoints)
             except asyncio.CancelledError:
