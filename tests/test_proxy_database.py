@@ -63,8 +63,10 @@ async def test_list_active_can_filter_by_verification_age(tmp_path):
         )
 
         active = await database.list_active(max_age_hours=1)
+        unfiltered = await database.list_active(max_age_hours=0)
 
     assert [proxy.url for proxy in active] == ["http://fresh.example:8080"]
+    assert len(unfiltered) == 2
 
 
 @pytest.mark.asyncio

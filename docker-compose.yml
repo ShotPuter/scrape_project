@@ -37,15 +37,8 @@ x-scraper: &scraper
       max-file: "3"
 
 services:
-  # One-shot jobs: docker compose run --rm scraper [CLI options]
+  # One-shot jobs: docker compose run --rm scraper [--year YYYY] [--category N]
   scraper:
     <<: *scraper
     restart: "no"
     command: []
-
-  # Opt-in daemon: docker compose --profile scheduler up -d scheduler
-  scheduler:
-    <<: *scraper
-    profiles: [scheduler]
-    restart: unless-stopped
-    command: ["--schedule"]

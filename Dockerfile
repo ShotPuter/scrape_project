@@ -19,12 +19,12 @@ RUN groupadd --gid "${SCRAPER_GID}" scraper \
     && mkdir -p /app/data \
     && chown scraper:scraper /app/data
 
-COPY config.py main.py collect_proxies.py proxy_tool.py ./
+COPY config.py main.py collect_proxies.py ./
 COPY src ./src
 
 USER scraper:scraper
 VOLUME ["/app/data"]
 
-# Exec form forwards signals to Python; scheduling is explicitly opt-in.
+# Exec form forwards signals to Python.
 ENTRYPOINT ["python", "main.py"]
 CMD []

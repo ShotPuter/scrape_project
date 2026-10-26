@@ -11,14 +11,6 @@ from src.client.base_client import BaseHTTPClient
 from src.client.network import attempt_context
 from src.client.proxy_pool import ProxyPool, dead_proxy_path, load_proxies
 from src.client.session_factory import SessionFactory
-from src.proxy.rotator import ProxyRotator
-
-
-def test_proxy_tool_export_is_accepted_by_scraper(tmp_path):
-    path = tmp_path / "working_proxies.txt"
-    ProxyRotator(["http://one:80", "socks5://two:1080"]).save_to_file(path)
-
-    assert load_proxies(path) == ["http://one:80", "socks5://two:1080"]
 
 
 def test_text_candidates_respect_validation_deduplication_and_dead_list(tmp_path):
@@ -63,6 +55,41 @@ class Response:
 
     def json(self):
         return self.data
+
+
+@pytest.mark.asyncio
+async def test_warmup_timeout_starts_with_already_ready_sessions():
+    class SlowPool:
+        sessions = [object()]
+        checked = 1
+
+        def start_warmup(self, *args, **kwargs):
+            pass
+
+        async def wait_until_ready(self):
+            await asyncio.Event().wait()
+
+    client = BaseHTTPClient("https://example.test", proxy_warmup_timeout_seconds=0.01)
+
+    await asyncio.wait_for(client._warm_up_pool(SlowPool(), ["http://proxy.test:80"]), 1)
+
+
+@pytest.mark.asyncio
+async def test_warmup_timeout_without_ready_sessions_raises():
+    class SlowPool:
+        sessions = []
+        checked = 1
+
+        def start_warmup(self, *args, **kwargs):
+            pass
+
+        async def wait_until_ready(self):
+            await asyncio.Event().wait()
+
+    client = BaseHTTPClient("https://example.test", proxy_warmup_timeout_seconds=0.01)
+
+    with pytest.raises(RuntimeError, match="No proxy became ready"):
+        await asyncio.wait_for(client._warm_up_pool(SlowPool(), ["http://proxy.test:80"]), 1)
 
 
 @pytest.mark.asyncio

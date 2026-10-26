@@ -212,7 +212,7 @@ class ProxyDatabase:
         WHERE is_active = 1
         """
         params: list[object] = []
-        if max_age_hours is not None:
+        if max_age_hours is not None and max_age_hours > 0:
             cutoff = datetime.now(UTC) - timedelta(hours=max_age_hours)
             query += " AND checked_at >= ?"
             params.append(cutoff.isoformat())

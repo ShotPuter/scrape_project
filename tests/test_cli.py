@@ -1,14 +1,14 @@
 """CLI parsing and orchestration tests (no network access)."""
 
 import argparse
-import sys
-from pathlib import Path
-from unittest.mock import AsyncMock, Mock
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
+from unittest.mock import Mock
 
 import pytest
 
 import src.cli as cli
-from src.cli import _execute_scrape, _validate_args, build_parser
+from src.cli import _execute_scrape, build_parser
 from src.storage.proxy_database import ProxyDatabase, VerifiedProxy
 
 
@@ -17,181 +17,15 @@ def test_defaults_run_one_incremental_pass():
 
     assert args.year is None
     assert args.category == "all"
-    assert args.full is False
-    assert args.schedule is False
-    assert args.concurrency >= 1
-    assert args.proxy_db is None
-    assert args.refresh_proxies is True
-    assert args.interval_hours > 0
+    assert args.collect_proxies is False
 
 
-def test_proxy_database_is_parsed():
-    args = build_parser().parse_args(["--proxy-db", "data/proxies.db"])
-
-    assert args.proxy_db == Path("data/proxies.db")
-
-
-def test_proxy_refresh_can_be_disabled():
-    assert build_parser().parse_args(["--no-refresh-proxies"]).refresh_proxies is False
-
-
-@pytest.mark.asyncio
-async def test_proxy_refresh_starts_after_scraper_opens_existing_database(monkeypatch, tmp_path):
-    db_path = tmp_path / "proxies.db"
-    monkeypatch.setattr(cli.settings, "proxy_min_ready", 1)
-    async with ProxyDatabase(db_path) as database:
-        await database.replace_all([VerifiedProxy("http://proxy.example:80", "UA", "aiohttp")])
-
-    events = []
-
-    class FakeScraper:
-        def __init__(self, **kwargs):
-            assert kwargs["proxy_db_path"] == db_path
-
-        async def __aenter__(self):
-            events.append("scraper_open")
-            return self
-
-        async def __aexit__(self, *args):
-            events.append("scraper_close")
-
-    class FakeProcess:
-        returncode = None
-
-        async def wait(self):
-            if self.returncode is None:
-                events.append("collector_done")
-                self.returncode = 0
-            return self.returncode
-
-    async def start_collector(*command):
-        assert command[0] == sys.executable
-        assert Path(command[1]).name == "collect_proxies.py"
-        assert command[2:] == ("--db", str(db_path), "--publish-after", "1")
-        events.append("collector_start")
-        return FakeProcess()
-
-    async def scrape(scraper, args):
-        events.append("scrape")
-        return [{"status": "COMPLETED", "items_scraped": 1}]
-
-    monkeypatch.setattr(cli, "SeprecScraper", FakeScraper)
-    monkeypatch.setattr(cli, "_execute_scrape", scrape)
-    monkeypatch.setattr(cli.asyncio, "create_subprocess_exec", start_collector)
-
-    reports = await cli._run_once(build_parser().parse_args(["--proxy-db", str(db_path)]))
-
-    assert reports[0]["status"] == "COMPLETED"
-    assert events == ["scraper_open", "collector_start", "scrape", "collector_done", "scraper_close"]
-
-
-@pytest.mark.asyncio
-async def test_empty_proxy_database_is_filled_before_scraping(monkeypatch, tmp_path):
-    db_path = tmp_path / "proxies.db"
-    monkeypatch.setattr(cli.settings, "proxy_min_ready", 2)
-    monkeypatch.setattr(cli, "PROXY_READY_POLL_SECONDS", 0.01)
-    events = []
-
-    class FakeScraper:
-        def __init__(self, **kwargs):
-            assert kwargs["proxy_db_path"] == db_path
-
-        async def __aenter__(self):
-            events.append("scraper_open")
-            async with ProxyDatabase(db_path) as database:
-                assert len(await database.list_active()) == 2
-            return self
-
-        async def __aexit__(self, *args):
-            events.append("scraper_close")
-
-    class FakeProcess:
-        returncode = None
-
-        async def wait(self):
-            if self.returncode is None:
-                events.append("collector_done")
-                self.returncode = 0
-            return self.returncode
-
-    async def start_collector(*command):
-        events.append("collector_start")
-
-        async def publish():
-            await cli.asyncio.sleep(0.02)
-            async with ProxyDatabase(db_path) as database:
-                await database.replace_all(
-                    [
-                        VerifiedProxy("http://first.example:80", "UA", "aiohttp"),
-                        VerifiedProxy("http://second.example:80", "UA", "aiohttp"),
-                    ]
-                )
-            events.append("published")
-
-        cli.asyncio.create_task(publish())
-        return FakeProcess()
-
-    async def scrape(scraper, args):
-        events.append("scrape")
-        return [{"status": "COMPLETED"}]
-
-    monkeypatch.setattr(cli, "SeprecScraper", FakeScraper)
-    monkeypatch.setattr(cli, "_execute_scrape", scrape)
-    monkeypatch.setattr(cli.asyncio, "create_subprocess_exec", start_collector)
-
-    await cli._run_once(build_parser().parse_args(["--proxy-db", str(db_path)]))
-
-    assert events == ["collector_start", "published", "scraper_open", "scrape", "collector_done", "scraper_close"]
-
-
-@pytest.mark.asyncio
-async def test_empty_proxy_database_does_not_scrape_when_collection_fails(monkeypatch, tmp_path):
-    db_path = tmp_path / "proxies.db"
-    process = argparse.Namespace(returncode=2, wait=AsyncMock(return_value=2))
-
-    async def start_collector(*command):
-        return process
-
-    def unexpected_scraper(**kwargs):
-        pytest.fail("Scraper started without verified proxies")
-
-    monkeypatch.setattr(cli, "SeprecScraper", unexpected_scraper)
-    monkeypatch.setattr(cli.asyncio, "create_subprocess_exec", start_collector)
-
-    with pytest.raises(RuntimeError, match="0/20 verified proxies"):
-        await cli._run_once(build_parser().parse_args(["--proxy-db", str(db_path)]))
-
-
-@pytest.mark.asyncio
-async def test_proxy_collector_is_terminated_when_scrape_stops(monkeypatch, tmp_path):
-    process = argparse.Namespace(returncode=None, wait=AsyncMock(return_value=-15), terminate=Mock())
-
-    async def start_collector(*command):
-        return process
-
-    monkeypatch.setattr(cli.asyncio, "create_subprocess_exec", start_collector)
-
-    with pytest.raises(RuntimeError, match="scrape stopped"):
-        async with cli._proxy_collector(tmp_path / "proxies.db"):
-            raise RuntimeError("scrape stopped")
-
-    process.terminate.assert_called_once()
-
-
-def test_year_and_category_are_parsed():
-    args = build_parser().parse_args(["--year", "2025", "--category", "2", "--max-items", "7"])
+def test_year_category_and_collect_flag_are_parsed():
+    args = build_parser().parse_args(["--year", "2025", "--category", "2"])
 
     assert args.year == 2025
     assert args.category == "2"
-    assert args.max_items == 7
-
-
-def test_sub_category_requires_specific_category():
-    parser = build_parser()
-    args = parser.parse_args(["--sub-category", "1001"])
-
-    with pytest.raises(SystemExit):
-        _validate_args(args, parser)
+    assert build_parser().parse_args(["--collect-proxies"]).collect_proxies is True
 
 
 @pytest.mark.parametrize("value", ["1800", "3000", "not-a-year"])
@@ -200,8 +34,14 @@ def test_year_is_validated(value):
         build_parser().parse_args(["--year", value])
 
 
+@pytest.mark.parametrize("option", ["--proxy-mode", "--proxy-db", "--schedule", "--audit-storage"])
+def test_removed_operational_switches_are_rejected(option):
+    with pytest.raises(SystemExit):
+        build_parser().parse_args([option, "x"])
+
+
 @pytest.mark.asyncio
-async def test_execute_scrape_respects_item_budget_across_categories():
+async def test_execute_scrape_runs_every_selected_category_with_year_filter():
     calls = []
 
     class FakeScraper:
@@ -209,14 +49,252 @@ async def test_execute_scrape_respects_item_budget_across_categories():
             calls.append(kwargs)
             return {"status": "COMPLETED", "items_scraped": 1, "items_skipped": 0, "items_failed": 0}
 
-    args = argparse.Namespace(category="all", sub_category="", year=2025, max_items=1, concurrency=2, full=False)
+    args = argparse.Namespace(category="all", year=2025)
 
     reports = await _execute_scrape(FakeScraper(), args)
 
-    assert len(reports) == 1
-    assert len(calls) == 1
-    assert calls[0]["category"] == "1"
-    assert calls[0]["max_items"] == 1
-    assert calls[0]["date_filter"] == "5"
-    assert calls[0]["start_date"] == "2025-01-01"
-    assert calls[0]["end_date"] == "2025-12-31"
+    assert len(reports) == 4
+    assert [call["category"] for call in calls] == ["1", "2", "3", "4"]
+    assert all(call["date_filter"] == "5" for call in calls)
+    assert all(call["start_date"] == "2025-01-01" for call in calls)
+    assert all(call["end_date"] == "2025-12-31" for call in calls)
+
+
+class FakeProcess:
+    pid = 4242
+
+    def __init__(self, returncode=None):
+        self.returncode = returncode
+        self.terminate = Mock()
+        self.kill = Mock()
+
+    async def wait(self):
+        if self.returncode is None:
+            self.returncode = -15
+        return self.returncode
+
+
+def _fresh_proxy() -> VerifiedProxy:
+    return VerifiedProxy("http://proxy.example:80", "UA", "aiohttp")
+
+
+def _stale_proxy() -> VerifiedProxy:
+    checked_at = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+    return VerifiedProxy("http://stale.example:80", "UA", "aiohttp", checked_at=checked_at)
+
+
+@pytest.mark.asyncio
+async def test_fresh_database_is_used_without_starting_the_collector(monkeypatch, tmp_path):
+    db_path = tmp_path / "proxies.db"
+    async with ProxyDatabase(db_path) as database:
+        await database.replace_all([_fresh_proxy()])
+
+    events = []
+
+    class FakeScraper:
+        def __init__(self, **kwargs):
+            assert kwargs["proxy_db_path"] == db_path
+            events.append("scraper_open")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            events.append("scraper_close")
+
+    @asynccontextmanager
+    async def unexpected_collector(path):
+        pytest.fail("Collector must not run when the database is fresh")
+        yield
+
+    async def scrape(scraper, args):
+        events.append("scrape")
+        return [{"status": "COMPLETED"}]
+
+    monkeypatch.setattr(cli.settings, "proxy_mode", "pool")
+    monkeypatch.setattr(cli.settings, "proxy_db_path", db_path)
+    monkeypatch.setattr(cli.settings, "proxy_min_ready", 1)
+    monkeypatch.setattr(cli.settings, "proxy_db_max_age_hours", 24)
+    monkeypatch.setattr(cli, "proxy_collector", unexpected_collector)
+    monkeypatch.setattr(cli, "SeprecScraper", FakeScraper)
+    monkeypatch.setattr(cli, "_execute_scrape", scrape)
+
+    reports = await cli._run_once(build_parser().parse_args([]))
+
+    assert reports == [{"status": "COMPLETED"}]
+    assert events == ["scraper_open", "scrape", "scraper_close"]
+
+
+@pytest.mark.asyncio
+async def test_partial_fresh_database_is_used_without_waiting_for_more(monkeypatch, tmp_path):
+    db_path = tmp_path / "proxies.db"
+    async with ProxyDatabase(db_path) as database:
+        await database.replace_all([_fresh_proxy()])
+
+    class FakeScraper:
+        def __init__(self, **kwargs):
+            assert kwargs["proxy_db_path"] == db_path
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    @asynccontextmanager
+    async def unexpected_collector(path):
+        pytest.fail("Collector must not run while any fresh proxies exist")
+        yield
+
+    async def scrape(scraper, args):
+        return [{"status": "COMPLETED"}]
+
+    monkeypatch.setattr(cli.settings, "proxy_mode", "pool")
+    monkeypatch.setattr(cli.settings, "proxy_db_path", db_path)
+    monkeypatch.setattr(cli.settings, "proxy_min_ready", 5)
+    monkeypatch.setattr(cli.settings, "proxy_db_max_age_hours", 24)
+    monkeypatch.setattr(cli, "proxy_collector", unexpected_collector)
+    monkeypatch.setattr(cli, "SeprecScraper", FakeScraper)
+    monkeypatch.setattr(cli, "_execute_scrape", scrape)
+
+    assert await cli._run_once(build_parser().parse_args([])) == [{"status": "COMPLETED"}]
+
+
+@pytest.mark.asyncio
+async def test_stale_database_starts_bounded_collection_then_falls_back_to_direct(monkeypatch, tmp_path):
+    db_path = tmp_path / "proxies.db"
+    async with ProxyDatabase(db_path) as database:
+        await database.replace_all([_stale_proxy()])
+
+    events = []
+    process = FakeProcess(returncode=1)
+
+    @asynccontextmanager
+    async def collector(path):
+        events.append("collector_open")
+        try:
+            yield process
+        finally:
+            events.append("collector_close")
+
+    class FakeScraper:
+        def __init__(self, **kwargs):
+            assert kwargs["proxy_db_path"] is None
+            events.append("scraper_open")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            events.append("scraper_close")
+
+    async def scrape(scraper, args):
+        events.append("scrape")
+        return [{"status": "COMPLETED"}]
+
+    monkeypatch.setattr(cli.settings, "proxy_mode", "pool")
+    monkeypatch.setattr(cli.settings, "proxy_db_path", db_path)
+    monkeypatch.setattr(cli.settings, "proxy_min_ready", 1)
+    monkeypatch.setattr(cli.settings, "proxy_db_max_age_hours", 24)
+    monkeypatch.setattr(cli.settings, "proxy_startup_timeout_seconds", 0.1)
+    monkeypatch.setattr(cli, "proxy_collector", collector)
+    monkeypatch.setattr(cli, "SeprecScraper", FakeScraper)
+    monkeypatch.setattr(cli, "_execute_scrape", scrape)
+
+    reports = await cli._run_once(build_parser().parse_args([]))
+
+    assert reports == [{"status": "COMPLETED"}]
+    assert events == ["collector_open", "scraper_open", "scrape", "scraper_close", "collector_close"]
+
+
+@pytest.mark.asyncio
+async def test_empty_collection_fails_in_always_mode(monkeypatch, tmp_path):
+    db_path = tmp_path / "proxies.db"
+    process = FakeProcess(returncode=2)
+
+    @asynccontextmanager
+    async def collector(path):
+        yield process
+
+    monkeypatch.setattr(cli.settings, "proxy_mode", "always")
+    monkeypatch.setattr(cli.settings, "proxy_db_path", db_path)
+    monkeypatch.setattr(cli.settings, "proxy_min_ready", 1)
+    monkeypatch.setattr(cli.settings, "proxy_db_max_age_hours", 24)
+    monkeypatch.setattr(cli.settings, "proxy_startup_timeout_seconds", 0.1)
+    monkeypatch.setattr(cli, "proxy_collector", collector)
+
+    with pytest.raises(RuntimeError, match="no fresh verified proxies"):
+        await cli._run_once(build_parser().parse_args([]))
+
+
+@pytest.mark.asyncio
+async def test_collector_is_terminated_when_startup_timeout_expires(monkeypatch, tmp_path):
+    db_path = tmp_path / "proxies.db"
+    process = FakeProcess(returncode=None)
+
+    @asynccontextmanager
+    async def collector(path):
+        try:
+            yield process
+        finally:
+            process.terminate()
+            await process.wait()
+
+    class FakeScraper:
+        def __init__(self, **kwargs):
+            assert kwargs["proxy_db_path"] is None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    async def scrape(scraper, args):
+        return [{"status": "COMPLETED"}]
+
+    monkeypatch.setattr(cli.settings, "proxy_mode", "pool")
+    monkeypatch.setattr(cli.settings, "proxy_db_path", db_path)
+    monkeypatch.setattr(cli.settings, "proxy_min_ready", 1)
+    monkeypatch.setattr(cli.settings, "proxy_db_max_age_hours", 24)
+    monkeypatch.setattr(cli.settings, "proxy_startup_timeout_seconds", 0.05)
+    monkeypatch.setattr(cli.settings, "proxy_collector_stop_timeout_seconds", 0.05)
+    monkeypatch.setattr(cli, "proxy_collector", collector)
+    monkeypatch.setattr(cli, "SeprecScraper", FakeScraper)
+    monkeypatch.setattr(cli, "_execute_scrape", scrape)
+
+    await cli._run_once(build_parser().parse_args([]))
+
+    process.terminate.assert_called_once()
+    assert process.returncode == -15
+
+
+def test_only_category_and_year_options_remain():
+    options = {action.dest for action in build_parser()._actions}
+    assert options == {"help", "version", "year", "category", "collect_proxies"}
+
+
+@pytest.mark.asyncio
+async def test_collect_command_uses_configured_paths(monkeypatch):
+    called = {}
+
+    async def fake_collect(**kwargs):
+        called.update(kwargs)
+        return {"verified_combinations": 3}
+
+    monkeypatch.setattr("src.services.proxy_collector.collect", fake_collect)
+
+    assert await cli._collect_proxies() == cli.EXIT_SUCCESS
+    assert called["db_path"] == cli.settings.proxy_db_path
+    assert called["csv_path"] == cli.settings.proxy_list_path
+    assert called["report_path"] == cli.settings.proxy_report_path
+
+
+@pytest.mark.asyncio
+async def test_collect_command_reports_failure_when_nothing_verifies(monkeypatch):
+    async def fake_collect(**kwargs):
+        return {"verified_combinations": 0}
+
+    monkeypatch.setattr("src.services.proxy_collector.collect", fake_collect)
+
+    assert await cli._collect_proxies() == cli.EXIT_FAILURE

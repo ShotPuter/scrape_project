@@ -3,7 +3,6 @@
 An asynchronous Python scraper for Bolivia's **Gaceta Electrónica de Comercio**.
 It collects publication and company metadata from the SEPREC API, saves original
 PDFs, renders text-only publications as PDFs, and maintains an incremental CSV index.
-Run it once for a backfill or keep it running on a recurring schedule.
 
 ## Features
 
@@ -20,57 +19,96 @@ Run it once for a backfill or keep it running on a recurring schedule.
   `DOWNLOADED` originals from `GENERATED_PDF` documents.
 - **Resilient networking:** timeouts, bounded retries with backoff and jitter,
   `Retry-After` handling, proxy rotation, and `aiohttp` / `curl_cffi` transports.
-- **Operational visibility:** JSON run reports, console and rotating file logs,
-  offline storage audits, and an optional recurring scheduler.
+- **Fresh proxy database:** verified proxies older than `PROXY_DB_MAX_AGE_HOURS`
+  are ignored instead of being reused indefinitely.
+- **Bounded startup:** proxy warming and collector waits always have a deadline.
+  A failed or slow proxy collection cannot hang the scraper forever.
 
-## Quick start: three commands
+## Quick start
 
-Run these commands from the repository root. Start with a small batch before a
-historical backfill. These examples explicitly use a direct connection, bypassing
-proxy collection; if SEPREC blocks your IP, use the proxy workflow below.
-
-### Local virtual environment
-
-Requires Python 3.11 or later. On Linux/macOS:
+Requires Python 3.11 or later.
 
 ```bash
 python3.11 -m venv .venv
-source .venv/bin/activate && python -m pip install -r requirements.txt
-python main.py --proxy-mode direct --category 2 --year 2026 --max-items 5
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+
+# Small direct-connection run (no proxy collection)
+PROXY_MODE=direct python main.py --category 2 --year 2026
+
+# Incremental run over every category using the verified proxy database
+python main.py
+
+# Collect or refresh the proxy database without scraping
+python main.py --collect-proxies
 ```
 
-On Windows, activate with `.venv\Scripts\Activate.ps1` in PowerShell, then install
-with `python -m pip install -r requirements.txt` and run the same CLI command.
 Configuration is optional: copy `.env.example` to `.env` to customize defaults.
+Relative paths are resolved against the project root, so the scraper can be started
+from any working directory (cron, systemd, Docker, IDE, ...).
 
 ### Docker Compose
 
-Requires Docker Engine / Docker Desktop and Compose **v2.24.0+** (optional `env_file`
-support). The container runs as UID/GID **1000:1000** by default. On Linux, if your
-account uses different IDs, export `SCRAPER_UID=$(id -u)` and
-`SCRAPER_GID=$(id -g)` before building. The existing `data` directory and its files
-must be writable by those IDs; a bind mount preserves host permissions.
+Requires Docker Engine / Docker Desktop and Compose **v2.24.0+**. The container runs
+as UID/GID **1000:1000** by default. On Linux, if your account uses different IDs,
+export `SCRAPER_UID=$(id -u)` and `SCRAPER_GID=$(id -g)` before building.
 
 ```bash
 mkdir -p data
 docker compose build scraper
-docker compose run --rm scraper --proxy-mode direct --category 2 --year 2026 --max-items 5
+
+# Direct run
+docker compose run --rm -e PROXY_MODE=direct scraper --category 2 --year 2026
+
+# Verified-proxy run
+docker compose run --rm scraper
+
+# Proxy collection only
+docker compose run --rm scraper --collect-proxies
 ```
 
-PDFs, `publications.csv`, proxy state, and logs remain in **`./data`** after the
-container exits or is removed. The image uses `python:3.11-slim`, runtime dependencies
-only, and a non-root user. Compose adds a read-only root filesystem, writable `/tmp`,
-dropped capabilities, an init process, and bounded Docker logs. No ports are exposed.
+PDFs, `publications.csv`, the proxy database, and logs remain in **`./data`**.
+The image uses `python:3.11-slim`, runtime dependencies only, and a non-root user.
+Compose adds a read-only root filesystem, writable `/tmp`, dropped capabilities,
+an init process, and bounded Docker logs.
+
+## CLI
+
+The command line intentionally exposes only the workflows this project needs.
+
+```bash
+python main.py                      # incremental scrape of all categories
+python main.py --year 2025          # only publications from 2025
+python main.py --category 1         # only INSTRUMENTOS
+python main.py --category 2 --year 2026
+python main.py --collect-proxies    # build/refresh data/proxies.db and exit
+```
+
+| Option | Behavior |
+| --- | --- |
+| `--year YYYY` | Restrict collection to January 1–December 31 of that year |
+| `--category all/1/2/3/4` | All / INSTRUMENTOS / CONVOCATORIAS / MEMORIAS / BALANCES |
+| `--collect-proxies` | Run the two-stage proxy collector and exit |
+
+Routing, transports, timeouts, concurrency, and proxy tuning come from environment
+variables (see `.env.example`). Already saved intact items are skipped during an
+incremental run. A year filter scans the selected window and disables the early
+stop used for unfiltered incremental runs.
+
+Exit codes: **0** for completed runs (including partial item errors), **1** for a
+failed category run, fatal startup error, or failed proxy collection, **2** for
+invalid CLI arguments, and **130** for a keyboard interruption.
 
 ## Architecture
 
 ```text
-main.py → CLI / Scheduler → SeprecScraper
-                              ├─ SeprecClient → HTTP transport → SEPREC API
-                              ├─ FileStorage → original PDF / ReportLab fallback
-                              └─ PublicationCsv → metadata + incremental checkpoint
-proxy_tool.py → public candidates → target check → working_proxies.txt
-collect_proxies.py → two-stage verification → proxies.db
+main.py → CLI
+           ├─ SeprecScraper
+           │    ├─ SeprecClient → HTTP transport → SEPREC API
+           │    ├─ FileStorage → original PDF / ReportLab fallback
+           │    └─ PublicationCsv → metadata + incremental checkpoint
+           ├─ proxy_bootstrap → freshness check + bounded collector lifecycle
+           └─ proxy_collector → two-stage verification → proxies.db
 ```
 
 1. Discover categories and paginate publication summaries.
@@ -84,176 +122,51 @@ The HTTP layer owns transport, rate limiting, and retries; orchestration owns
 pagination and item budgets; storage owns file validation and persistence.
 The scraper uses the public API directly and requires no browser or Selenium.
 
-## CLI examples
+## Verified proxy database
 
-Examples assume the virtual environment is active. `--proxy-mode direct` skips the
-automatic proxy collector. Omit it to use the default verified database workflow.
+By default `python main.py` expects verified proxies in `data/proxies.db`.
+The database is produced by the two-stage collector:
 
-```bash
-# Discover all CLI options
-python main.py --help
+1. download public proxy lists, normalise metadata, and make a real HTTPS request
+   through each candidate;
+2. check survivors against the exact catalog and publication-search endpoints
+   used by the scraper.
 
-# Instruments for one calendar year
-python main.py --proxy-mode direct --category 1 --year 2025
+Run the collector explicitly with `python main.py --collect-proxies` (or the
+standalone `python collect_proxies.py`). It writes `data/proxy-report.json` and
+only replaces the database when at least one proxy passes stage 2.
 
-# Announcements: at most 10 attempted new publications
-python main.py --proxy-mode direct --category 2 --max-items 10
+### Startup flow
 
-# Annual reports and balance sheets
-python main.py --proxy-mode direct --category 3 --year 2024 --max-items 20
-python main.py --proxy-mode direct --category 4 --year 2025 --max-items 20
+1. The CLI reads only records newer than `PROXY_DB_MAX_AGE_HOURS`
+   (set it to `0` to disable the freshness filter deliberately).
+2. If enough fresh proxies exist (`PROXY_MIN_READY`), scraping starts immediately.
+3. If some fresh proxies exist, scraping starts with that smaller pool and logs a
+   warning.
+4. If none exist, the CLI starts the collector and waits at most
+   `PROXY_STARTUP_TIMEOUT_SECONDS`.
+5. After the deadline (or if the collector exits), scraping starts with whatever
+   fresh proxies were published. With none, the run continues directly, except in
+   `PROXY_MODE=always`, where it fails instead of silently bypassing proxies.
+6. The collector is always terminated after the scrape; it never blocks shutdown
+   for longer than `PROXY_COLLECTOR_STOP_TIMEOUT_SECONDS`.
 
-# Specific sub-category (requires a single category)
-python main.py --proxy-mode direct --category 1 --sub-category 1003 --year 2025 --max-items 5
+Proxy warming itself is bounded by `PROXY_WARMUP_TIMEOUT_SECONDS`. If the warmup
+threshold is not reached in time, the client starts with the ready sessions and
+continues warming in the background; if none are ready it falls back to direct
+requests (or raises in `always` mode).
 
-# At most 3 pages per category, 25 attempted items across all categories
-python main.py --proxy-mode direct --category all --max-pages 3 --max-items 25 --concurrency 5
+`PROXY_MODE` values:
 
-# Re-fetch and overwrite a limited batch, ignoring the incremental checkpoint
-python main.py --proxy-mode direct --category 2 --max-items 5 --full
-
-# Offline, read-only integrity report; no API requests
-python main.py --audit-storage --audit-output data/storage-audit.json
-```
-
-| Option | Behavior |
-| --- | --- |
-| `--category all/1/2/3/4` | All categories / INSTRUMENTOS / CONVOCATORIAS / MEMORIAS / BALANCES |
-| `--year YYYY` | Restrict collection to January 1–December 31 of that year |
-| `--max-items N` | Limit attempted new items across categories; failed items also consume the budget |
-| `--max-pages N` | Limit API pages per category |
-| `--concurrency N` | Shared HTTP concurrency cap; default 15, independent of the rate limit |
-| `--transport aiohttp/curl_cffi/auto` | Select HTTP transport policy |
-| `--full` | Disable incremental skipping and overwrite existing documents |
-| `--schedule` | Run immediately, then repeat after each configured interval |
-| `--interval-hours N` | Wait N hours after each completed scheduled job; default 24 |
-
-Already saved intact items do not consume `--max-items`. For an unfiltered
-incremental run, three consecutive fully processed pages stop discovery early.
-A year filter disables that early stop and scans the selected window.
-
-For Docker, replace `python main.py` with `docker compose run --rm scraper`:
-
-```bash
-docker compose run --rm scraper --proxy-mode direct --category 1 --year 2025 --max-items 10
-docker compose run --rm scraper --audit-storage
-```
-
-Exit codes: **0** for completed runs (including partial item errors), **1** for a
-failed category run, fatal startup error, or detected audit problems, **2** for
-invalid CLI arguments, and **130** for a keyboard interruption. Inspect JSON
-`status` and `items_failed` when partial failures matter.
-
-## Free proxies with proxy_tool.py
-
-The utility collects public HTTP proxy candidates, checks them against the SEPREC
-catalog endpoint, and writes responsive endpoints to `data/working_proxies.txt`.
-No account or paid proxy subscription is required.
-
-```bash
-# Discover and check up to 150 candidates per public source, plus local candidates
-python proxy_tool.py update --limit 150
-
-# Show the number of saved endpoints (does not perform a network check)
-python proxy_tool.py status
-
-# Recheck the saved list and remove failed endpoints
-python proxy_tool.py check
-
-# Use exactly this list; disable upstream refresh to preserve it
-python main.py --proxy-file data/working_proxies.txt --no-proxy-source \
-  --proxy-mode pool --category 2 --max-items 5
-```
-
-`update`, `check`, and `status` accept `--file PATH`. `update` and `check` return
-1 when no working proxies remain and write the resulting list, which may be empty.
-Free proxies can disappear between verification and download; re-run `update` if
-the pool becomes unusable. This utility's catalog check disables certificate
-verification; scraper readiness checks still apply their own TLS and API checks.
-A utility success does not guarantee a usable scraper session.
-
-The explicit `--proxy-file` skips automatic database collection.
-`--no-proxy-source` prevents the default upstream refresh from replacing that file.
-`pool` prefers proxies with a direct fallback when no usable session is available;
-use `--proxy-mode always` when every request must use a proxy, or `fallback` to try
-direct requests first and switch after a block.
-
-Run the same workflow inside the built image by overriding its scraper entrypoint:
-
-```bash
-docker compose run --rm --entrypoint python scraper proxy_tool.py update --limit 150
-docker compose run --rm --entrypoint python scraper proxy_tool.py status
-docker compose run --rm --entrypoint python scraper proxy_tool.py check
-docker compose run --rm scraper --proxy-file data/working_proxies.txt \
-  --no-proxy-source --proxy-mode pool --category 2 --max-items 5
-```
-
-### Automatic verified database workflow
-
-With no proxy overrides, `python main.py` starts `collect_proxies.py` in a separate
-process and waits for **20 distinct verified proxies** (`PROXY_MIN_READY`). The
-collector checks HTTPS connectivity, then the target catalog and search API.
-Successful `(proxy URL, user agent, transport)` combinations are stored in SQLite.
-Collection and scraping overlap once the readiness threshold is reached; a run
-also waits for the collector to finish before exiting. This can take considerably
-longer than the limited direct-connection examples.
-
-If the readiness threshold is not reached, startup fails. The collector writes
-`data/proxy-report.json`; a scan with zero verified proxies preserves the existing
-database. To reuse a previously collected database without another refresh:
-
-```bash
-python main.py --no-refresh-proxies --proxy-db data/proxies.db --max-items 5
-```
-
-`--proxy-db` takes precedence over `--proxy-file`. Keep proxy state in `data` so it
-survives container replacement. See `.env.example` for collector settings.
-
-## One-shot jobs and scheduled operation
-
-The default image command runs **once**. Compose's `scraper` service has no restart
-policy. An opt-in `scheduler` service runs with `--schedule` and restarts unless
-explicitly stopped:
-
-```bash
-# Start only the recurring service (default proxy/database workflow)
-docker compose --profile scheduler up -d scheduler
-
-# Follow logs
-docker compose logs -f scheduler
-
-# Stop and remove the service; ./data is retained
-docker compose --profile scheduler down
-```
-
-To change the schedule interval, set `SCHEDULE_INTERVAL_HOURS=12` in `.env`.
-To run the daemon directly without Compose:
-
-```bash
-docker run -d --name gaceta-scheduler --restart unless-stopped --init \
-  --mount type=bind,source="$(pwd)/data",target=/app/data \
-  gaceta-scraper:local --schedule --interval-hours 12
-```
-
-Locally: `python main.py --schedule --interval-hours 24`. Each job completes before
-the next interval begins; job failures are logged and the scheduler continues.
-SIGINT/SIGTERM request a stop after the current job. Compose allows two minutes
-before forced termination; increase `stop_grace_period` for long backfills or
-proxy collection. Atomic writes and the CSV allow later incremental recovery.
-
-**Run one writer per data directory.** Stop the scheduler before running a one-shot
-job against the same CSV. The CSV lock protects tasks within a process; there is
-no cross-process writer lock. Use separate data directories for parallel jobs.
-
-There is no HTTP health endpoint. A version command only checks that Python can
-start, so it is deliberately not used as a container health check. Monitor job
-reports, logs, and the freshness of successful CSV entries.
+- `pool` (default): proxies first, direct only when the pool is empty;
+- `fallback`: direct first, proxies after a block;
+- `always`: every request must use a proxy;
+- `direct`: never use proxies.
 
 ## Configuration and output
 
-Settings come from environment variables or an optional `.env` file. CLI flags
-override their corresponding settings. See [.env.example](.env.example) for the
-complete list. Invalid settings fail at startup.
+Settings come from environment variables or an optional `.env` file. Invalid
+settings fail at startup. See [.env.example](.env.example) for the complete list.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -265,30 +178,29 @@ complete list. Invalid settings fail at startup.
 | `PAGE_SIZE` | `50` | Summaries per API page (minimum 10) |
 | `PROXY_MODE` | `pool` | Routing policy |
 | `PROXY_MIN_READY` | `20` | Proxy readiness threshold |
-| `SCHEDULE_INTERVAL_HOURS` | `24` | Delay after each scheduled job |
+| `PROXY_DB_MAX_AGE_HOURS` | `24` | Ignore older verified records |
+| `PROXY_WARMUP_TIMEOUT_SECONDS` | `90` | Maximum startup warmup wait |
+| `PROXY_STARTUP_TIMEOUT_SECONDS` | `180` | Maximum wait for a fresh database |
+| `PROXY_COLLECTOR_STOP_TIMEOUT_SECONDS` | `5` | Collector shutdown grace period |
 | `PDF_STORAGE_DIR` | `./data/pdf` | PDF destination |
 | `CSV_EXPORT_PATH` | `./data/publications.csv` | Metadata and incremental index |
 | `LOG_LEVEL` / `LOG_TO_FILE` | `INFO` / `true` | Log verbosity and rotating file output |
 
 Compose fixes output paths under `/app/data` so they remain on the bind mount.
-Use relative `data/...` paths in CLI proxy arguments inside a container. Do not
-put host-specific absolute paths into container settings.
 
 ```text
 data/
 ├── pdf/YYYY/MM/<COMPANY>_<REGISTRATION>_<PUBLICATION_ID>.pdf
 ├── publications.csv
 ├── scraper.log
-├── working_proxies.txt       # proxy_tool.py workflow
-├── proxies.db               # automatic collector workflow
-└── proxy-report.json
+├── proxies.db                # verified proxy database
+└── proxy-report.json         # collector report
 ```
 
 CSV rows include publication ID, code, title, date, category, company name,
 current/former registration numbers, original/generated flag, file path, size,
 status, and timestamps. The CSV stores absolute PDF paths: keep the same storage
-location for incremental runs. Moving a dataset between local and Docker paths
-requires reconciling those paths, otherwise the files are treated as missing.
+location for incremental runs.
 
 Back up PDFs and CSV together. For large backfills, collect one year and category
 at a time, estimate disk usage from a small sample, and monitor available space.
@@ -304,53 +216,36 @@ python -m ruff check .
 ```
 
 Tests cover models, HTTP behavior with local servers, retries, storage and PDF
-validation, incremental collection, item budgets, proxy handling, CLI validation,
-and scheduler lifecycle. No live SEPREC connection is needed for the test suite.
+validation, incremental collection, item budgets, proxy freshness and lifecycle,
+CLI validation, and startup timeouts. No live SEPREC connection is needed.
 
-Container startup and offline audit checks:
+Container startup and smoke checks:
 
 ```bash
 docker compose config --quiet
 docker compose build scraper
 docker compose run --rm scraper --help
-docker compose run --rm --entrypoint python scraper proxy_tool.py --help
-docker compose run --rm scraper --audit-storage
-```
-
-For a repeatable acceptance test without external network access, run the local
-API fixture inside the production container. It checks original and generated
-PDFs, persisted CSV rows, incremental deduplication, the storage audit, non-root
-execution, the read-only application directory, and scheduler shutdown on SIGTERM:
-
-```bash
 docker compose run --rm --no-deps \
   -v "$(pwd)/tests/docker_smoke.py:/smoke.py:ro" \
   -e PYTHONPATH=/app --entrypoint python scraper /smoke.py
 ```
 
-The test writes only to a unique `data/smoke-*` directory and leaves its artifacts
-for inspection. Stop any scheduler before running validation against its volume.
-
-An audit of an empty directory checks zero records; use the limited live scrape
-from Quick start to verify network access and actual PDF output. An API 403 or
-Cloudflare challenge can require another network route; changing transport alone
-does not solve interactive challenges.
+The smoke test writes only to a unique `data/smoke-*` directory and leaves its
+artifacts for inspection.
 
 ## Project layout
 
 ```text
 main.py                     Thin executable entry point
 config.py                   Environment-based settings and validation
-proxy_tool.py               Simple free-proxy update/check/status CLI
-collect_proxies.py          Verified SQLite proxy collector entry point
-src/cli.py                  Argument parsing and run lifecycle
+collect_proxies.py          Standalone verified-proxy collector entry point
+src/cli.py                  Minimal argument parsing and run lifecycle
 src/client/                 HTTP transports, retries, rate limits, proxy pool
 src/models/                 Pydantic API models and CSV records
-src/services/               Scraper, PDF generation, scheduler, proxy verification
-src/storage/                Atomic PDF files, CSV index, SQLite proxy state, audit
-src/proxy/                  Simple proxy discovery and checking utilities
+src/services/               Scraper, PDF generation, proxy bootstrap/collection
+src/storage/                Atomic PDF files, CSV index, SQLite proxy state
 src/utils/                  Logging, validation, filenames, runtime helpers
 tests/                      Automated regression suite
 Dockerfile                  Python 3.11 Slim runtime image
-docker-compose.yml          One-shot and scheduled services
+docker-compose.yml          One-shot scraper service
 ```

@@ -67,6 +67,8 @@ class ProxyConfig:
     failure_cooldown_seconds: float = 120
     max_failures: int = 3
     dead_ttl_hours: float = 1
+    db_max_age_hours: float = 24
+    warmup_timeout_seconds: float = 90
     check_path: str = ""
     check_payload: Mapping[str, Any] = field(default_factory=dict)
     warmup: bool = True
@@ -93,6 +95,10 @@ class ProxyConfig:
             raise ValueError("Proxy replenish limits must be non-negative")
         if self.dead_ttl_hours < 0:
             raise ValueError("Proxy dead TTL must be non-negative")
+        if self.db_max_age_hours < 0:
+            raise ValueError("Proxy database max age must be non-negative")
+        if self.warmup_timeout_seconds <= 0:
+            raise ValueError("Proxy warmup timeout must be positive")
         if (self.file or self.db_path) and not self.check_path:
             raise ValueError("Proxy mode requires a readiness endpoint")
         if self.per_ip_limit < 1 or self.probe_concurrency < 1 or self.acquire_timeout <= 0:
@@ -188,6 +194,8 @@ def client_config_from_settings(
             failure_cooldown_seconds=app_settings.proxy_failure_cooldown_seconds,
             max_failures=app_settings.proxy_max_failures,
             dead_ttl_hours=app_settings.proxy_dead_ttl_hours,
+            db_max_age_hours=app_settings.proxy_db_max_age_hours,
+            warmup_timeout_seconds=app_settings.proxy_warmup_timeout_seconds,
             check_path=proxy_check_path,
             check_payload=dict(proxy_check_payload or {}),
             warmup=pick(proxy_warmup, app_settings.proxy_warmup),

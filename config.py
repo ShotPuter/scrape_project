@@ -115,11 +115,14 @@ class Settings:
     proxy_max_failures: int = 3
     proxy_dead_ttl_hours: float = 1
     proxy_warmup: bool = True
+    # Verified records older than this are ignored; stale proxies are worse than none.
+    proxy_db_max_age_hours: float = 24
+    # Startup must stay bounded even when every candidate is slow or the collector hangs.
+    proxy_warmup_timeout_seconds: float = 90
+    proxy_startup_timeout_seconds: float = 180
+    proxy_collector_stop_timeout_seconds: float = 5
     proxy_db_path: Path = field(default_factory=lambda: BASE_DIR / "data" / "proxies.db")
     cookies_file: str = ""
-
-    # Scheduler
-    schedule_interval_hours: float = 24
 
     # File & database storage
     storage_base_dir: Path = field(default_factory=lambda: BASE_DIR / "data")
@@ -211,7 +214,6 @@ class Settings:
         self._require(self.metrics_interval_seconds > 0, "METRICS_INTERVAL_SECONDS must be positive")
         self._require(self.retry_attempts >= 1, "RETRY_ATTEMPTS must be >= 1")
         self._require(self.page_delay_seconds >= 0, "PAGE_DELAY_SECONDS must be >= 0")
-        self._require(self.schedule_interval_hours > 0, "SCHEDULE_INTERVAL_HOURS must be > 0")
         self._require(
             self.http_transport in {"aiohttp", "curl_cffi", "auto"},
             "HTTP_TRANSPORT must be 'aiohttp', 'curl_cffi' or 'auto'",
@@ -226,6 +228,13 @@ class Settings:
         self._require(self.proxy_failure_cooldown_seconds >= 0, "PROXY_FAILURE_COOLDOWN_SECONDS must be >= 0")
         self._require(self.proxy_max_failures >= 1, "PROXY_MAX_FAILURES must be >= 1")
         self._require(self.proxy_dead_ttl_hours >= 0, "PROXY_DEAD_TTL_HOURS must be >= 0")
+        self._require(self.proxy_db_max_age_hours >= 0, "PROXY_DB_MAX_AGE_HOURS must be >= 0")
+        self._require(self.proxy_warmup_timeout_seconds > 0, "PROXY_WARMUP_TIMEOUT_SECONDS must be > 0")
+        self._require(self.proxy_startup_timeout_seconds > 0, "PROXY_STARTUP_TIMEOUT_SECONDS must be > 0")
+        self._require(
+            self.proxy_collector_stop_timeout_seconds > 0,
+            "PROXY_COLLECTOR_STOP_TIMEOUT_SECONDS must be > 0",
+        )
         self._require(self.proxy_max_candidates >= 0, "PROXY_MAX_CANDIDATES must be >= 0 (0 = all)")
         self._require(self.proxy_max_per_source >= 0, "PROXY_MAX_PER_SOURCE must be >= 0 (0 = all)")
 

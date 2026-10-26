@@ -72,8 +72,9 @@ async def main():
         "PAGE_DELAY_SECONDS": "0",
         "RETRY_ATTEMPTS": "1",
         "LOG_TO_FILE": "true",
+        "PROXY_MODE": "direct",
     }
-    args = ["--proxy-mode", "direct", "--category", "2", "--year", "2026", "--max-items", "2", "--max-pages", "1"]
+    args = ["--category", "2", "--year", "2026"]
 
     async def execute(*arguments):
         process = await asyncio.create_subprocess_exec(
@@ -113,29 +114,6 @@ async def main():
             stat = await asyncio.to_thread(path.stat)
             assert (hashlib.sha256(data).hexdigest(), stat.st_mtime_ns) == snapshot
         assert not await asyncio.to_thread(lambda: list(output.rglob("*.tmp")))
-        audit = await execute("--audit-storage")
-        assert '"checked": 2' in audit and '"invalid": 0' in audit, audit
-
-        process = await asyncio.create_subprocess_exec(
-            sys.executable, "main.py", *args,
-            "--schedule", "--interval-hours", "24",
-            env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            for _ in range(100):
-                if "Next recurring scrape iteration scheduled" in (output / "scraper.log").read_text():
-                    break
-                await asyncio.sleep(0.1)
-            else:
-                raise AssertionError("Scheduler did not reach interval wait")
-            process.terminate()
-            stdout, stderr = await asyncio.wait_for(process.communicate(), 10)
-            assert process.returncode == 0, (stdout.decode(), stderr.decode())
-            assert "Scheduler execution loop stopped cleanly" in (output / "scraper.log").read_text()
-        finally:
-            if process.returncode is None:
-                process.kill()
-                await process.wait()
         print(
             json.dumps(
                 {
@@ -145,8 +123,6 @@ async def main():
                     "generated_pdfs": 1,
                     "csv_rows": 2,
                     "duplicate_rows": 0,
-                    "audit_invalid": 0,
-                    "scheduler_sigterm": "clean",
                     "output": str(output),
                 },
                 indent=2,

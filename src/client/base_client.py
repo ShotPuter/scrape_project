@@ -60,7 +60,8 @@ class HttpClient:
         api_timeout_policy: TimeoutPolicy | None = None, detail_timeout_policy: TimeoutPolicy | None = None,
         requests_per_second: float = 0, proxy_per_ip_limit: int = 1, proxy_probe_concurrency: int = 2,
         proxy_acquire_timeout: float = 150, direct_block_cooldown_seconds: float = 300, proxy_mode: str = "pool",
-        proxy_mix_share: float = 0, config: ClientConfig | None = None,
+        proxy_mix_share: float = 0, proxy_db_max_age_hours: float = 24, proxy_warmup_timeout_seconds: float = 90,
+        config: ClientConfig | None = None,
     ):
         if config is None:
             api_policy = api_timeout_policy or TimeoutPolicy(total=timeout_seconds)
@@ -78,6 +79,8 @@ class HttpClient:
                     per_ip_limit=proxy_per_ip_limit, probe_concurrency=proxy_probe_concurrency,
                     acquire_timeout=proxy_acquire_timeout,
                     direct_block_cooldown_seconds=direct_block_cooldown_seconds, mix_share=proxy_mix_share,
+                    db_max_age_hours=proxy_db_max_age_hours,
+                    warmup_timeout_seconds=proxy_warmup_timeout_seconds,
                 ),
                 connection_limit=connection_limit, impersonate=impersonate, cookies_file=cookies_file,
                 transport=transport, requests_per_second=requests_per_second,
@@ -116,6 +119,8 @@ class HttpClient:
         self.proxy_failure_cooldown_seconds = proxy.failure_cooldown_seconds
         self.proxy_max_failures = proxy.max_failures
         self.proxy_dead_ttl_hours = proxy.dead_ttl_hours
+        self.proxy_db_max_age_hours = proxy.db_max_age_hours
+        self.proxy_warmup_timeout_seconds = proxy.warmup_timeout_seconds
         self.proxy_check_path = proxy.check_path
         self.proxy_check_payload = dict(proxy.check_payload)
         self.proxy_warmup = proxy.warmup
@@ -199,16 +204,23 @@ class HttpClient:
 
     async def _create_proxy_pool(self) -> ProxyPool | None:
         if self.proxy_db_path is not None:
+            max_age = self.proxy_db_max_age_hours if self.proxy_db_max_age_hours > 0 else None
             async with ProxyDatabase(self.proxy_db_path) as database:
-                records = await database.list_active(limit=self.proxy_sample_size or None)
+                records = await database.list_active(
+                    limit=self.proxy_sample_size or None, max_age_hours=max_age
+                )
             dead_path = dead_proxy_path(self.proxy_db_path)
             dead = load_dead_proxies(dead_path, self.proxy_dead_ttl_hours)
             records = [record for record in records if record.url not in dead]
             if not records:
                 if self.proxy_mode == "always":
-                    raise RuntimeError("No verified proxies found in the database; run collect_proxies.py first")
+                    raise RuntimeError(
+                        "No fresh verified proxies found in the database; run `python main.py --collect-proxies`"
+                    )
+                age = f"{self.proxy_db_max_age_hours:.0f}h" if max_age else "disabled"
                 self.logger.warning(
-                    "No verified proxies found in %s; continuing with direct requests only", self.proxy_db_path
+                    "No fresh verified proxies in %s (freshness window: %s); continuing with direct requests only",
+                    self.proxy_db_path, age,
                 )
                 return None
             proxies = [
@@ -288,12 +300,27 @@ class HttpClient:
         self._pool_watch_task = asyncio.create_task(watch())
 
     async def _warm_up_pool(self, pool: ProxyPool, proxies: list[ProxyEndpoint | str]) -> None:
-        self.logger.info("Checking %d proxy candidates against the API...", len(proxies))
+        self.logger.info(
+            "Checking %d proxy candidates against the API (timeout %.0fs)...",
+            len(proxies), self.proxy_warmup_timeout_seconds,
+        )
         pool.start_warmup(
             f"{self.base_url}/{self.proxy_check_path.lstrip('/')}", self.proxy_check_payload,
             min(self.proxy_check_concurrency, self.proxy_probe_concurrency), self.proxy_check_timeout,
         )
-        await pool.wait_until_ready()
+        try:
+            async with asyncio.timeout(self.proxy_warmup_timeout_seconds):
+                await pool.wait_until_ready()
+        except TimeoutError as exc:
+            if not pool.sessions:
+                raise RuntimeError(
+                    f"No proxy became ready within {self.proxy_warmup_timeout_seconds:.0f}s"
+                ) from exc
+            self.logger.warning(
+                "Proxy warmup did not finish within %.0fs; starting with %d ready proxy(s) while warmup continues",
+                self.proxy_warmup_timeout_seconds, len(pool.sessions),
+            )
+            return
         self.logger.info(
             "Starting with %d ready proxies; warmup continues in background (%d/%d checked)", len(pool.sessions),
             pool.checked, len(proxies),

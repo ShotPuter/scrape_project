@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 SUPPORTED_PROXY_SCHEMES = _SUPPORTED_PROXY_SCHEMES
 DEAD_PROXY_TTL_HOURS = 1.0
 WARMUP_PROGRESS_EVERY = 25
+WARMUP_PROGRESS_SECONDS = 10.0
 HARD_TIMEOUT_GRACE_SECONDS = 1.0
 DEFAULT_FAILURE_COOLDOWN_SECONDS = 120.0
 DEFAULT_MAX_FAILURES = 3
@@ -175,6 +176,9 @@ class ProxyPool:
         self._warmup_concurrency = 1
         self._warmup_timeout = 10.0
         self._warmup_error: RuntimeError | None = None
+        self._warmup_started = time.monotonic()
+        self._last_progress_log = self._warmup_started
+        self._ready_announced = False
 
     def configure_warmup(self, url: str, payload: dict, concurrency: int, timeout: float) -> None:
         self._warmup_url = url
@@ -300,11 +304,18 @@ class ProxyPool:
 
         self._warmup_error = None
         self._ready.clear()
+        self._ready_announced = False
+        self._warmup_started = time.monotonic()
+        self._last_progress_log = self._warmup_started
         self.configure_warmup(url, payload, concurrency, timeout)
         self._warmup_candidates = [
             proxy for proxy in self.proxies if proxy.url not in self._active and proxy.url not in self._permanent_dead
         ]
         self._scheduled.update(proxy.url for proxy in self._warmup_candidates)
+        logger.info(
+            "Proxy warmup started: candidates=%d, concurrency=%d, per-probe timeout=%.1fs",
+            len(self._warmup_candidates), self._warmup_concurrency, self._warmup_timeout,
+        )
         self._warmup_task = asyncio.create_task(self._run_warmup())
         return self._warmup_task
 
@@ -339,6 +350,11 @@ class ProxyPool:
 
         if not self.sessions:
             self._warmup_error = RuntimeError(f"None of {self.checked} tested proxies returned valid API data")
+        else:
+            logger.info(
+                "Proxy warmup finished: %d/%d checked, %d usable",
+                self.checked, len(self.proxies), len(self.sessions),
+            )
 
     def create_session(self, proxy: str | ProxyEndpoint):
         endpoint = _as_endpoint(proxy)
@@ -427,9 +443,20 @@ class ProxyPool:
 
     def _log_progress(self) -> None:
         total = len(self.proxies)
-        if self.checked % WARMUP_PROGRESS_EVERY and self.checked != total:
+        now = time.monotonic()
+        count_due = not total or self.checked % WARMUP_PROGRESS_EVERY == 0 or self.checked == total
+        time_due = now - self._last_progress_log >= WARMUP_PROGRESS_SECONDS
+        if not count_due and not time_due:
             return
-        logger.info("Proxy warmup progress: %d/%d checked, %d usable so far", self.checked, total, len(self.sessions))
+        self._last_progress_log = now
+        elapsed = max(0.001, now - self._warmup_started)
+        rate = self.checked / elapsed
+        remaining = max(0, total - self.checked)
+        eta = remaining / rate if rate > 0 else 0.0
+        logger.info(
+            "Proxy warmup progress: %d/%d checked (%.1f/s), %d usable, elapsed %.0fs, ETA %.0fs",
+            self.checked, total, rate, len(self.sessions), elapsed, eta,
+        )
 
     def add_session(self, proxy: str | ProxyEndpoint, session: AsyncSession) -> bool:
         endpoint = _as_endpoint(proxy)
@@ -449,6 +476,9 @@ class ProxyPool:
 
         if len(self.sessions) >= self.min_ready:
             self._ready.set()
+            if not self._ready_announced:
+                self._ready_announced = True
+                logger.info("Proxy readiness threshold reached: %d/%d ready", len(self.sessions), self.min_ready)
         return True
 
     def record_dead(self, proxy: str | ProxyEndpoint) -> None:
