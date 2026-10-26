@@ -50,7 +50,7 @@ DEFAULT_USER_AGENTS = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 )
-PROVIDER_CHOICES = ("public", "all", "both", "proxyscrape", "hproxy", "proxifly", "iplocate", "free-proxy")
+PROVIDER_CHOICES = ("public", "all", "proxyscrape", "hproxy", "proxifly", "iplocate", "free-proxy")
 
 
 def _write_status(text: str) -> None:
@@ -139,9 +139,6 @@ def resolve_providers(provider: str) -> list[str]:
         return list(PUBLIC_SOURCES)
     if value == "all":
         return [*PUBLIC_SOURCES, "iplocate", "free-proxy"]
-    if value == "both":
-        # Backwards-compatible alias for the pre-multi-source default.
-        return ["iplocate", "free-proxy"]
     if value in {*PUBLIC_SOURCES, "iplocate", "free-proxy"}:
         return [value]
     raise ValueError(f"provider must be one of: {', '.join(PROVIDER_CHOICES)}")
@@ -673,7 +670,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="public",
         help=(
             "Candidate source: public (ProxyScrape/HProxy/Proxifly, default), all, "
-            "both (iplocate + free-proxy), or one named source."
+            "or one named source."
         ),
     )
     parser.add_argument(

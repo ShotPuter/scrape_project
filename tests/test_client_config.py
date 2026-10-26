@@ -84,9 +84,7 @@ def test_seprec_client_uses_injected_config_without_global_settings():
         base_url="http://localhost/api", timeouts=TimeoutConfig(api=TimeoutPolicy(total=5)), proxy=ProxyConfig(mode="direct")
     )
     client = SeprecClient(config=config)
-    assert client.http.config is config
     assert client.proxy_mode == "direct"
-    assert client.http.config.base_url == "http://localhost/api"
 
 
 @pytest.mark.asyncio

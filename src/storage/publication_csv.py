@@ -65,12 +65,6 @@ class PublicationCsv:
         valid_identifiers = await asyncio.to_thread(_extract_valid_identifiers, existing_records, self.verify_files)
         return [publication_id for publication_id in publication_ids if publication_id not in valid_identifiers]
 
-    async def get_all_records(self) -> list[PublicationRecord]:
-        """Return all indexed records sorted by publication date descending."""
-        await self.load()
-        records_by_id = sorted(self._records.values(), key=lambda record: record.id)
-        return sorted(records_by_id, key=lambda record: record.publication_date or "", reverse=True)
-
     async def get_stats(self) -> dict[str, int | float]:
         """Compute aggregated volume and storage statistics across index."""
         await self.load()

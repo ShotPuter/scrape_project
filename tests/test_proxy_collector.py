@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from src.client.proxy_catalog import ProxyCandidate, filter_and_limit_candidates, parse_source_payload
+from src.client.proxy_catalog import CatalogLoadResult, ProxyCandidate, filter_and_limit_candidates, parse_source_payload
 from src.client.proxy_pool import dead_proxy_path
 from src.services import proxy_collector
 from src.services.proxy_collector import (
@@ -72,12 +72,16 @@ async def test_collect_replaces_database_and_clears_dead_list(tmp_path, monkeypa
     async def fake_stage2(stage1_successes, **kwargs):
         return [Stage2Check(success, Stage2Result(True, _success_stats(10.0))) for success in stage1_successes]
 
+    async def empty_public_sources(*args, **kwargs):
+        return CatalogLoadResult()
+
+    monkeypatch.setattr(proxy_collector, "load_public_catalog", empty_public_sources)
     monkeypatch.setattr(proxy_collector, "load_free_proxy_candidates", fake_free_proxy_candidates)
     monkeypatch.setattr(proxy_collector, "_stage1_scan", fake_stage1)
     monkeypatch.setattr(proxy_collector, "_stage2_scan", fake_stage2)
 
     report = await proxy_collector.collect(
-        csv_path=csv_path, db_path=db_path, source_url="", provider="both", concurrency=1, timeout=1
+        csv_path=csv_path, db_path=db_path, source_url="", provider="all", concurrency=1, timeout=1
     )
 
     assert report["database_replaced"] is True
@@ -110,11 +114,15 @@ async def test_collect_keeps_existing_database_when_scan_finds_nothing(tmp_path,
     async def fake_stage1(candidates, **kwargs):
         return [], [Stage1Failure(candidate, "connect_timeout", "timed out") for candidate in candidates]
 
+    async def empty_public_sources(*args, **kwargs):
+        return CatalogLoadResult()
+
+    monkeypatch.setattr(proxy_collector, "load_public_catalog", empty_public_sources)
     monkeypatch.setattr(proxy_collector, "load_free_proxy_candidates", fake_free_proxy_candidates)
     monkeypatch.setattr(proxy_collector, "_stage1_scan", fake_stage1)
 
     report = await proxy_collector.collect(
-        csv_path=csv_path, db_path=db_path, source_url="", provider="both", concurrency=1, timeout=1
+        csv_path=csv_path, db_path=db_path, source_url="", provider="all", concurrency=1, timeout=1
     )
 
     assert report["database_replaced"] is False
@@ -190,11 +198,15 @@ async def test_collect_falls_back_to_csv_when_free_proxy_is_missing(tmp_path, mo
     async def fake_stage1(candidates, **kwargs):
         return [], []
 
+    async def empty_public_sources(*args, **kwargs):
+        return CatalogLoadResult()
+
+    monkeypatch.setattr(proxy_collector, "load_public_catalog", empty_public_sources)
     monkeypatch.setattr(proxy_collector, "load_free_proxy_candidates", missing_free_proxy)
     monkeypatch.setattr(proxy_collector, "_stage1_scan", fake_stage1)
 
     report = await proxy_collector.collect(
-        csv_path=csv_path, db_path=db_path, source_url="", provider="both", concurrency=1, timeout=1
+        csv_path=csv_path, db_path=db_path, source_url="", provider="all", concurrency=1, timeout=1
     )
 
     assert report["free_proxy_candidates"] == 0

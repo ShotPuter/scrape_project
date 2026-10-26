@@ -5,6 +5,7 @@ import pytest
 from src.models.publication import PublicationDetail, PublicationSummary
 from src.services.scraper import SeprecScraper
 from src.storage.file_storage import FileStorage
+from src.storage.integrity import read_records
 from src.storage.publication_csv import PublicationCsv
 
 
@@ -77,7 +78,7 @@ async def test_scrape_saves_original_and_generated_pdfs(tmp_path, detail_pdf_pay
         assert report["items_failed"] == 0
         assert report["category_name"] == "INSTRUMENTOS"
 
-        saved = {record.id: record for record in await scraper.store.get_all_records()}
+        saved = read_records(scraper.store.path)
         downloaded = saved["228340"]
         generated = saved["228345"]
         assert downloaded is not None and downloaded.status == "DOWNLOADED"
@@ -153,7 +154,7 @@ async def test_context_manager_closes_resources(tmp_path, detail_text_payload):
     )
 
     async with scraper:
-        assert await scraper.store.get_all_records() == []
+        assert read_records(scraper.store.path) == {}
 
     assert client.closed is True
 

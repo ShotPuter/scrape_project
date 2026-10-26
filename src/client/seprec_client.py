@@ -60,10 +60,6 @@ class SeprecClient:
         return replace(config, proxy=replace(config.proxy, db_path=proxy_db_path))
 
     @property
-    def http(self) -> HttpClient:
-        return self._client
-
-    @property
     def requests_made(self) -> int:
         return self._client.requests_made
 
