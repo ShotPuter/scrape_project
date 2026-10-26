@@ -9,7 +9,7 @@ import pytest
 
 from src.client.config import ProxyConfig
 from src.client.network import attempt_context
-from src.client.proxy_pool import ProxyPool, dead_proxy_path, load_proxies
+from src.client.proxy_pool import ProxyPool, WarmupSpec, dead_proxy_path, load_proxies
 from src.client.session_factory import SessionFactory
 from tests.helpers import make_http_client
 
@@ -110,7 +110,7 @@ async def test_only_valid_api_responses_enter_rotation():
         return session
 
     pool = ProxyPool(["a", "b", "c", "d"], factory)
-    await pool.warmup("https://example.test/catalog", {}, concurrency=1)
+    await pool.warmup(WarmupSpec("https://example.test/catalog", concurrency=1))
     assert pool.checked == 4
     chosen = []
     for _ in range(3):
@@ -130,7 +130,7 @@ async def test_empty_pool_fails_without_direct_fallback():
     session.post.return_value = Response(200, {"html": "challenge"})
     pool = ProxyPool(["a"], lambda **kwargs: session)
     with pytest.raises(RuntimeError, match="None of 1"):
-        await pool.warmup("https://example.test/catalog", {})
+        await pool.warmup(WarmupSpec("https://example.test/catalog"))
     session.close.assert_awaited_once()
 
 
@@ -149,7 +149,7 @@ async def test_one_broken_proxy_is_cooled_down_without_permanent_exclusion(tmp_p
 
     dead_path = tmp_path / "proxies.dead.json"
     pool = ProxyPool(["broken", "working"], factory, dead_path=dead_path)
-    await pool.warmup("https://example.test/catalog", {}, concurrency=1)
+    await pool.warmup(WarmupSpec("https://example.test/catalog", concurrency=1))
 
     assert pool.checked == 2
     assert len(pool.sessions) == 1
@@ -169,7 +169,7 @@ async def test_readiness_429_pauses_requests_and_closes_the_failed_session(heade
     pool.budget.pause = Mock()
     try:
         with pytest.raises(RuntimeError, match="None of 1"):
-            await pool.warmup("https://example.test/catalog", {})
+            await pool.warmup(WarmupSpec("https://example.test/catalog"))
         pool.budget.pause.assert_called_once_with(expected_delay)
         session.close.assert_awaited_once()
         assert pool._failure_counts["http://proxy.test:80"] == 1

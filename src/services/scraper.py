@@ -11,7 +11,6 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from datetime import datetime
-from pathlib import Path
 from typing import Any, NamedTuple
 
 from config import settings
@@ -28,7 +27,7 @@ from src.models.publication import (
 from src.services.category_resolver import CategoryResolver
 from src.services.run_reporter import RunReporter
 from src.services.scrape_pipeline import ScrapePipeline, ScrapeRequest
-from src.storage.file_storage import FileStorage
+from src.storage.file_storage import FileStorage, SavedDocument
 from src.storage.publication_csv import PublicationCsv
 from src.utils.logger import setup_logger
 
@@ -55,9 +54,8 @@ def build_record(
     summary: PublicationSummary,
     category_code: str | None,
     category_name: str | None,
-    document: tuple[str, Any, int, bool],
+    document: SavedDocument,
 ) -> PublicationRecord:
-    filename, file_path, file_size, has_original = document
     company = detail.company or summary.company
     return PublicationRecord(
         id=detail.id,
@@ -72,11 +70,11 @@ def build_record(
         formatted_publication_date=(detail.formatted_publication_date or summary.formatted_publication_date),
         category_code=category_code,
         category_name=category_name,
-        has_original_file=has_original,
-        file_name=filename,
-        file_path=str(file_path),
-        file_size_bytes=file_size,
-        status=STATUS_DOWNLOADED if has_original else STATUS_GENERATED_PDF,
+        has_original_file=document.is_original,
+        file_name=document.filename,
+        file_path=str(document.path),
+        file_size_bytes=document.size_bytes,
+        status=STATUS_DOWNLOADED if document.is_original else STATUS_GENERATED_PDF,
     )
 
 
@@ -228,13 +226,11 @@ class SeprecScraper:
                 )
                 return None
 
-    async def _save_document(
-        self, detail: PublicationDetail, timing_metadata: dict[str, Any] | None
-    ) -> tuple[str, Path, int, bool]:
+    async def _save_document(self, detail: PublicationDetail, timing_metadata: dict[str, Any] | None) -> SavedDocument:
         current_loop = asyncio.get_running_loop()
         submitted_at = time.monotonic() if timing_metadata else 0.0
 
-        def save() -> tuple[str, Path, int, bool]:
+        def save() -> SavedDocument:
             if timing_metadata is None:
                 return self.file_storage.save_publication_document(detail)
             started_at = time.monotonic()

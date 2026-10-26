@@ -13,7 +13,7 @@ from src.client.base_client import HttpClient, Route
 from src.client.config import ProxyConfig, TimeoutConfig
 from src.client.errors import HTTPClientError
 from src.client.network import NetworkBudget, TimeoutPolicy, proxy_id
-from src.client.proxy_pool import ProxyEndpoint, ProxyPool
+from src.client.proxy_pool import ProxyEndpoint, ProxyPool, WarmupSpec
 from tests.helpers import make_http_client
 
 
@@ -50,7 +50,7 @@ async def test_cooldown_wakes_empty_pool_and_readiness_preserves_failures():
     replacement = AsyncMock()
     replacement.post.return_value = Response()
     pool = ProxyPool(["http://one:80"], lambda **kw: replacement, failure_cooldown_seconds=0.02, replenish_threshold=1)
-    pool.configure_warmup("https://example.test/catalog", {}, 1, 0.1)
+    pool.configure_warmup(WarmupSpec("https://example.test/catalog", {}, 1, 0.1))
     original = AsyncMock()
     pool.add_session("http://one:80", original)
     pool.discard(original)
@@ -115,7 +115,7 @@ async def test_probes_share_global_budget_with_downloads():
     pool = ProxyPool(["http://one:80"], lambda **kw: session, network_budget=budget)
     try:
         async with budget.slot():
-            task = pool.start_warmup("https://example.test/catalog", {}, 2, 0.2)
+            task = pool.start_warmup(WarmupSpec("https://example.test/catalog", {}, 2, 0.2))
             await asyncio.sleep(0.02)
             session.post.assert_not_awaited()
             assert budget.active == 1

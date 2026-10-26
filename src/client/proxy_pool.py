@@ -10,7 +10,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterable
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -43,6 +43,16 @@ class ProxyEndpoint:
     user_agent: str | None = None
     transport: str | None = None
     latency_ms: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class WarmupSpec:
+    """The readiness probe shared by every proxy warmup."""
+
+    url: str
+    payload: dict = field(default_factory=dict)
+    concurrency: int = 5
+    timeout: float = 10
 
 
 def _as_endpoint(proxy: str | ProxyEndpoint) -> ProxyEndpoint:
@@ -180,11 +190,11 @@ class ProxyPool:
         self._last_progress_log = self._warmup_started
         self._ready_announced = False
 
-    def configure_warmup(self, url: str, payload: dict, concurrency: int, timeout: float) -> None:
-        self._warmup_url = url
-        self._warmup_payload = payload
-        self._warmup_concurrency = max(1, concurrency)
-        self._warmup_timeout = timeout
+    def configure_warmup(self, spec: WarmupSpec) -> None:
+        self._warmup_url = spec.url
+        self._warmup_payload = spec.payload
+        self._warmup_concurrency = max(1, spec.concurrency)
+        self._warmup_timeout = spec.timeout
         self._probe_slots = asyncio.Semaphore(self._warmup_concurrency)
 
     @staticmethod
@@ -297,7 +307,7 @@ class ProxyPool:
             },
         }
 
-    def start_warmup(self, url: str, payload: dict, concurrency: int = 5, timeout: float = 10) -> asyncio.Task[None]:
+    def start_warmup(self, spec: WarmupSpec) -> asyncio.Task[None]:
         if self._warmup_task and not self._warmup_task.done():
             return self._warmup_task
 
@@ -306,7 +316,7 @@ class ProxyPool:
         self._ready_announced = False
         self._warmup_started = time.monotonic()
         self._last_progress_log = self._warmup_started
-        self.configure_warmup(url, payload, concurrency, timeout)
+        self.configure_warmup(spec)
         self._warmup_candidates = [
             proxy for proxy in self.proxies if proxy.url not in self._active and proxy.url not in self._permanent_dead
         ]
@@ -320,14 +330,8 @@ class ProxyPool:
         self._warmup_task = asyncio.create_task(self._run_warmup())
         return self._warmup_task
 
-    async def warmup(
-        self,
-        url: str,
-        payload: dict,
-        concurrency: int = 5,
-        timeout: float = 10,  # noqa: ASYNC109 - forwarded to the request
-    ) -> None:
-        task = self.start_warmup(url, payload, concurrency, timeout)
+    async def warmup(self, spec: WarmupSpec) -> None:
+        task = self.start_warmup(spec)
         await task
         if self._warmup_error:
             raise self._warmup_error

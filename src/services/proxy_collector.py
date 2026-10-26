@@ -319,14 +319,7 @@ async def collect(
             records_by_key[(record.url, record.user_agent, record.transport)] = record
     records = list(records_by_key.values())
 
-    database_replaced = bool(records)
-    if records:
-        async with ProxyDatabase(db_path) as database:
-            await database.replace_all(records)
-        clear_dead_proxies(db_path)
-        _write_status(f"Replaced {db_path} with {len(records)} fresh verified combinations")
-    else:
-        print(f"No verified proxies found; keeping existing database at {db_path} unchanged", flush=True)
+    database_replaced = await _persist_verified(records, db_path)
 
     report = _build_report(
         provider=provider,
@@ -540,6 +533,17 @@ def _record_from_check(check: Stage2Check, min_successes: int, min_success_rate:
         consecutive_failures=stats.consecutive_failures,
         error_types=dict(stats.error_types),
     )
+
+
+async def _persist_verified(records: list[VerifiedProxy], db_path: Path) -> bool:
+    if not records:
+        print(f"No verified proxies found; keeping existing database at {db_path} unchanged", flush=True)
+        return False
+    async with ProxyDatabase(db_path) as database:
+        await database.replace_all(records)
+    clear_dead_proxies(db_path)
+    _write_status(f"Replaced {db_path} with {len(records)} fresh verified combinations")
+    return True
 
 
 def _build_report(

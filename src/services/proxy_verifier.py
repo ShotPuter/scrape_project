@@ -179,6 +179,14 @@ class _AttemptOutcome:
     retry_after: float | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _ResponseCheck:
+    ok: bool
+    error_type: str = ""
+    detail: str = ""
+    retry_after: float | None = None
+
+
 def catalog_ready(data: object) -> bool:
     return is_catalog_payload(data)
 
@@ -339,17 +347,17 @@ async def verify_stage1(
                 await session.close()
 
 
-def _check_response(response: Any, validator) -> tuple[bool, str, str, float | None]:
+def _check_response(response: Any, validator) -> _ResponseCheck:
     status = int(response.status_code)
     if not 200 <= status < 300:
-        return False, classify_status(status), f"HTTP {status}", _retry_after(response.headers)
+        return _ResponseCheck(False, classify_status(status), f"HTTP {status}", _retry_after(response.headers))
     try:
         data = response.json()
     except (ValueError, UnicodeError):
-        return False, "invalid_json", "response body is not valid JSON", None
+        return _ResponseCheck(False, "invalid_json", "response body is not valid JSON")
     if not validator(data):
-        return (False, "unexpected_response", "response does not contain the expected API fields", None)
-    return True, "", "", None
+        return _ResponseCheck(False, "unexpected_response", "response does not contain the expected API fields")
+    return _ResponseCheck(True)
 
 
 async def _target_attempt(
@@ -357,17 +365,18 @@ async def _target_attempt(
 ) -> _AttemptOutcome:
     started = time.monotonic()
     catalog = await _request(session, "POST", f"{api_base_url}/{catalog_path}", payload={"codigo": ""}, timeout=policy.total)
-    ok, error_type, detail, retry_after = _check_response(catalog, catalog_ready)
-    if not ok:
-        return _AttemptOutcome(False, round((time.monotonic() - started) * 1000, 2), error_type, detail, retry_after)
+    check = _check_response(catalog, catalog_ready)
+    if not check.ok:
+        latency_ms = round((time.monotonic() - started) * 1000, 2)
+        return _AttemptOutcome(False, latency_ms, check.error_type, check.detail, check.retry_after)
 
     filters = PublicationSearchFilter(page_size=SEARCH_PAGE_SIZE, category=SEARCH_CATEGORY)
     search = await _request(
         session, "POST", f"{api_base_url}/{search_path}", payload=filters.to_api_payload(), timeout=policy.total
     )
-    ok, error_type, detail, retry_after = _check_response(search, search_ready)
+    check = _check_response(search, search_ready)
     latency_ms = round((time.monotonic() - started) * 1000, 2)
-    return _AttemptOutcome(ok, latency_ms, error_type, detail, retry_after)
+    return _AttemptOutcome(check.ok, latency_ms, check.error_type, check.detail, check.retry_after)
 
 
 async def verify_stage2(

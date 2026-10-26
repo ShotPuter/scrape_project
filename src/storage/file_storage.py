@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from config import settings
@@ -13,6 +14,14 @@ from src.utils.logger import setup_logger
 logger = setup_logger("file_storage")
 
 
+@dataclass(frozen=True, slots=True)
+class SavedDocument:
+    filename: str
+    path: Path
+    size_bytes: int
+    is_original: bool
+
+
 class FileStorage:
     """Manages filesystem organization, atomic persistence, and PDF validation."""
 
@@ -20,15 +29,12 @@ class FileStorage:
         self.pdf_dir = Path(pdf_dir or settings.pdf_storage_dir)
         self.pdf_dir.mkdir(parents=True, exist_ok=True)
 
-    def save_publication_document(self, publication: PublicationDetail) -> tuple[str, Path, int, bool]:
+    def save_publication_document(self, publication: PublicationDetail) -> SavedDocument:
         """
         Persist publication document atomically to disk.
 
         If original base64 payload is present, it is validated and saved.
         Otherwise, a synthetic PDF is generated from available text.
-
-        Returns:
-            Tuple of (filename, destination_path, byte_size, is_original).
         """
         company_info = publication.company
         file_name = build_pdf_filename(
@@ -50,7 +56,9 @@ class FileStorage:
             )
             raise StorageError(f"Failed to save document for publication {publication.id}: {error}") from error
 
-        return file_name, target_path, len(document_bytes), has_original_file
+        return SavedDocument(
+            filename=file_name, path=target_path, size_bytes=len(document_bytes), is_original=has_original_file
+        )
 
     def _load_or_generate_pdf(self, publication: PublicationDetail) -> tuple[bytes, bool]:
         """Extract valid original PDF bytes or generate PDF from text content."""
