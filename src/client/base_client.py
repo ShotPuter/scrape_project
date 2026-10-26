@@ -596,9 +596,6 @@ class HttpClient:
         await asyncio.sleep(delay)
 
 
-# Backwards-compatible name: the client is designed for composition, not subclassing.
-
-
 def _retry_after_from_response(response) -> str | None:
     """Prefer an explicit API ``retry_after`` value over the HTTP header."""
     header = response.headers.get("Retry-After")

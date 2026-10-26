@@ -396,7 +396,8 @@ async def _fetch_source(source: str, timeout: float) -> object:  # noqa: ASYNC10
             response = await asyncio.wait_for(curl_session.get(url), timeout + 5)
             return _source_response_payload(response)
         finally:
-            await curl_session.close()
+            with suppress(Exception):  # noqa: BLE001 - cleanup must not mask the probe result
+                await curl_session.close()
     except Exception as exc:  # noqa: BLE001 - both transports are wrapped into one domain error
         raise ProxyCatalogError(f"{source}: {exc}") from (last_error or exc)
 
