@@ -32,11 +32,7 @@ def _preserve_mode(source: Path, destination: Path) -> None:
 
 @contextmanager
 def atomic_text_writer(
-    path: Path | str,
-    *,
-    encoding: str = "utf-8",
-    newline: str | None = None,
-    preserve_mode: bool = True,
+    path: Path | str, *, encoding: str = "utf-8", newline: str | None = None, preserve_mode: bool = True
 ) -> Iterator[TextIO]:
     """Yield a text handle that atomically replaces ``path`` on success.
 
@@ -75,12 +71,7 @@ def atomic_write_bytes(path: Path | str, payload: bytes, *, preserve_mode: bool 
 
 
 def atomic_write_text(
-    path: Path | str,
-    text: str,
-    *,
-    encoding: str = "utf-8",
-    newline: str | None = None,
-    preserve_mode: bool = True,
+    path: Path | str, text: str, *, encoding: str = "utf-8", newline: str | None = None, preserve_mode: bool = True
 ) -> None:
     """Atomically replace ``path`` with ``text``."""
     with atomic_text_writer(path, encoding=encoding, newline=newline, preserve_mode=preserve_mode) as handle:

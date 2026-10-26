@@ -267,8 +267,12 @@ def _session_for(proxy_url: str, *, transport: str, user_agent: str, policy: Tim
     headers = {**settings.default_headers, "User-Agent": user_agent}
     if transport == "curl_cffi":
         return AsyncSession(
-            proxy=proxy_url, headers=headers, impersonate=settings.browser_profile,
-            timeout=(policy.connect, policy.total), max_clients=1, trust_env=False,
+            proxy=proxy_url,
+            headers=headers,
+            impersonate=settings.browser_profile,
+            timeout=(policy.connect, policy.total),
+            max_clients=1,
+            trust_env=False,
         )
     if not AIOHTTP_AVAILABLE:
         raise RuntimeError("aiohttp is not installed")
@@ -276,8 +280,11 @@ def _session_for(proxy_url: str, *, transport: str, user_agent: str, policy: Tim
 
 
 async def _request(
-    session: Any, method: str, url: str,
-    *, payload: dict[str, Any] | None = None,
+    session: Any,
+    method: str,
+    url: str,
+    *,
+    payload: dict[str, Any] | None = None,
     timeout: float,  # noqa: ASYNC109 - hard guard around the transport deadline
 ):
     guard = timeout + 1.0
@@ -289,8 +296,11 @@ async def _request(
 
 
 async def verify_stage1(
-    proxy_url: str, *, transport: str,
-    user_agent: str, check_url: str | None = None,
+    proxy_url: str,
+    *,
+    transport: str,
+    user_agent: str,
+    check_url: str | None = None,
     timeout: float | None = None,  # noqa: ASYNC109 - network deadline
     connect_timeout: float | None = None,
     budget: NetworkBudget | None = None,
@@ -361,12 +371,19 @@ async def _target_attempt(
 
 
 async def verify_stage2(
-    proxy_url: str, *, transport: str,
-    user_agent: str, attempts: int | None = None,
+    proxy_url: str,
+    *,
+    transport: str,
+    user_agent: str,
+    attempts: int | None = None,
     timeout: float | None = None,  # noqa: ASYNC109 - network deadline
     connect_timeout: float | None = None,
-    retry_delay: float | None = None, max_retry_delay: float | None = None, api_base_url: str | None = None,
-    catalog_path: str = CATALOG_PATH, search_path: str = SEARCH_PATH, budget: NetworkBudget | None = None,
+    retry_delay: float | None = None,
+    max_retry_delay: float | None = None,
+    api_base_url: str | None = None,
+    catalog_path: str = CATALOG_PATH,
+    search_path: str = SEARCH_PATH,
+    budget: NetworkBudget | None = None,
 ) -> Stage2Result:
     """Check the real SEPREC catalog and publication-search endpoints."""
     attempts = settings.proxy_stage2_attempts if attempts is None else attempts

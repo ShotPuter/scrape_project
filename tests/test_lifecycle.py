@@ -52,9 +52,7 @@ async def test_scraper_aenter_closes_partially_opened_client(tmp_path):
     client.open.side_effect = RuntimeError("open failed")
     client.close.side_effect = RuntimeError("close failed")
     scraper = SeprecScraper(
-        client=client,
-        store=PublicationCsv(tmp_path / "publications.csv"),
-        file_storage=FileStorage(tmp_path / "pdf"),
+        client=client, store=PublicationCsv(tmp_path / "publications.csv"), file_storage=FileStorage(tmp_path / "pdf")
     )
 
     with pytest.raises(RuntimeError, match="open failed"):

@@ -73,13 +73,27 @@ async def test_list_active_can_filter_by_verification_age(tmp_path):
 async def test_metadata_and_statistics_round_trip(tmp_path):
     db_path = tmp_path / "proxies.db"
     proxy = VerifiedProxy(
-        url="socks5://proxy.example:1080", user_agent="UA", transport="curl_cffi",
-        latency_ms=123.4, protocol="socks5", source="hproxy",
-        country="US", city="Ashburn", anonymity="elite",
-        uptime_percent=99.5, source_latency_ms=200.0, last_checked="2026-10-23T12:00:00+00:00",
-        https_supported=True, successful_requests=2, failed_requests=1,
-        success_rate=0.6667, average_latency_ms=123.4, last_success="2026-10-23T12:00:01+00:00",
-        last_failure="2026-10-23T12:00:02+00:00", consecutive_failures=0, error_types={"http_429": 1},
+        url="socks5://proxy.example:1080",
+        user_agent="UA",
+        transport="curl_cffi",
+        latency_ms=123.4,
+        protocol="socks5",
+        source="hproxy",
+        country="US",
+        city="Ashburn",
+        anonymity="elite",
+        uptime_percent=99.5,
+        source_latency_ms=200.0,
+        last_checked="2026-10-23T12:00:00+00:00",
+        https_supported=True,
+        successful_requests=2,
+        failed_requests=1,
+        success_rate=0.6667,
+        average_latency_ms=123.4,
+        last_success="2026-10-23T12:00:01+00:00",
+        last_failure="2026-10-23T12:00:02+00:00",
+        consecutive_failures=0,
+        error_types={"http_429": 1},
     )
 
     async with ProxyDatabase(db_path) as database:
@@ -135,8 +149,12 @@ async def test_existing_database_is_migrated_in_place(tmp_path):
         await database.replace_all(
             [
                 VerifiedProxy(
-                    url="http://new.example:8080", user_agent="UA", transport="aiohttp",
-                    source="proxyscrape", successful_requests=3, success_rate=1.0,
+                    url="http://new.example:8080",
+                    user_agent="UA",
+                    transport="aiohttp",
+                    source="proxyscrape",
+                    successful_requests=3,
+                    success_rate=1.0,
                     error_types={"http_503": 1},
                 )
             ]

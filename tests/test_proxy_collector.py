@@ -153,9 +153,14 @@ async def test_collect_publishes_first_verified_proxies_before_scan_finishes(tmp
 
     scan = asyncio.create_task(
         proxy_collector.collect(
-            csv_path=csv_path, db_path=db_path, source_url="",
-            provider="iplocate", concurrency=1, stage2_concurrency=1,
-            timeout=1, publish_after=2,
+            csv_path=csv_path,
+            db_path=db_path,
+            source_url="",
+            provider="iplocate",
+            concurrency=1,
+            stage2_concurrency=1,
+            timeout=1,
+            publish_after=2,
         )
     )
     try:
@@ -309,15 +314,21 @@ def test_fair_allocation_reserves_slots_for_each_source():
     candidates = [
         *[
             ProxyCandidate(
-                url=f"http://hproxy-{index}.example:8080", protocol="http", source="hproxy",
-                uptime_percent=100, latency_ms=float(index),
+                url=f"http://hproxy-{index}.example:8080",
+                protocol="http",
+                source="hproxy",
+                uptime_percent=100,
+                latency_ms=float(index),
             )
             for index in range(10)
         ],
         *[
             ProxyCandidate(
-                url=f"http://proxyscrape-{index}.example:8080", protocol="http", source="proxyscrape",
-                uptime_percent=100, latency_ms=float(index),
+                url=f"http://proxyscrape-{index}.example:8080",
+                protocol="http",
+                source="proxyscrape",
+                uptime_percent=100,
+                latency_ms=float(index),
             )
             for index in range(10)
         ],
@@ -328,9 +339,14 @@ def test_fair_allocation_reserves_slots_for_each_source():
     ]
 
     selection = filter_and_limit_candidates(
-        candidates, min_uptime=0, max_latency_ms=1500,
-        max_age_minutes=0, preferred_age_minutes=0, require_https=False,
-        max_per_source=0, max_total=9,
+        candidates,
+        min_uptime=0,
+        max_latency_ms=1500,
+        max_age_minutes=0,
+        preferred_age_minutes=0,
+        require_https=False,
+        max_per_source=0,
+        max_total=9,
     )
 
     assert selection.source_counts == {"hproxy": 3, "proxyscrape": 3, "proxifly": 3}
@@ -340,28 +356,50 @@ def test_metadata_filters_drop_explicit_bad_values_but_keep_missing():
     now = datetime.now(UTC)
     candidates = [
         ProxyCandidate(
-            url="http://good.example:8080", protocol="http", source="hproxy",
-            uptime_percent=99, latency_ms=100, last_checked=now,
+            url="http://good.example:8080",
+            protocol="http",
+            source="hproxy",
+            uptime_percent=99,
+            latency_ms=100,
+            last_checked=now,
         ),
         ProxyCandidate(
-            url="http://slow.example:8080", protocol="http", source="hproxy",
-            uptime_percent=99, latency_ms=2000, last_checked=now,
+            url="http://slow.example:8080",
+            protocol="http",
+            source="hproxy",
+            uptime_percent=99,
+            latency_ms=2000,
+            last_checked=now,
         ),
         ProxyCandidate(
-            url="http://unstable.example:8080", protocol="http", source="hproxy",
-            uptime_percent=50, latency_ms=100, last_checked=now,
+            url="http://unstable.example:8080",
+            protocol="http",
+            source="hproxy",
+            uptime_percent=50,
+            latency_ms=100,
+            last_checked=now,
         ),
         ProxyCandidate(
-            url="http://stale.example:8080", protocol="http", source="hproxy",
-            uptime_percent=99, latency_ms=100, last_checked=now - timedelta(days=2),
+            url="http://stale.example:8080",
+            protocol="http",
+            source="hproxy",
+            uptime_percent=99,
+            latency_ms=100,
+            last_checked=now - timedelta(days=2),
         ),
         ProxyCandidate(url="http://unknown.example:8080", protocol="http", source="proxifly"),
     ]
 
     selection = filter_and_limit_candidates(
-        candidates, min_uptime=80, max_latency_ms=1500,
-        max_age_minutes=1440, preferred_age_minutes=15, require_https=True,
-        max_per_source=0, max_total=0, now=now,
+        candidates,
+        min_uptime=80,
+        max_latency_ms=1500,
+        max_age_minutes=1440,
+        preferred_age_minutes=15,
+        require_https=True,
+        max_per_source=0,
+        max_total=0,
+        now=now,
     )
 
     assert [candidate.url for candidate in selection.candidates] == [

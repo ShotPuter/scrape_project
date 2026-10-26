@@ -71,9 +71,7 @@ class AiohttpTransport:
         timeout: TimeoutPolicy,  # noqa: ASYNC109 - forwarded to aiohttp
     ) -> Response:
         response = await self.raw.request(method, url, json=json_data, params=params, timeout=timeout)
-        return Response(
-            status_code=response.status_code, headers=response.headers, body=response.body, transport=self.name
-        )
+        return Response(status_code=response.status_code, headers=response.headers, body=response.body, transport=self.name)
 
     async def close(self) -> None:
         await self.raw.close()
@@ -106,8 +104,7 @@ class CurlTransport:
         # curl_cffi sums the pair; keep the resulting total equal to policy.total.
         connect = min(timeout.connect, timeout.sock_connect, timeout.total)
         response = await self.raw.request(
-            cast(Any, method), url, json=json_data, params=params,
-            timeout=(connect, max(0, timeout.total - connect)),
+            cast(Any, method), url, json=json_data, params=params, timeout=(connect, max(0, timeout.total - connect))
         )
         infos = getattr(response, "infos", None)
         if isinstance(infos, Mapping):
@@ -120,9 +117,13 @@ class CurlTransport:
             mark("response_bytes", len(body))
         json_payload, json_loaded = _fallback_json_payload(response, body)
         return Response(
-            status_code=response.status_code, headers=response.headers, body=body,
-            infos=infos if isinstance(infos, Mapping) else {}, transport=self.name,
-            json_payload=json_payload, json_loaded=json_loaded,
+            status_code=response.status_code,
+            headers=response.headers,
+            body=body,
+            infos=infos if isinstance(infos, Mapping) else {},
+            transport=self.name,
+            json_payload=json_payload,
+            json_loaded=json_loaded,
         )
 
     async def close(self) -> None:

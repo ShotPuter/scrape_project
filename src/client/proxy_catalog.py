@@ -279,14 +279,19 @@ def normalise_candidate(raw: Mapping[str, object], *, source: str) -> ProxyCandi
         return None
 
     return ProxyCandidate(
-        url=url, protocol=urlsplit(url).scheme.lower(), source=source,
-        country=_country(raw), city=_city(raw),
+        url=url,
+        protocol=urlsplit(url).scheme.lower(),
+        source=source,
+        country=_country(raw),
+        city=_city(raw),
         anonymity=str(raw["anonymity"]).strip() if raw.get("anonymity") not in (None, "") else None,
-        latency_ms=_latency(raw), uptime_percent=_uptime(raw),
+        latency_ms=_latency(raw),
+        uptime_percent=_uptime(raw),
         last_checked=_as_datetime(
             _first(raw, "last_checked", "last_verified_at", "last_alive_at", "checked_at", "updated_at")
         ),
-        https_supported=_https_supported(raw, protocol), score=_as_float(raw.get("score")),
+        https_supported=_https_supported(raw, protocol),
+        score=_as_float(raw.get("score")),
     )
 
 
@@ -350,12 +355,16 @@ def merge_candidates(candidates: Iterable[ProxyCandidate]) -> list[ProxyCandidat
         https_values = [value for value in (current.https_supported, candidate.https_supported) if value is not None]
         score_values = [value for value in (current.score, candidate.score) if value is not None]
         merged[candidate.url] = replace(
-            current, source="+".join(sources), country=current.country or candidate.country,
-            city=current.city or candidate.city, anonymity=current.anonymity or candidate.anonymity,
+            current,
+            source="+".join(sources),
+            country=current.country or candidate.country,
+            city=current.city or candidate.city,
+            anonymity=current.anonymity or candidate.anonymity,
             latency_ms=min(latency_values) if latency_values else None,
             uptime_percent=max(uptime_values) if uptime_values else None,
             last_checked=max(checked_values) if checked_values else None,
-            https_supported=any(https_values) if https_values else None, score=max(score_values) if score_values else None,
+            https_supported=any(https_values) if https_values else None,
+            score=max(score_values) if score_values else None,
         )
     return list(merged.values())
 
@@ -403,7 +412,8 @@ def _source_response_payload(response) -> object:
 
 
 async def load_public_catalog(
-    sources: Sequence[str] = PUBLIC_SOURCES, *,
+    sources: Sequence[str] = PUBLIC_SOURCES,
+    *,
     timeout: float | None = None,  # noqa: ASYNC109 - network deadline
 ) -> CatalogLoadResult:
     """Download all requested sources concurrently and return raw candidates."""
@@ -434,9 +444,15 @@ async def load_public_catalog(
 
 
 def filter_and_limit_candidates(
-    candidates: Iterable[ProxyCandidate], *, min_uptime: float | None = None,
-    max_latency_ms: float | None = None, max_age_minutes: float | None = None, preferred_age_minutes: float | None = None,
-    require_https: bool | None = None, max_per_source: int | None = None, max_total: int | None = None,
+    candidates: Iterable[ProxyCandidate],
+    *,
+    min_uptime: float | None = None,
+    max_latency_ms: float | None = None,
+    max_age_minutes: float | None = None,
+    preferred_age_minutes: float | None = None,
+    require_https: bool | None = None,
+    max_per_source: int | None = None,
+    max_total: int | None = None,
     now: datetime | None = None,
 ) -> CatalogSelection:
     """Apply metadata thresholds, then cap each source and the total pool.
@@ -511,7 +527,9 @@ def _rejection_reason(
 
 
 def _limit_candidates(
-    candidates_by_source: dict[str, list[ProxyCandidate]], max_per_source: int, max_total: int,
+    candidates_by_source: dict[str, list[ProxyCandidate]],
+    max_per_source: int,
+    max_total: int,
     priority: Callable[[ProxyCandidate], tuple],
 ) -> list[ProxyCandidate]:
     capped_by_source: dict[str, list[ProxyCandidate]] = {}

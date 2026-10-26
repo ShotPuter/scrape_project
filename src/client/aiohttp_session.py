@@ -58,8 +58,12 @@ class AiohttpResponse:
 
 class AiohttpSession:
     def __init__(
-        self, headers: dict[str, str] | None = None, timeout: float | TimeoutPolicy = 30,
-        max_clients: int = 9, proxy: str | None = None, cookie_jar: Any = None,
+        self,
+        headers: dict[str, str] | None = None,
+        timeout: float | TimeoutPolicy = 30,
+        max_clients: int = 9,
+        proxy: str | None = None,
+        cookie_jar: Any = None,
     ):
         if not AIOHTTP_AVAILABLE:
             raise ImportError("aiohttp is not installed")
@@ -77,13 +81,18 @@ class AiohttpSession:
         self._session = ClientSession(
             headers=headers,
             timeout=(timeout.aiohttp() if isinstance(timeout, TimeoutPolicy) else ClientTimeout(total=timeout)),
-            connector=connector, cookie_jar=cookie_jar, trust_env=False,
+            connector=connector,
+            cookie_jar=cookie_jar,
+            trust_env=False,
             trace_configs=[trace_config()],
         )
 
     async def request(
-        self, method: str, url: str,
-        json: dict[str, Any] | None = None, params: dict[str, Any] | None = None,
+        self,
+        method: str,
+        url: str,
+        json: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
         timeout: float | TimeoutPolicy | None = None,  # noqa: ASYNC109 - forwarded to aiohttp
         **kwargs: Any,
     ) -> AiohttpResponse:
@@ -135,8 +144,11 @@ def _is_socks_proxy(proxy: str | None) -> bool:
 
 
 def _request_options(
-    *, json_data: dict[str, Any] | None, params: dict[str, Any] | None,
-    proxy: str | None, timeout: float | TimeoutPolicy | None,
+    *,
+    json_data: dict[str, Any] | None,
+    params: dict[str, Any] | None,
+    proxy: str | None,
+    timeout: float | TimeoutPolicy | None,
 ) -> dict[str, Any]:
     options: dict[str, Any] = {}
     if json_data is not None:

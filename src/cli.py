@@ -38,13 +38,7 @@ EXIT_SUCCESS = 0
 EXIT_FAILURE = 1
 EXIT_INTERRUPTED = 130
 
-CATEGORY_CODES: dict[str, list[str]] = {
-    "all": ["1", "2", "3", "4"],
-    "1": ["1"],
-    "2": ["2"],
-    "3": ["3"],
-    "4": ["4"],
-}
+CATEGORY_CODES: dict[str, list[str]] = {"all": ["1", "2", "3", "4"], "1": ["1"], "2": ["2"], "3": ["3"], "4": ["4"]}
 
 
 def _year(raw: str) -> int:
@@ -84,11 +78,7 @@ async def _execute_scrape(scraper: SeprecScraper, args: argparse.Namespace) -> l
 
     for category in CATEGORY_CODES[args.category]:
         report = await scraper.run(
-            category=category,
-            date_filter=date_filter,
-            start_date=start_date,
-            end_date=end_date,
-            incremental=True,
+            category=category, date_filter=date_filter, start_date=start_date, end_date=end_date, incremental=True
         )
         reports.append(report)
 
@@ -114,22 +104,22 @@ async def _run_once(args: argparse.Namespace) -> list[dict[str, Any]]:
         return await _run_scraper(args, None)
 
     db_path = settings.proxy_db_path
-    fresh = await count_fresh_proxies(
-        db_path, max_age_hours=settings.proxy_db_max_age_hours
-    )
+    fresh = await count_fresh_proxies(db_path, max_age_hours=settings.proxy_db_max_age_hours)
     if fresh >= settings.proxy_min_ready:
         logger.info("Using %d fresh verified proxies from %s", fresh, db_path)
         return await _run_scraper(args, db_path)
     if fresh:
         logger.warning(
             "Only %d/%d fresh verified proxies are available; starting with the current pool",
-            fresh, settings.proxy_min_ready,
+            fresh,
+            settings.proxy_min_ready,
         )
         return await _run_scraper(args, db_path)
 
     logger.info(
         "No fresh verified proxies in %s; collecting before scraping (max %.0fs)",
-        db_path, settings.proxy_startup_timeout_seconds,
+        db_path,
+        settings.proxy_startup_timeout_seconds,
     )
     async with proxy_collector(db_path) as process:
         fresh = await wait_for_proxies(
@@ -149,10 +139,7 @@ async def _run_once(args: argparse.Namespace) -> list[dict[str, Any]]:
 
 
 async def _run_scraper(args: argparse.Namespace, proxy_db: Path | None) -> list[dict[str, Any]]:
-    async with SeprecScraper(
-        max_concurrency=settings.max_concurrent_requests,
-        proxy_db_path=proxy_db,
-    ) as scraper:
+    async with SeprecScraper(max_concurrency=settings.max_concurrent_requests, proxy_db_path=proxy_db) as scraper:
         return await _execute_scrape(scraper, args)
 
 

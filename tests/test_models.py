@@ -66,10 +66,17 @@ def test_english_fields_preserve_api_payload(detail_pdf_payload):
 
 def test_english_search_filters_serialize_to_api_names():
     filters = PublicationSearchFilter(
-        page=2, page_size=25, category="1",
-        subcategory="1001", date_filter="5", start_date="2025-01-01",
-        end_date="2025-12-31", text="capital", company_name="ACME",
-        registration_number="123", summary="notice",
+        page=2,
+        page_size=25,
+        category="1",
+        subcategory="1001",
+        date_filter="5",
+        start_date="2025-01-01",
+        end_date="2025-12-31",
+        text="capital",
+        company_name="ACME",
+        registration_number="123",
+        summary="notice",
     )
 
     assert filters.to_api_payload() == {

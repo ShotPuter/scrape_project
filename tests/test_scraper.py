@@ -37,9 +37,13 @@ class FakeSeprecClient:
                 continue
             summaries.append(
                 PublicationSummary(
-                    id=detail.id, publication_code=detail.publication_code, title=detail.title,
-                    summary=detail.summary, fechaPublicacion=detail.publication_date,
-                    fechaPublicacionFormato=detail.formatted_publication_date, company=detail.company,
+                    id=detail.id,
+                    publication_code=detail.publication_code,
+                    title=detail.title,
+                    summary=detail.summary,
+                    fechaPublicacion=detail.publication_date,
+                    fechaPublicacionFormato=detail.formatted_publication_date,
+                    company=detail.company,
                 )
             )
         return len(summaries), summaries
@@ -61,7 +65,9 @@ async def test_scrape_saves_original_and_generated_pdfs(tmp_path, detail_pdf_pay
     client = FakeSeprecClient(details)
 
     async with SeprecScraper(
-        client=client, store=PublicationCsv(tmp_path / "publications.csv"), file_storage=FileStorage(tmp_path / "pdf"),
+        client=client,
+        store=PublicationCsv(tmp_path / "publications.csv"),
+        file_storage=FileStorage(tmp_path / "pdf"),
         max_concurrency=2,
     ) as scraper:
         report = await scraper.run(category="1", max_pages=1)
@@ -164,7 +170,8 @@ async def test_scraper_passes_year_and_subcategory_to_api(tmp_path):
             return 0, []
 
     async with SeprecScraper(
-        client=CapturingClient({}), store=PublicationCsv(tmp_path / "publications.csv"),
+        client=CapturingClient({}),
+        store=PublicationCsv(tmp_path / "publications.csv"),
         file_storage=FileStorage(tmp_path / "pdf"),
     ) as scraper:
         report = await scraper.run(
@@ -194,8 +201,10 @@ async def test_next_page_processed_while_first_document_is_blocked(tmp_path, mon
             return 2, []
 
     async with SeprecScraper(
-        client=PagingClient({}), store=PublicationCsv(tmp_path / "publications.csv"),
-        file_storage=FileStorage(tmp_path / "pdf"), max_concurrency=2,
+        client=PagingClient({}),
+        store=PublicationCsv(tmp_path / "publications.csv"),
+        file_storage=FileStorage(tmp_path / "pdf"),
+        max_concurrency=2,
     ) as scraper:
 
         async def process(summary, **kwargs):
@@ -224,8 +233,10 @@ async def test_queue_budget_counts_failures_and_deduplicates(tmp_path, monkeypat
 
     attempted = []
     async with SeprecScraper(
-        client=PagingClient({}), store=PublicationCsv(tmp_path / "publications.csv"),
-        file_storage=FileStorage(tmp_path / "pdf"), max_concurrency=3,
+        client=PagingClient({}),
+        store=PublicationCsv(tmp_path / "publications.csv"),
+        file_storage=FileStorage(tmp_path / "pdf"),
+        max_concurrency=3,
     ) as scraper:
 
         async def process(summary, **kwargs):

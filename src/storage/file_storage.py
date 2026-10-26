@@ -32,7 +32,8 @@ class FileStorage:
         """
         company_info = publication.company
         file_name = build_pdf_filename(
-            company_info.company_name if company_info else None, company_info.registration_number if company_info else None,
+            company_info.company_name if company_info else None,
+            company_info.registration_number if company_info else None,
             publication.id,
         )
         period_directory = extract_period(publication.publication_date, publication.formatted_publication_date)
@@ -44,7 +45,8 @@ class FileStorage:
         except OSError as error:
             logger.error(
                 "Failed to persist publication document to disk",
-                extra={"publication_id": publication.id, "error": str(error)}, exc_info=True,
+                extra={"publication_id": publication.id, "error": str(error)},
+                exc_info=True,
             )
             raise StorageError(f"Failed to save document for publication {publication.id}: {error}") from error
 

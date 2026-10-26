@@ -31,12 +31,7 @@ async def test_wait_for_proxies_returns_when_required_fresh_records_exist(tmp_pa
         await database.replace_all([VerifiedProxy("http://fresh.example:80", "UA", "aiohttp")])
 
     available = await proxy_bootstrap.wait_for_proxies(
-        db_path,
-        FakeProcess(returncode=None),
-        required=1,
-        timeout=1,
-        max_age_hours=24,
-        poll_interval=0.01,
+        db_path, FakeProcess(returncode=None), required=1, timeout=1, max_age_hours=24, poll_interval=0.01
     )
 
     assert available == 1
@@ -50,12 +45,7 @@ async def test_wait_for_proxies_ignores_stale_records_and_is_bounded(tmp_path):
         await database.replace_all([VerifiedProxy("http://stale.example:80", "UA", "aiohttp", checked_at=stale)])
 
     available = await proxy_bootstrap.wait_for_proxies(
-        db_path,
-        FakeProcess(returncode=None),
-        required=1,
-        timeout=0.05,
-        max_age_hours=24,
-        poll_interval=0.01,
+        db_path, FakeProcess(returncode=None), required=1, timeout=0.05, max_age_hours=24, poll_interval=0.01
     )
 
     assert available == 0

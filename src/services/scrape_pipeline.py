@@ -64,9 +64,15 @@ class ScrapePipeline:
     """
 
     def __init__(
-        self, *, client,
-        process_publication: ProcessPublication, filter_new_summaries: FilterSummaries, polite_delay: PoliteDelay,
-        max_concurrency: int, request: ScrapeRequest, category_name: str | None,
+        self,
+        *,
+        client,
+        process_publication: ProcessPublication,
+        filter_new_summaries: FilterSummaries,
+        polite_delay: PoliteDelay,
+        max_concurrency: int,
+        request: ScrapeRequest,
+        category_name: str | None,
         sub_category_name: str | None,
     ) -> None:
         self.client = client
@@ -145,8 +151,12 @@ class ScrapePipeline:
     async def _fetch_page(self, page_number: int) -> tuple[int, list[PublicationSummary]]:
         """Query remote API for a single paginated results batch."""
         search_filter = PublicationSearchFilter(
-            page=page_number, page_size=settings.page_size, category=self.request.category,
-            subcategory=self.request.sub_category, date_filter=self.request.date_filter, start_date=self.request.start_date,
+            page=page_number,
+            page_size=settings.page_size,
+            category=self.request.category,
+            subcategory=self.request.sub_category,
+            date_filter=self.request.date_filter,
+            start_date=self.request.start_date,
             end_date=self.request.end_date,
         )
         return await self.client.search_publications(search_filter)
@@ -188,8 +198,11 @@ class ScrapePipeline:
         return candidates
 
     async def _enqueue_summaries(
-        self, summaries: list[PublicationSummary], queue: asyncio.Queue[PublicationSummary | None],
-        scheduled_identifiers: set[str], counters: RunCounters,
+        self,
+        summaries: list[PublicationSummary],
+        queue: asyncio.Queue[PublicationSummary | None],
+        scheduled_identifiers: set[str],
+        counters: RunCounters,
     ) -> None:
         """Enqueue unique summaries for worker processing."""
         for summary in summaries:
@@ -229,7 +242,9 @@ class ScrapePipeline:
     ) -> None:
         """Process a single summary, update metrics, and log batch progress."""
         record = await self.process_publication(
-            summary, category_code=self.category_code, category_name=self.category_name,
+            summary,
+            category_code=self.category_code,
+            category_name=self.category_name,
             sub_category_name=self.sub_category_name,
         )
 
@@ -246,7 +261,11 @@ class ScrapePipeline:
             elapsed_minutes = max(0.01, (time.monotonic() - self._pipeline_start_time) / 60.0)
             rate_per_minute = round(counters.items_scraped / elapsed_minutes, 1)
             logger.info(
-                "Progress: %d saved (%d orig, %d gen) | %d failed | Queue: %d | Rate: %.1f docs/min", counters.items_scraped,
-                counters.original_files, counters.generated_files, counters.items_failed,
-                queue.qsize(), rate_per_minute,
+                "Progress: %d saved (%d orig, %d gen) | %d failed | Queue: %d | Rate: %.1f docs/min",
+                counters.items_scraped,
+                counters.original_files,
+                counters.generated_files,
+                counters.items_failed,
+                queue.qsize(),
+                rate_per_minute,
             )

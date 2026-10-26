@@ -27,9 +27,7 @@ DEFAULT_POLL_INTERVAL_SECONDS = 0.5
 WAIT_REPORT_INTERVAL_SECONDS = 15.0
 
 
-async def count_fresh_proxies(
-    db_path: Path, *, max_age_hours: float, limit: int | None = None
-) -> int:
+async def count_fresh_proxies(db_path: Path, *, max_age_hours: float, limit: int | None = None) -> int:
     """Return how many usable records in ``db_path`` are recent enough."""
     max_age = max_age_hours if max_age_hours > 0 else None
     async with ProxyDatabase(db_path) as database:
@@ -54,32 +52,32 @@ async def wait_for_proxies(  # noqa: ASYNC109 - explicit bounded wait
     started = time.monotonic()
     last_report = started
     while True:
-        available = await count_fresh_proxies(
-            db_path, max_age_hours=max_age_hours, limit=required
-        )
+        available = await count_fresh_proxies(db_path, max_age_hours=max_age_hours, limit=required)
         if available >= required:
             logger.info("Verified proxy pool ready: %d fresh proxies", available)
             return available
         if process.returncode is not None:
             logger.info(
                 "Proxy collector exited with code %d after publishing %d/%d fresh proxies",
-                process.returncode, available, required,
+                process.returncode,
+                available,
+                required,
             )
             return available
         now = time.monotonic()
         remaining = deadline - now
         if remaining <= 0:
             logger.warning(
-                "Proxy collection did not reach %d fresh proxies within %.0fs (%d available); "
-                "continuing without waiting",
-                required, timeout, available,
+                "Proxy collection did not reach %d fresh proxies within %.0fs (%d available); continuing without waiting",
+                required,
+                timeout,
+                available,
             )
             return available
         if now - last_report >= WAIT_REPORT_INTERVAL_SECONDS:
             last_report = now
             logger.info(
-                "Waiting for proxies: %d/%d fresh, %.0fs elapsed, %.0fs left",
-                available, required, now - started, remaining,
+                "Waiting for proxies: %d/%d fresh, %.0fs elapsed, %.0fs left", available, required, now - started, remaining
             )
         await asyncio.sleep(min(poll_interval, remaining))
 

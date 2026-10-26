@@ -50,37 +50,56 @@ class CompletedDownload(NamedTuple):
 
 
 def build_record(
-    detail: PublicationDetail, summary: PublicationSummary, category_code: str | None,
-    category_name: str | None, document: tuple[str, Any, int, bool],
+    detail: PublicationDetail,
+    summary: PublicationSummary,
+    category_code: str | None,
+    category_name: str | None,
+    document: tuple[str, Any, int, bool],
 ) -> PublicationRecord:
     filename, file_path, file_size, has_original = document
     company = detail.company or summary.company
     return PublicationRecord(
-        id=detail.id, publication_code=detail.publication_code or summary.publication_code,
-        former_publication_code=detail.former_publication_code, title=detail.title or summary.title,
-        summary=detail.summary or summary.summary, registration_number=company.registration_number if company else None,
+        id=detail.id,
+        publication_code=detail.publication_code or summary.publication_code,
+        former_publication_code=detail.former_publication_code,
+        title=detail.title or summary.title,
+        summary=detail.summary or summary.summary,
+        registration_number=company.registration_number if company else None,
         former_registration_number=(company.former_registration_number if company else None),
         company_name=company.company_name if company else None,
         publication_date=detail.publication_date or summary.publication_date,
         formatted_publication_date=(detail.formatted_publication_date or summary.formatted_publication_date),
-        category_code=category_code, category_name=category_name, has_original_file=has_original,
-        file_name=filename, file_path=str(file_path), file_size_bytes=file_size,
+        category_code=category_code,
+        category_name=category_name,
+        has_original_file=has_original,
+        file_name=filename,
+        file_path=str(file_path),
+        file_size_bytes=file_size,
         status=STATUS_DOWNLOADED if has_original else STATUS_GENERATED_PDF,
     )
 
 
 class SeprecScraper:
     def __init__(
-        self, client: SeprecClient | None = None, store: PublicationCsv | None = None,
-        file_storage: FileStorage | None = None, max_concurrency: int | None = None, proxy_warmup: bool | None = None,
-        proxy_file: str | None = None, proxy_db_path: str | Path | None = None, transport: str | None = None,
+        self,
+        client: SeprecClient | None = None,
+        store: PublicationCsv | None = None,
+        file_storage: FileStorage | None = None,
+        max_concurrency: int | None = None,
+        proxy_warmup: bool | None = None,
+        proxy_file: str | None = None,
+        proxy_db_path: str | Path | None = None,
+        transport: str | None = None,
         proxy_mode: str | None = None,
     ):
         self.max_concurrency = max_concurrency or settings.max_concurrent_requests
         self.client = client or SeprecClient(
-            connection_limit=self.max_concurrency, proxy_warmup=proxy_warmup,
+            connection_limit=self.max_concurrency,
+            proxy_warmup=proxy_warmup,
             proxy_file=Path(proxy_file) if proxy_file else None,
-            proxy_db_path=Path(proxy_db_path) if proxy_db_path else None, transport=transport, proxy_mode=proxy_mode,
+            proxy_db_path=Path(proxy_db_path) if proxy_db_path else None,
+            transport=transport,
+            proxy_mode=proxy_mode,
         )
         self.store = store or PublicationCsv()
         self.file_storage = file_storage or FileStorage()
@@ -110,7 +129,8 @@ class SeprecScraper:
 
         self._monitor_task = asyncio.create_task(self._monitor_performance())
         logger.debug(
-            "Configured network runtime settings: workers=%d, proxy_mode=%s", self.max_concurrency,
+            "Configured network runtime settings: workers=%d, proxy_mode=%s",
+            self.max_concurrency,
             getattr(self.client, "proxy_mode", "direct"),
         )
         return self
@@ -143,8 +163,11 @@ class SeprecScraper:
             total_pdf_bytes = sum(download.size_bytes for download in recent_downloads)
 
             logger.info(
-                "Throughput (last 60s): %d files (%d orig, %d gen) | %d KiB | Run: %s", len(recent_downloads),
-                original_download_count, generated_download_count, round(total_pdf_bytes / 1024),
+                "Throughput (last 60s): %d files (%d orig, %d gen) | %d KiB | Run: %s",
+                len(recent_downloads),
+                original_download_count,
+                generated_download_count,
+                round(total_pdf_bytes / 1024),
                 self._active_run_id,
             )
             last_logged_timestamp = current_timestamp
@@ -156,14 +179,15 @@ class SeprecScraper:
         return run_identifier, datetime.utcnow()
 
     def _capture_metrics_baseline(self) -> tuple[int, int]:
-        self.client.metrics_before_run = (
-            dict(self.client.metrics.counts) if hasattr(self.client, "metrics") else {}
-        )
+        self.client.metrics_before_run = dict(self.client.metrics.counts) if hasattr(self.client, "metrics") else {}
         return self.client.requests_made, self.client.retries_made
 
     async def _process_single_publication(
-        self, summary: PublicationSummary, category_code: str | None = None,
-        category_name: str | None = None, sub_category_name: str | None = None,
+        self,
+        summary: PublicationSummary,
+        category_code: str | None = None,
+        category_name: str | None = None,
+        sub_category_name: str | None = None,
     ) -> PublicationRecord | None:
         category_label = sub_category_name or category_name
         is_debug_timing_enabled = logger.isEnabledFor(logging.DEBUG)
@@ -197,7 +221,8 @@ class SeprecScraper:
 
                 self._completed_downloads.append(
                     CompletedDownload(
-                        timestamp=time.monotonic(), size_bytes=record.file_size_bytes or 0,
+                        timestamp=time.monotonic(),
+                        size_bytes=record.file_size_bytes or 0,
                         is_original=record.has_original_file,
                     )
                 )
@@ -206,7 +231,8 @@ class SeprecScraper:
             except Exception as processing_error:  # noqa: BLE001 - one publication must not abort the batch
                 logger.error(
                     "Failed to process publication document",
-                    extra={"publication_id": summary.id, "error": str(processing_error)}, exc_info=True,
+                    extra={"publication_id": summary.id, "error": str(processing_error)},
+                    exc_info=True,
                 )
                 return None
 
@@ -239,9 +265,15 @@ class SeprecScraper:
             await asyncio.sleep(settings.page_delay_seconds)
 
     async def run(
-        self, category: str = "", sub_category: str = "",
-        date_filter: str = "", start_date: str = "", end_date: str = "",
-        max_pages: int | None = None, max_items: int | None = None, incremental: bool = True,
+        self,
+        category: str = "",
+        sub_category: str = "",
+        date_filter: str = "",
+        start_date: str = "",
+        end_date: str = "",
+        max_pages: int | None = None,
+        max_items: int | None = None,
+        incremental: bool = True,
         request: ScrapeRequest | None = None,
     ) -> dict[str, Any]:
         """Execute one publication category scraping run.
@@ -261,9 +293,14 @@ class SeprecScraper:
             Dictionary containing run performance and summary metrics.
         """
         active_request = request or ScrapeRequest(
-            category=category, sub_category=sub_category, date_filter=date_filter,
-            start_date=start_date, end_date=end_date, max_pages=max_pages,
-            max_items=max_items, incremental=incremental,
+            category=category,
+            sub_category=sub_category,
+            date_filter=date_filter,
+            start_date=start_date,
+            end_date=end_date,
+            max_pages=max_pages,
+            max_items=max_items,
+            incremental=incremental,
         )
         run_identifier, started_at = self._start_run()
         category_name, sub_category_name = await self._categories.resolve(
@@ -271,22 +308,34 @@ class SeprecScraper:
         )
 
         logger.info(
-            "Starting scrape run [%s] | Category: %s (%s) | Date: %s | Incremental: %s", run_identifier,
-            category_name or active_request.category or "ALL", sub_category_name or active_request.sub_category or "-",
-            active_request.date_filter or "any", active_request.incremental,
+            "Starting scrape run [%s] | Category: %s (%s) | Date: %s | Incremental: %s",
+            run_identifier,
+            category_name or active_request.category or "ALL",
+            sub_category_name or active_request.sub_category or "-",
+            active_request.date_filter or "any",
+            active_request.incremental,
         )
         http_requests_before, http_retries_before = self._capture_metrics_baseline()
 
         pipeline = ScrapePipeline(
-            client=self.client, process_publication=self._process_single_publication,
-            filter_new_summaries=self._filter_new_summaries, polite_delay=self._polite_delay,
-            max_concurrency=self.max_concurrency, request=active_request, category_name=category_name,
+            client=self.client,
+            process_publication=self._process_single_publication,
+            filter_new_summaries=self._filter_new_summaries,
+            polite_delay=self._polite_delay,
+            max_concurrency=self.max_concurrency,
+            request=active_request,
+            category_name=category_name,
             sub_category_name=sub_category_name,
         )
         counters = await pipeline.run()
 
         return await self._reporter.finalize(
-            run_id=run_identifier, started_at=started_at, finished_at=datetime.utcnow(),
-            counters=counters, request=active_request, category_name=category_name,
-            http_requests_before=http_requests_before, http_retries_before=http_retries_before,
+            run_id=run_identifier,
+            started_at=started_at,
+            finished_at=datetime.utcnow(),
+            counters=counters,
+            request=active_request,
+            category_name=category_name,
+            http_requests_before=http_requests_before,
+            http_retries_before=http_retries_before,
         )

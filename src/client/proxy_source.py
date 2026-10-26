@@ -44,8 +44,12 @@ def write_proxy_csv(proxies: list[tuple[str, str]], path: Path) -> None:
 
 
 def sync_proxy_source(
-    source_url: str = DEFAULT_SOURCE_URL, csv_path: Path | None = None, state_path: Path | None = None,
-    refresh_minutes: float = DEFAULT_REFRESH_MINUTES, timeout: float = DEFAULT_TIMEOUT_SECONDS, force: bool = False,
+    source_url: str = DEFAULT_SOURCE_URL,
+    csv_path: Path | None = None,
+    state_path: Path | None = None,
+    refresh_minutes: float = DEFAULT_REFRESH_MINUTES,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    force: bool = False,
 ) -> dict[str, Any]:
     _validate_sync(source_url, csv_path, refresh_minutes, timeout)
     assert csv_path is not None
@@ -89,8 +93,12 @@ def _mark_not_modified(state: dict[str, Any], state_path: Path, csv_path: Path, 
 
 
 def _apply_download(
-    source_url: str, downloaded: tuple[str, str | None, str | None], csv_path: Path,
-    state_path: Path, state: dict[str, Any], now: datetime,
+    source_url: str,
+    downloaded: tuple[str, str | None, str | None],
+    csv_path: Path,
+    state_path: Path,
+    state: dict[str, Any],
+    now: datetime,
 ) -> dict[str, Any]:
     body, etag, last_modified = downloaded
     proxies = parse_proxies(body)

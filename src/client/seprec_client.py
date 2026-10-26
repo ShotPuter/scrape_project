@@ -37,24 +37,43 @@ class SeprecClient:
     """
 
     def __init__(
-        self, base_url: str | None = None, headers: Mapping[str, str] | None = None,
-        timeout_seconds: int | None = None, retry_attempts: int | None = None, retry_backoff_factor: float | None = None,
-        retry_jitter_seconds: float | None = None, connection_limit: int | None = None, proxy_warmup: bool | None = None,
-        proxy_file: Path | None = None, proxy_db_path: Path | None = None, transport: str | None = None,
-        proxy_mode: str | None = None, proxy_mix_share: float | None = None,
-        config: ClientConfig | None = None, app_settings: Settings | None = None,
+        self,
+        base_url: str | None = None,
+        headers: Mapping[str, str] | None = None,
+        timeout_seconds: int | None = None,
+        retry_attempts: int | None = None,
+        retry_backoff_factor: float | None = None,
+        retry_jitter_seconds: float | None = None,
+        connection_limit: int | None = None,
+        proxy_warmup: bool | None = None,
+        proxy_file: Path | None = None,
+        proxy_db_path: Path | None = None,
+        transport: str | None = None,
+        proxy_mode: str | None = None,
+        proxy_mix_share: float | None = None,
+        config: ClientConfig | None = None,
+        app_settings: Settings | None = None,
     ) -> None:
         resolved_settings = app_settings or settings
         self._client = HttpClient(
             config=config
             or client_config_from_settings(
                 resolved_settings,
-                base_url=base_url, headers=headers, timeout_seconds=timeout_seconds,
-                retry_attempts=retry_attempts, retry_backoff_factor=retry_backoff_factor,
-                retry_jitter_seconds=retry_jitter_seconds, connection_limit=connection_limit,
-                proxy_warmup=proxy_warmup, proxy_file=proxy_file, proxy_db_path=proxy_db_path,
-                transport=transport, proxy_mode=proxy_mode, proxy_mix_share=proxy_mix_share,
-                proxy_check_path=CATALOGS_ENDPOINT, proxy_check_payload={"codigo": ""},
+                base_url=base_url,
+                headers=headers,
+                timeout_seconds=timeout_seconds,
+                retry_attempts=retry_attempts,
+                retry_backoff_factor=retry_backoff_factor,
+                retry_jitter_seconds=retry_jitter_seconds,
+                connection_limit=connection_limit,
+                proxy_warmup=proxy_warmup,
+                proxy_file=proxy_file,
+                proxy_db_path=proxy_db_path,
+                transport=transport,
+                proxy_mode=proxy_mode,
+                proxy_mix_share=proxy_mix_share,
+                proxy_check_path=CATALOGS_ENDPOINT,
+                proxy_check_payload={"codigo": ""},
                 project_dir=BASE_DIR,
             )
         )

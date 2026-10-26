@@ -116,10 +116,17 @@ class ProxyPool:
     """Keeps healthy proxies in rotation and replenishes them while scraping."""
 
     def __init__(
-        self, proxies: Iterable[str | ProxyEndpoint], session_factory: SessionFactory,
-        dead_path: Path | None = None, dead_ttl_hours: float = DEAD_PROXY_TTL_HOURS, min_ready: int = 1,
-        replenish_threshold: int = 0, failure_cooldown_seconds: float = DEFAULT_FAILURE_COOLDOWN_SECONDS,
-        max_failures: int = DEFAULT_MAX_FAILURES, per_ip_limit: int = 1, network_budget: NetworkBudget | None = None,
+        self,
+        proxies: Iterable[str | ProxyEndpoint],
+        session_factory: SessionFactory,
+        dead_path: Path | None = None,
+        dead_ttl_hours: float = DEAD_PROXY_TTL_HOURS,
+        min_ready: int = 1,
+        replenish_threshold: int = 0,
+        failure_cooldown_seconds: float = DEFAULT_FAILURE_COOLDOWN_SECONDS,
+        max_failures: int = DEFAULT_MAX_FAILURES,
+        per_ip_limit: int = 1,
+        network_budget: NetworkBudget | None = None,
         metrics: RequestMetrics | None = None,
     ):
         if per_ip_limit < 1:
@@ -233,7 +240,8 @@ class ProxyPool:
         if event is not None:
             event.update(
                 proxy_id=proxy_id(self.session_proxies.get(session)),
-                proxy_wait_ms=round((time.monotonic() - started) * 1000, 3), proxy_in_flight=self._host_in_flight[host],
+                proxy_wait_ms=round((time.monotonic() - started) * 1000, 3),
+                proxy_in_flight=self._host_in_flight[host],
             )
         try:
             yield session
@@ -312,13 +320,17 @@ class ProxyPool:
         self._scheduled.update(proxy.url for proxy in self._warmup_candidates)
         logger.info(
             "Proxy warmup started: candidates=%d, concurrency=%d, per-probe timeout=%.1fs",
-            len(self._warmup_candidates), self._warmup_concurrency, self._warmup_timeout,
+            len(self._warmup_candidates),
+            self._warmup_concurrency,
+            self._warmup_timeout,
         )
         self._warmup_task = asyncio.create_task(self._run_warmup())
         return self._warmup_task
 
     async def warmup(
-        self, url: str, payload: dict,
+        self,
+        url: str,
+        payload: dict,
         concurrency: int = 5,
         timeout: float = 10,  # noqa: ASYNC109 - forwarded to the request
     ) -> None:
@@ -350,8 +362,7 @@ class ProxyPool:
             self._warmup_error = RuntimeError(f"None of {self.checked} tested proxies returned valid API data")
         else:
             logger.info(
-                "Proxy warmup finished: %d/%d checked, %d usable",
-                self.checked, len(self.proxies), len(self.sessions),
+                "Proxy warmup finished: %d/%d checked, %d usable", self.checked, len(self.proxies), len(self.sessions)
             )
 
     def create_session(self, proxy: str | ProxyEndpoint):
@@ -359,8 +370,14 @@ class ProxyPool:
         return self.session_factory(proxy=endpoint.url, user_agent=endpoint.user_agent, transport=endpoint.transport)
 
     async def _check_proxy(
-        self, proxy: str | ProxyEndpoint, url: str, payload: dict,
-        semaphore: asyncio.Semaphore, timeout: float, *, persist_failure: bool,  # noqa: ASYNC109
+        self,
+        proxy: str | ProxyEndpoint,
+        url: str,
+        payload: dict,
+        semaphore: asyncio.Semaphore,
+        timeout: float,  # noqa: ASYNC109 - forwarded to the readiness request
+        *,
+        persist_failure: bool,
     ) -> None:
         endpoint = _as_endpoint(proxy)
         proxy_url = endpoint.url
@@ -453,7 +470,12 @@ class ProxyPool:
         eta = remaining / rate if rate > 0 else 0.0
         logger.info(
             "Proxy warmup progress: %d/%d checked (%.1f/s), %d usable, elapsed %.0fs, ETA %.0fs",
-            self.checked, total, rate, len(self.sessions), elapsed, eta,
+            self.checked,
+            total,
+            rate,
+            len(self.sessions),
+            elapsed,
+            eta,
         )
 
     def add_session(self, proxy: str | ProxyEndpoint, session: AsyncSession) -> bool:
@@ -589,8 +611,7 @@ class ProxyPool:
         tasks = [
             asyncio.create_task(
                 self._check_proxy(
-                    proxy, warmup_url, self._warmup_payload,
-                    semaphore, self._warmup_timeout, persist_failure=persist_failure,
+                    proxy, warmup_url, self._warmup_payload, semaphore, self._warmup_timeout, persist_failure=persist_failure
                 )
             )
             for proxy in candidates

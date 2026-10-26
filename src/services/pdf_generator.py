@@ -215,8 +215,12 @@ def generate_pdf_for_publication(
     memory_buffer = output_dest if isinstance(output_dest, io.BytesIO) else io.BytesIO()
     try:
         document_template = SimpleDocTemplate(
-            memory_buffer, pagesize=letter, rightMargin=PAGE_MARGIN_POINTS,
-            leftMargin=PAGE_MARGIN_POINTS, topMargin=PAGE_MARGIN_POINTS, bottomMargin=PAGE_MARGIN_POINTS,
+            memory_buffer,
+            pagesize=letter,
+            rightMargin=PAGE_MARGIN_POINTS,
+            leftMargin=PAGE_MARGIN_POINTS,
+            topMargin=PAGE_MARGIN_POINTS,
+            bottomMargin=PAGE_MARGIN_POINTS,
         )
         document_template.build(build_story(publication))
         rendered_bytes = memory_buffer.getvalue()
@@ -229,7 +233,8 @@ def generate_pdf_for_publication(
 
     except Exception as error:  # noqa: BLE001 - reportlab failures are wrapped as a domain error
         logger.error(
-            "PDF generation failed for publication", extra={"publication_id": publication.id, "error": str(error)},
+            "PDF generation failed for publication",
+            extra={"publication_id": publication.id, "error": str(error)},
             exc_info=True,
         )
         raise PDFGenerationError(f"PDF generation failed for ID {publication.id}: {error}") from error

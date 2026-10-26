@@ -174,8 +174,7 @@ def client_config_from_settings(
         base_url=pick(base_url, app_settings.api_base_url),
         headers={**app_settings.default_headers, **dict(headers or {})},
         timeouts=TimeoutConfig(
-            api=TimeoutPolicy(total=api_total, **stage_timeouts),
-            detail=TimeoutPolicy(total=detail_total, **stage_timeouts),
+            api=TimeoutPolicy(total=api_total, **stage_timeouts), detail=TimeoutPolicy(total=detail_total, **stage_timeouts)
         ),
         retry=RetryConfig(
             attempts=pick(retry_attempts, app_settings.retry_attempts),

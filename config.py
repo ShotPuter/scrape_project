@@ -107,9 +107,7 @@ class Settings:
     proxy_stage2_requests_per_second: float = 5
     proxy_stage2_min_success_rate: float = 0
     proxy_stage2_min_successes: int = 1
-    proxy_report_path: Path = field(
-        default_factory=lambda: BASE_DIR / "data" / "proxy-report.json"
-    )
+    proxy_report_path: Path = field(default_factory=lambda: BASE_DIR / "data" / "proxy-report.json")
     proxy_min_ready: int = 20
     proxy_replenish_threshold: int = 10
     proxy_failure_cooldown_seconds: float = 120
@@ -128,15 +126,9 @@ class Settings:
     # File & database storage
     storage_base_dir: Path = field(default_factory=lambda: BASE_DIR / "data")
     pdf_storage_dir: Path = field(default_factory=lambda: BASE_DIR / "data" / "pdf")
-    csv_export_path: Path = field(
-        default_factory=lambda: BASE_DIR / "data" / "publications.csv"
-    )
-    proxy_list_path: Path = field(
-        default_factory=lambda: BASE_DIR / "data" / "iplocate-proxies.csv"
-    )
-    proxy_state_path: Path = field(
-        default_factory=lambda: BASE_DIR / "data" / "iplocate-proxies.state.json"
-    )
+    csv_export_path: Path = field(default_factory=lambda: BASE_DIR / "data" / "publications.csv")
+    proxy_list_path: Path = field(default_factory=lambda: BASE_DIR / "data" / "iplocate-proxies.csv")
+    proxy_state_path: Path = field(default_factory=lambda: BASE_DIR / "data" / "iplocate-proxies.state.json")
 
     # Logging
     log_level: str = "INFO"
@@ -232,10 +224,7 @@ class Settings:
         self._require(self.proxy_db_max_age_hours >= 0, "PROXY_DB_MAX_AGE_HOURS must be >= 0")
         self._require(self.proxy_warmup_timeout_seconds > 0, "PROXY_WARMUP_TIMEOUT_SECONDS must be > 0")
         self._require(self.proxy_startup_timeout_seconds > 0, "PROXY_STARTUP_TIMEOUT_SECONDS must be > 0")
-        self._require(
-            self.proxy_collector_stop_timeout_seconds > 0,
-            "PROXY_COLLECTOR_STOP_TIMEOUT_SECONDS must be > 0",
-        )
+        self._require(self.proxy_collector_stop_timeout_seconds > 0, "PROXY_COLLECTOR_STOP_TIMEOUT_SECONDS must be > 0")
         self._require(self.proxy_max_candidates >= 0, "PROXY_MAX_CANDIDATES must be >= 0 (0 = all)")
         self._require(self.proxy_max_per_source >= 0, "PROXY_MAX_PER_SOURCE must be >= 0 (0 = all)")
 

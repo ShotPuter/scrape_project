@@ -51,16 +51,27 @@ class RunReporter:
         self.client = client
 
     async def finalize(
-        self, *, run_id: str,
-        started_at: datetime, finished_at: datetime, counters: RunCounters,
-        request: ScrapeRequest, category_name: str | None, http_requests_before: int,
+        self,
+        *,
+        run_id: str,
+        started_at: datetime,
+        finished_at: datetime,
+        counters: RunCounters,
+        request: ScrapeRequest,
+        category_name: str | None,
+        http_requests_before: int,
         http_retries_before: int,
     ) -> dict[str, Any]:
         """Finalize scraper execution by computing metrics and logging summary."""
         context = ReporterContext(
-            run_id=run_id, started_at=started_at, finished_at=finished_at,
-            counters=counters, request=request, category_name=category_name,
-            http_requests_before=http_requests_before, http_retries_before=http_retries_before,
+            run_id=run_id,
+            started_at=started_at,
+            finished_at=finished_at,
+            counters=counters,
+            request=request,
+            category_name=category_name,
+            http_requests_before=http_requests_before,
+            http_retries_before=http_retries_before,
         )
         storage_stats = await self.store.get_stats()
         report = self._build_report(context, storage_stats)
@@ -117,7 +128,13 @@ class RunReporter:
         logger.info(
             "Run [%s] completed in %.1fs: %d saved (%d orig, %d gen) | "
             "%d skipped | %d errors | Speed: %.1f docs/min | Total index: %d",
-            report["run_id"], report["duration_seconds"], report["items_scraped"],
-            report["original_files"], report["generated_files"], report["items_skipped"],
-            report["items_failed"], report["files_per_minute"], storage_stats.get("total_items", 0),
+            report["run_id"],
+            report["duration_seconds"],
+            report["items_scraped"],
+            report["original_files"],
+            report["generated_files"],
+            report["items_skipped"],
+            report["items_failed"],
+            report["files_per_minute"],
+            storage_stats.get("total_items", 0),
         )

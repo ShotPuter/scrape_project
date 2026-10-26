@@ -19,9 +19,15 @@ logger = logging.getLogger(__name__)
 
 class SessionFactory:
     def __init__(
-        self, *, headers: dict[str, str],
-        timeout: float, connection_limit: int, impersonate: str,
-        cookies_file: Path | None, transport: str, sock_read_timeout: float = 30,
+        self,
+        *,
+        headers: dict[str, str],
+        timeout: float,
+        connection_limit: int,
+        impersonate: str,
+        cookies_file: Path | None,
+        transport: str,
+        sock_read_timeout: float = 30,
     ):
         self.sock_read_timeout = sock_read_timeout
         self.headers = headers
@@ -63,8 +69,12 @@ class SessionFactory:
         if proxy:
             extra["proxy"] = proxy
         return AsyncSession(
-            headers=headers or self.headers, timeout=self.timeout, max_clients=self.connection_limit,
-            impersonate=self.impersonate, cookies=_load_mozilla_cookies(self.cookies_file), trust_env=False,
+            headers=headers or self.headers,
+            timeout=self.timeout,
+            max_clients=self.connection_limit,
+            impersonate=self.impersonate,
+            cookies=_load_mozilla_cookies(self.cookies_file),
+            trust_env=False,
             curl_options={CurlOpt.LOW_SPEED_LIMIT: 1, CurlOpt.LOW_SPEED_TIME: math.ceil(self.sock_read_timeout)},
             curl_infos=[
                 CurlInfo.NAMELOOKUP_TIME,
@@ -79,8 +89,11 @@ class SessionFactory:
     def make_aiohttp(self, proxy: str | None = None, *, headers: dict[str, str] | None = None) -> AiohttpSession:
         cookie_jar = self._make_aiohttp_cookie_jar() if self.cookies_file else None
         return AiohttpSession(
-            headers=headers or self.headers, timeout=self.timeout, max_clients=self.connection_limit,
-            cookie_jar=cookie_jar, **({"proxy": proxy} if proxy else {}),
+            headers=headers or self.headers,
+            timeout=self.timeout,
+            max_clients=self.connection_limit,
+            cookie_jar=cookie_jar,
+            **({"proxy": proxy} if proxy else {}),
         )
 
     def switch_to_curl(self) -> None:
@@ -96,10 +109,7 @@ class SessionFactory:
             scheme = "https" if cookie.secure else "http"
             path = cookie.path or "/"
             try:
-                jar.update_cookies(
-                    {cookie.name: cast(str, cookie.value)},
-                    response_url=URL(f"{scheme}://{domain}{path}"),
-                )
+                jar.update_cookies({cookie.name: cast(str, cookie.value)}, response_url=URL(f"{scheme}://{domain}{path}"))
             except (TypeError, ValueError):
                 continue
         return jar

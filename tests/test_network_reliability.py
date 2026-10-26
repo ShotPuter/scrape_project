@@ -149,10 +149,15 @@ async def test_document_total_is_separate_from_api_timeout():
     app = web.Application()
     app.router.add_get("/api/publicaciones/1", slow)
     app.router.add_post("/api/publicaciones", slow)
-    async with local_api(app) as base_url, BaseHTTPClient(
-        base_url, retry_attempts=1, api_timeout_policy=TimeoutPolicy(total=0.02),
-        detail_timeout_policy=TimeoutPolicy(total=0.3),
-    ) as client:
+    async with (
+        local_api(app) as base_url,
+        BaseHTTPClient(
+            base_url,
+            retry_attempts=1,
+            api_timeout_policy=TimeoutPolicy(total=0.02),
+            detail_timeout_policy=TimeoutPolicy(total=0.3),
+        ) as client,
+    ):
         assert await client._request("GET", "publicaciones/1") == {"ok": True}
         with pytest.raises(HTTPClientError):
             await client._request("POST", "publicaciones")
@@ -170,9 +175,10 @@ async def test_read_inactivity_is_identified_separately():
 
     app = web.Application()
     app.router.add_get("/api/publicaciones/1", slow_body)
-    async with local_api(app) as base_url, BaseHTTPClient(
-        base_url, retry_attempts=1, detail_timeout_policy=TimeoutPolicy(total=0.5, sock_read=0.02)
-    ) as client:
+    async with (
+        local_api(app) as base_url,
+        BaseHTTPClient(base_url, retry_attempts=1, detail_timeout_policy=TimeoutPolicy(total=0.5, sock_read=0.02)) as client,
+    ):
         with pytest.raises(HTTPClientError):
             await client._request("GET", "publicaciones/1")
         event = client.metrics.samples[-1]
@@ -208,9 +214,15 @@ async def test_no_warmup_still_allows_runtime_recovery(tmp_path):
     first.request.side_effect = asyncio.IncompleteReadError(b"", 2)
     second.post.return_value = second.request.return_value = Response()
     client = BaseHTTPClient(
-        "https://example.test", proxy_file=source, proxy_check_path="catalog",
-        proxy_warmup=False, proxy_min_ready=1, proxy_replenish_threshold=1,
-        proxy_failure_cooldown_seconds=0.01, retry_backoff_factor=0, retry_jitter_seconds=0,
+        "https://example.test",
+        proxy_file=source,
+        proxy_check_path="catalog",
+        proxy_warmup=False,
+        proxy_min_ready=1,
+        proxy_replenish_threshold=1,
+        proxy_failure_cooldown_seconds=0.01,
+        retry_backoff_factor=0,
+        retry_jitter_seconds=0,
     )
     client._session_factory.create = Mock(side_effect=[first, second])
     try:
@@ -316,8 +328,12 @@ class FakeResponse:
 
 def fallback_client(direct, proxied, **overrides) -> BaseHTTPClient:
     client = BaseHTTPClient(
-        "https://example.test", proxy_mode="fallback", retry_attempts=overrides.pop("attempts", 3),
-        retry_backoff_factor=0, retry_jitter_seconds=0, **overrides,
+        "https://example.test",
+        proxy_mode="fallback",
+        retry_attempts=overrides.pop("attempts", 3),
+        retry_backoff_factor=0,
+        retry_jitter_seconds=0,
+        **overrides,
     )
     client._session = direct
     client._proxy_pool = FakePool(proxied)

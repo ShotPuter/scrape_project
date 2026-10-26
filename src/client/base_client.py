@@ -50,41 +50,78 @@ RetryPolicy = RetryConfig
 
 class HttpClient:
     def __init__(
-        self, base_url: str = "", headers: Mapping[str, str] | None = None,
-        timeout_seconds: float = 30, retry_attempts: int = 3, retry_backoff_factor: float = 1.5,
-        retry_jitter_seconds: float = 0.3, connection_limit: int = 9, impersonate: str = "chrome",
-        proxy_file: Path | None = None, proxy_db_path: Path | None = None, proxy_sample_size: int = 0,
-        proxy_check_concurrency: int = 5, proxy_check_timeout: float = 10, proxy_min_ready: int = 20,
-        proxy_replenish_threshold: int = 10, proxy_failure_cooldown_seconds: float = 120, proxy_max_failures: int = 3,
-        proxy_dead_ttl_hours: float = 1, proxy_check_path: str = "", proxy_check_payload: dict | None = None,
-        cookies_file: Path | None = None, proxy_warmup: bool = True, transport: str = "aiohttp",
-        api_timeout_policy: TimeoutPolicy | None = None, detail_timeout_policy: TimeoutPolicy | None = None,
-        requests_per_second: float = 0, proxy_per_ip_limit: int = 1, proxy_probe_concurrency: int = 2,
-        proxy_acquire_timeout: float = 150, direct_block_cooldown_seconds: float = 300, proxy_mode: str = "pool",
-        proxy_mix_share: float = 0, proxy_db_max_age_hours: float = 24, proxy_warmup_timeout_seconds: float = 90,
+        self,
+        base_url: str = "",
+        headers: Mapping[str, str] | None = None,
+        timeout_seconds: float = 30,
+        retry_attempts: int = 3,
+        retry_backoff_factor: float = 1.5,
+        retry_jitter_seconds: float = 0.3,
+        connection_limit: int = 9,
+        impersonate: str = "chrome",
+        proxy_file: Path | None = None,
+        proxy_db_path: Path | None = None,
+        proxy_sample_size: int = 0,
+        proxy_check_concurrency: int = 5,
+        proxy_check_timeout: float = 10,
+        proxy_min_ready: int = 20,
+        proxy_replenish_threshold: int = 10,
+        proxy_failure_cooldown_seconds: float = 120,
+        proxy_max_failures: int = 3,
+        proxy_dead_ttl_hours: float = 1,
+        proxy_check_path: str = "",
+        proxy_check_payload: dict | None = None,
+        cookies_file: Path | None = None,
+        proxy_warmup: bool = True,
+        transport: str = "aiohttp",
+        api_timeout_policy: TimeoutPolicy | None = None,
+        detail_timeout_policy: TimeoutPolicy | None = None,
+        requests_per_second: float = 0,
+        proxy_per_ip_limit: int = 1,
+        proxy_probe_concurrency: int = 2,
+        proxy_acquire_timeout: float = 150,
+        direct_block_cooldown_seconds: float = 300,
+        proxy_mode: str = "pool",
+        proxy_mix_share: float = 0,
+        proxy_db_max_age_hours: float = 24,
+        proxy_warmup_timeout_seconds: float = 90,
         config: ClientConfig | None = None,
     ):
         if config is None:
             api_policy = api_timeout_policy or TimeoutPolicy(total=timeout_seconds)
             config = ClientConfig(
-                base_url=base_url, headers=dict(headers or {}),
+                base_url=base_url,
+                headers=dict(headers or {}),
                 timeouts=TimeoutConfig(api=api_policy, detail=detail_timeout_policy or api_policy),
                 retry=RetryConfig(retry_attempts, retry_backoff_factor, retry_jitter_seconds),
                 proxy=ProxyConfig(
-                    file=proxy_file, db_path=proxy_db_path, mode=proxy_mode, sample_size=proxy_sample_size,
-                    check_concurrency=proxy_check_concurrency, check_timeout=proxy_check_timeout,
-                    min_ready=proxy_min_ready, replenish_threshold=proxy_replenish_threshold,
-                    failure_cooldown_seconds=proxy_failure_cooldown_seconds, max_failures=proxy_max_failures,
-                    dead_ttl_hours=proxy_dead_ttl_hours, check_path=proxy_check_path,
-                    check_payload=dict(proxy_check_payload or {}), warmup=proxy_warmup,
-                    per_ip_limit=proxy_per_ip_limit, probe_concurrency=proxy_probe_concurrency,
+                    file=proxy_file,
+                    db_path=proxy_db_path,
+                    mode=proxy_mode,
+                    sample_size=proxy_sample_size,
+                    check_concurrency=proxy_check_concurrency,
+                    check_timeout=proxy_check_timeout,
+                    min_ready=proxy_min_ready,
+                    replenish_threshold=proxy_replenish_threshold,
+                    failure_cooldown_seconds=proxy_failure_cooldown_seconds,
+                    max_failures=proxy_max_failures,
+                    dead_ttl_hours=proxy_dead_ttl_hours,
+                    check_path=proxy_check_path,
+                    check_payload=dict(proxy_check_payload or {}),
+                    warmup=proxy_warmup,
+                    per_ip_limit=proxy_per_ip_limit,
+                    probe_concurrency=proxy_probe_concurrency,
                     acquire_timeout=proxy_acquire_timeout,
-                    direct_block_cooldown_seconds=direct_block_cooldown_seconds, mix_share=proxy_mix_share,
+                    direct_block_cooldown_seconds=direct_block_cooldown_seconds,
+                    mix_share=proxy_mix_share,
                     db_max_age_hours=proxy_db_max_age_hours,
                     warmup_timeout_seconds=proxy_warmup_timeout_seconds,
                 ),
-                connection_limit=connection_limit, impersonate=impersonate, cookies_file=cookies_file,
-                transport=transport, requests_per_second=requests_per_second,
+                connection_limit=connection_limit,
+                impersonate=impersonate,
+                cookies_file=cookies_file,
+                transport=transport,
+                requests_per_second=requests_per_second,
             )
         self.config = config
         proxy = config.proxy
@@ -127,8 +164,12 @@ class HttpClient:
         self.proxy_warmup = proxy.warmup
         self.logger = logger
         self._session_factory = SessionFactory(
-            headers=self.headers, timeout=self.timeout, connection_limit=config.connection_limit,
-            impersonate=config.impersonate, cookies_file=config.cookies_file, transport=config.transport,
+            headers=self.headers,
+            timeout=self.timeout,
+            connection_limit=config.connection_limit,
+            impersonate=config.impersonate,
+            cookies_file=config.cookies_file,
+            transport=config.transport,
             sock_read_timeout=self.api_timeout_policy.sock_read,
         )
         self._session = None
@@ -208,9 +249,7 @@ class HttpClient:
         if self.proxy_db_path is not None:
             max_age = self.proxy_db_max_age_hours if self.proxy_db_max_age_hours > 0 else None
             async with ProxyDatabase(self.proxy_db_path) as database:
-                records = await database.list_active(
-                    limit=self.proxy_sample_size or None, max_age_hours=max_age
-                )
+                records = await database.list_active(limit=self.proxy_sample_size or None, max_age_hours=max_age)
             dead_path = dead_proxy_path(self.proxy_db_path)
             dead = load_dead_proxies(dead_path, self.proxy_dead_ttl_hours)
             records = [record for record in records if record.url not in dead]
@@ -222,7 +261,8 @@ class HttpClient:
                 age = f"{self.proxy_db_max_age_hours:.0f}h" if max_age else "disabled"
                 self.logger.warning(
                     "No fresh verified proxies in %s (freshness window: %s); continuing with direct requests only",
-                    self.proxy_db_path, age,
+                    self.proxy_db_path,
+                    age,
                 )
                 return None
             proxies = [
@@ -236,20 +276,30 @@ class HttpClient:
                 raise ValueError("Proxy mode requires a proxy file or proxy database")
             dead_path = dead_proxy_path(self.proxy_file)
             proxies = load_proxies(
-                self.proxy_file, self.proxy_sample_size or None, dead_path=dead_path,
+                self.proxy_file,
+                self.proxy_sample_size or None,
+                dead_path=dead_path,
                 dead_ttl_hours=self.proxy_dead_ttl_hours,
             )
 
         pool = ProxyPool(
-            proxies, self._session_factory.create, dead_path=dead_path,
-            dead_ttl_hours=self.proxy_dead_ttl_hours, min_ready=self.proxy_min_ready,
-            replenish_threshold=self.proxy_replenish_threshold, failure_cooldown_seconds=self.proxy_failure_cooldown_seconds,
-            max_failures=self.proxy_max_failures, per_ip_limit=self.proxy_per_ip_limit, network_budget=self.budget,
+            proxies,
+            self._session_factory.create,
+            dead_path=dead_path,
+            dead_ttl_hours=self.proxy_dead_ttl_hours,
+            min_ready=self.proxy_min_ready,
+            replenish_threshold=self.proxy_replenish_threshold,
+            failure_cooldown_seconds=self.proxy_failure_cooldown_seconds,
+            max_failures=self.proxy_max_failures,
+            per_ip_limit=self.proxy_per_ip_limit,
+            network_budget=self.budget,
             metrics=self.metrics,
         )
         pool.configure_warmup(
-            f"{self.base_url}/{self.proxy_check_path.lstrip('/')}", self.proxy_check_payload,
-            min(self.proxy_check_concurrency, self.proxy_probe_concurrency), self.proxy_check_timeout,
+            f"{self.base_url}/{self.proxy_check_path.lstrip('/')}",
+            self.proxy_check_payload,
+            min(self.proxy_check_concurrency, self.proxy_probe_concurrency),
+            self.proxy_check_timeout,
         )
         if not self.proxy_warmup:
             try:
@@ -284,8 +334,10 @@ class HttpClient:
     def _start_background_warmup(self, pool: ProxyPool, candidate_count: int) -> None:
         self.logger.info("Warming %d proxy candidates in the background; direct requests start immediately", candidate_count)
         pool.start_warmup(
-            f"{self.base_url}/{self.proxy_check_path.lstrip('/')}", self.proxy_check_payload,
-            min(self.proxy_check_concurrency, self.proxy_probe_concurrency), self.proxy_check_timeout,
+            f"{self.base_url}/{self.proxy_check_path.lstrip('/')}",
+            self.proxy_check_payload,
+            min(self.proxy_check_concurrency, self.proxy_probe_concurrency),
+            self.proxy_check_timeout,
         )
 
         async def watch() -> None:
@@ -304,28 +356,32 @@ class HttpClient:
     async def _warm_up_pool(self, pool: ProxyPool, proxies: Sequence[ProxyEndpoint | str]) -> None:
         self.logger.info(
             "Checking %d proxy candidates against the API (timeout %.0fs)...",
-            len(proxies), self.proxy_warmup_timeout_seconds,
+            len(proxies),
+            self.proxy_warmup_timeout_seconds,
         )
         pool.start_warmup(
-            f"{self.base_url}/{self.proxy_check_path.lstrip('/')}", self.proxy_check_payload,
-            min(self.proxy_check_concurrency, self.proxy_probe_concurrency), self.proxy_check_timeout,
+            f"{self.base_url}/{self.proxy_check_path.lstrip('/')}",
+            self.proxy_check_payload,
+            min(self.proxy_check_concurrency, self.proxy_probe_concurrency),
+            self.proxy_check_timeout,
         )
         try:
             async with asyncio.timeout(self.proxy_warmup_timeout_seconds):
                 await pool.wait_until_ready()
         except TimeoutError as exc:
             if not pool.sessions:
-                raise RuntimeError(
-                    f"No proxy became ready within {self.proxy_warmup_timeout_seconds:.0f}s"
-                ) from exc
+                raise RuntimeError(f"No proxy became ready within {self.proxy_warmup_timeout_seconds:.0f}s") from exc
             self.logger.warning(
                 "Proxy warmup did not finish within %.0fs; starting with %d ready proxy(s) while warmup continues",
-                self.proxy_warmup_timeout_seconds, len(pool.sessions),
+                self.proxy_warmup_timeout_seconds,
+                len(pool.sessions),
             )
             return
         self.logger.info(
-            "Starting with %d ready proxies; warmup continues in background (%d/%d checked)", len(pool.sessions),
-            pool.checked, len(proxies),
+            "Starting with %d ready proxies; warmup continues in background (%d/%d checked)",
+            len(pool.sessions),
+            pool.checked,
+            len(proxies),
         )
 
     def _add_proxy_sessions(self, pool: ProxyPool, proxies: Sequence[ProxyEndpoint | str]) -> None:
@@ -364,8 +420,10 @@ class HttpClient:
         if scale == 1.0:
             return policy
         return TimeoutPolicy(
-            total=policy.total * scale, connect=max(policy.connect, seconds * 1.5),
-            sock_connect=max(policy.sock_connect, seconds * 1.5), sock_read=max(policy.sock_read, seconds * 3),
+            total=policy.total * scale,
+            connect=max(policy.connect, seconds * 1.5),
+            sock_connect=max(policy.sock_connect, seconds * 1.5),
+            sock_read=max(policy.sock_read, seconds * 3),
         )
 
     async def _direct_session(self):
@@ -557,9 +615,7 @@ class HttpClient:
         try:
             async with guard:
                 self.metrics.counts["wire_requests"] += 1
-                return await transport.request(
-                    method, url, json_data=json_data, params=params, timeout=policy
-                )
+                return await transport.request(method, url, json_data=json_data, params=params, timeout=policy)
         except NETWORK_ERRORS as exc:
             mark("error_class", type(exc).__name__)
             if isinstance(exc, TimeoutError):

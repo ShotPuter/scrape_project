@@ -72,8 +72,12 @@ async def test_stage1_requires_json_with_ip(monkeypatch):
 
     monkeypatch.setattr(proxy_verifier, "_request", fake_request)
     result = await verify_stage1(
-        "http://proxy.example:8080", transport="aiohttp", user_agent="UA",
-        timeout=1, connect_timeout=1, budget=NetworkBudget(1),
+        "http://proxy.example:8080",
+        transport="aiohttp",
+        user_agent="UA",
+        timeout=1,
+        connect_timeout=1,
+        budget=NetworkBudget(1),
     )
     assert result.ok is True
     assert result.error_type == ""
@@ -88,8 +92,12 @@ async def test_stage1_rejects_invalid_json(monkeypatch):
 
     monkeypatch.setattr(proxy_verifier, "_request", fake_request)
     result = await verify_stage1(
-        "http://proxy.example:8080", transport="aiohttp", user_agent="UA",
-        timeout=1, connect_timeout=1, budget=NetworkBudget(1),
+        "http://proxy.example:8080",
+        transport="aiohttp",
+        user_agent="UA",
+        timeout=1,
+        connect_timeout=1,
+        budget=NetworkBudget(1),
     )
     assert result.ok is False
     assert result.error_type == "invalid_json"
@@ -106,9 +114,15 @@ async def test_stage2_retries_transient_error_and_records_stats(monkeypatch):
 
     monkeypatch.setattr(proxy_verifier, "_target_attempt", fake_attempt)
     result = await verify_stage2(
-        "http://proxy.example:8080", transport="aiohttp", user_agent="UA",
-        attempts=3, timeout=1, connect_timeout=1,
-        retry_delay=0, max_retry_delay=0, budget=NetworkBudget(1),
+        "http://proxy.example:8080",
+        transport="aiohttp",
+        user_agent="UA",
+        attempts=3,
+        timeout=1,
+        connect_timeout=1,
+        retry_delay=0,
+        max_retry_delay=0,
+        budget=NetworkBudget(1),
     )
 
     assert result.ok is True
@@ -136,9 +150,15 @@ async def test_stage2_403_gets_only_one_retry(monkeypatch):
 
     monkeypatch.setattr(proxy_verifier, "_target_attempt", fake_attempt)
     result = await verify_stage2(
-        "http://proxy.example:8080", transport="aiohttp", user_agent="UA",
-        attempts=3, timeout=1, connect_timeout=1,
-        retry_delay=0, max_retry_delay=0, budget=NetworkBudget(1),
+        "http://proxy.example:8080",
+        transport="aiohttp",
+        user_agent="UA",
+        attempts=3,
+        timeout=1,
+        connect_timeout=1,
+        retry_delay=0,
+        max_retry_delay=0,
+        budget=NetworkBudget(1),
     )
 
     assert result.ok is False

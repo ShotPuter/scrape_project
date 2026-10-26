@@ -26,8 +26,11 @@ async def local_api(app: web.Application):
 
 def make_client(base_url: str, **kwargs) -> SeprecClient:
     return SeprecClient(
-        base_url=base_url, retry_attempts=kwargs.pop("retry_attempts", 3), retry_backoff_factor=0.01,
-        retry_jitter_seconds=0, **kwargs,
+        base_url=base_url,
+        retry_attempts=kwargs.pop("retry_attempts", 3),
+        retry_backoff_factor=0.01,
+        retry_jitter_seconds=0,
+        **kwargs,
     )
 
 

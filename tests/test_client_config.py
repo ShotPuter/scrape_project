@@ -54,8 +54,7 @@ def test_settings_mapping_keeps_defaults_and_explicit_overrides(monkeypatch):
     monkeypatch.setenv("RETRY_ATTEMPTS", "5")
     resolved_settings = Settings.from_env()
     config = client_config_from_settings(
-        resolved_settings, base_url="https://example.test/api", timeout_seconds=7,
-        proxy_mode="direct", proxy_mix_share=0.25,
+        resolved_settings, base_url="https://example.test/api", timeout_seconds=7, proxy_mode="direct", proxy_mix_share=0.25
     )
 
     assert config.base_url == "https://example.test/api"
@@ -80,8 +79,7 @@ def test_settings_mapping_keeps_defaults_and_explicit_overrides(monkeypatch):
 
 def test_seprec_client_uses_injected_config_without_global_settings():
     config = ClientConfig(
-        base_url="http://localhost/api", timeouts=TimeoutConfig(api=TimeoutPolicy(total=5)),
-        proxy=ProxyConfig(mode="direct"),
+        base_url="http://localhost/api", timeouts=TimeoutConfig(api=TimeoutPolicy(total=5)), proxy=ProxyConfig(mode="direct")
     )
     client = SeprecClient(config=config)
     assert client.http.config is config
@@ -94,9 +92,7 @@ async def test_client_ignores_stale_database_records(tmp_path):
     db_path = tmp_path / "proxies.db"
     stale = (datetime.now(UTC) - timedelta(days=2)).isoformat()
     async with ProxyDatabase(db_path) as database:
-        await database.replace_all(
-            [VerifiedProxy("http://stale.example:80", "UA", "aiohttp", checked_at=stale)]
-        )
+        await database.replace_all([VerifiedProxy("http://stale.example:80", "UA", "aiohttp", checked_at=stale)])
 
     client = BaseHTTPClient(
         "https://example.test",

@@ -160,8 +160,11 @@ async def _load_iplocate_candidates(csv_path: Path, source_url: str, *, only_sou
     if source_url:
         try:
             await asyncio.to_thread(
-                sync_proxy_source, source_url=source_url, csv_path=csv_path,
-                state_path=settings.proxy_state_path, refresh_minutes=settings.proxy_source_refresh_minutes,
+                sync_proxy_source,
+                source_url=source_url,
+                csv_path=csv_path,
+                state_path=settings.proxy_state_path,
+                refresh_minutes=settings.proxy_source_refresh_minutes,
                 timeout=settings.proxy_source_timeout,
             )
         except ProxySourceError:
@@ -207,17 +210,32 @@ async def _load_candidate_sources(providers: list[str], csv_path: Path, source_u
 
 
 async def collect(
-    *, csv_path: Path, db_path: Path,
-    source_url: str = "", provider: str = "public", limit: int | None = None,
+    *,
+    csv_path: Path,
+    db_path: Path,
+    source_url: str = "",
+    provider: str = "public",
+    limit: int | None = None,
     concurrency: int = 50,
     timeout: float = 30,  # noqa: ASYNC109 - forwarded to stage 2
     transports: Sequence[str] = ("aiohttp", "curl_cffi"),
-    requests_per_second: float | None = None, max_per_source: int | None = None, stage2_concurrency: int | None = None,
-    stage1_check_url: str | None = None, stage1_timeout: float | None = None, stage1_connect_timeout: float | None = None,
-    min_uptime: float | None = None, max_latency_ms: float | None = None, preferred_age_minutes: float | None = None,
-    max_age_minutes: float | None = None, require_https: bool | None = None, stage2_attempts: int | None = None,
-    stage2_retry_delay: float | None = None, stage2_max_retry_delay: float | None = None,
-    min_success_rate: float | None = None, min_successes: int | None = None, report_path: Path | None = None,
+    requests_per_second: float | None = None,
+    max_per_source: int | None = None,
+    stage2_concurrency: int | None = None,
+    stage1_check_url: str | None = None,
+    stage1_timeout: float | None = None,
+    stage1_connect_timeout: float | None = None,
+    min_uptime: float | None = None,
+    max_latency_ms: float | None = None,
+    preferred_age_minutes: float | None = None,
+    max_age_minutes: float | None = None,
+    require_https: bool | None = None,
+    stage2_attempts: int | None = None,
+    stage2_retry_delay: float | None = None,
+    stage2_max_retry_delay: float | None = None,
+    min_success_rate: float | None = None,
+    min_successes: int | None = None,
+    report_path: Path | None = None,
     publish_after: int | None = None,
 ) -> dict:
     if concurrency < 1 or timeout <= 0:
@@ -240,9 +258,14 @@ async def collect(
     max_total = settings.proxy_max_candidates if limit is None else limit
     max_per = settings.proxy_max_per_source if max_per_source is None else max_per_source
     selection = filter_and_limit_candidates(
-        raw_candidates, min_uptime=min_uptime, max_latency_ms=max_latency_ms,
-        max_age_minutes=max_age_minutes, preferred_age_minutes=preferred_age_minutes, require_https=require_https,
-        max_per_source=max_per, max_total=max_total,
+        raw_candidates,
+        min_uptime=min_uptime,
+        max_latency_ms=max_latency_ms,
+        max_age_minutes=max_age_minutes,
+        preferred_age_minutes=preferred_age_minutes,
+        require_https=require_https,
+        max_per_source=max_per,
+        max_total=max_total,
     )
     candidates = selection.candidates
     _write_status(
@@ -254,8 +277,12 @@ async def collect(
     stage1_failures: list[Stage1Failure] = []
     if candidates:
         stage1_successes, stage1_failures = await _stage1_scan(
-            candidates, concurrency=concurrency, transports=list(transports),
-            check_url=stage1_check_url, timeout=stage1_timeout, connect_timeout=stage1_connect_timeout,
+            candidates,
+            concurrency=concurrency,
+            transports=list(transports),
+            check_url=stage1_check_url,
+            timeout=stage1_timeout,
+            connect_timeout=stage1_connect_timeout,
         )
     _write_status(f"Stage 1: passed={len(stage1_successes)}, failed={len(stage1_failures)}")
 
@@ -283,11 +310,15 @@ async def collect(
     stage2_checks: list[Stage2Check] = []
     if stage1_successes:
         stage2_checks = await _stage2_scan(
-            stage1_successes, concurrency=stage2_concurrency or settings.proxy_stage2_concurrency, timeout=timeout,
+            stage1_successes,
+            concurrency=stage2_concurrency or settings.proxy_stage2_concurrency,
+            timeout=timeout,
             requests_per_second=(
                 settings.proxy_stage2_requests_per_second if requests_per_second is None else requests_per_second
             ),
-            attempts=stage2_attempts, retry_delay=stage2_retry_delay, max_retry_delay=stage2_max_retry_delay,
+            attempts=stage2_attempts,
+            retry_delay=stage2_retry_delay,
+            max_retry_delay=stage2_max_retry_delay,
             on_check=publish_if_ready if publish_after is not None else None,
         )
 
@@ -307,10 +338,18 @@ async def collect(
         print(f"No verified proxies found; keeping existing database at {db_path} unchanged", flush=True)
 
     report = _build_report(
-        provider=provider, providers=providers, raw_candidates=raw_candidates,
-        selection=selection, raw_source_counts=catalog.source_counts, catalog_errors=catalog.errors,
-        stage1_successes=stage1_successes, stage1_failures=stage1_failures, stage2_checks=stage2_checks,
-        records=records, db_path=db_path, database_replaced=database_replaced,
+        provider=provider,
+        providers=providers,
+        raw_candidates=raw_candidates,
+        selection=selection,
+        raw_source_counts=catalog.source_counts,
+        catalog_errors=catalog.errors,
+        stage1_successes=stage1_successes,
+        stage1_failures=stage1_failures,
+        stage2_checks=stage2_checks,
+        records=records,
+        db_path=db_path,
+        database_replaced=database_replaced,
         csv_candidates=catalog.source_counts.get("iplocate", 0),
         free_proxy_candidates=catalog.source_counts.get("free-proxy", 0),
     )
@@ -321,8 +360,11 @@ async def collect(
 
 
 async def _stage1_scan(
-    candidates: list[ProxyCandidate], *, concurrency: int,
-    transports: list[str], check_url: str | None,
+    candidates: list[ProxyCandidate],
+    *,
+    concurrency: int,
+    transports: list[str],
+    check_url: str | None,
     timeout: float | None,  # noqa: ASYNC109 - forwarded to stage 1
     connect_timeout: float | None,
 ) -> tuple[list[Stage1Success], list[Stage1Failure]]:
@@ -349,8 +391,12 @@ async def _stage1_scan(
             for transport in compatible:
                 for user_agent in user_agents():
                     result = await verify_stage1(
-                        candidate.url, transport=transport, user_agent=user_agent,
-                        check_url=check_url, timeout=timeout, connect_timeout=connect_timeout,
+                        candidate.url,
+                        transport=transport,
+                        user_agent=user_agent,
+                        check_url=check_url,
+                        timeout=timeout,
+                        connect_timeout=connect_timeout,
                         budget=budget,
                     )
                     if result.ok:
@@ -406,10 +452,14 @@ async def _stage1_scan(
 
 
 async def _stage2_scan(
-    stage1_successes: list[Stage1Success], *, concurrency: int,
+    stage1_successes: list[Stage1Success],
+    *,
+    concurrency: int,
     timeout: float,  # noqa: ASYNC109 - forwarded to stage 2
     requests_per_second: float,
-    attempts: int | None, retry_delay: float | None, max_retry_delay: float | None,
+    attempts: int | None,
+    retry_delay: float | None,
+    max_retry_delay: float | None,
     on_check: Callable[[Stage2Check], Awaitable[None]] | None = None,
 ) -> list[Stage2Check]:
     queue: asyncio.Queue[Stage1Success | None] = asyncio.Queue()
@@ -436,10 +486,15 @@ async def _stage2_scan(
                     host = proxy_host(success.candidate.url)
                     async with host_locks.setdefault(host, asyncio.Lock()):
                         result = await verify_stage2(
-                            success.candidate.url, transport=success.transport, user_agent=success.user_agent,
-                            attempts=attempts, timeout=timeout,
-                            connect_timeout=min(timeout, settings.proxy_stage2_connect_timeout), retry_delay=retry_delay,
-                            max_retry_delay=max_retry_delay, budget=budget,
+                            success.candidate.url,
+                            transport=success.transport,
+                            user_agent=success.user_agent,
+                            attempts=attempts,
+                            timeout=timeout,
+                            connect_timeout=min(timeout, settings.proxy_stage2_connect_timeout),
+                            retry_delay=retry_delay,
+                            max_retry_delay=max_retry_delay,
+                            budget=budget,
                         )
                 finally:
                     async with lock:
@@ -485,24 +540,47 @@ def _record_from_check(check: Stage2Check, min_successes: int, min_success_rate:
     candidate = check.stage1.candidate
     checked_at = datetime.now(UTC).isoformat()
     return VerifiedProxy(
-        url=candidate.url, user_agent=check.stage1.user_agent, transport=check.stage1.transport,
-        latency_ms=stats.average_latency_ms, checked_at=checked_at, protocol=candidate.protocol,
-        source=candidate.source, country=candidate.country, city=candidate.city,
-        anonymity=candidate.anonymity, uptime_percent=candidate.uptime_percent, source_latency_ms=candidate.latency_ms,
+        url=candidate.url,
+        user_agent=check.stage1.user_agent,
+        transport=check.stage1.transport,
+        latency_ms=stats.average_latency_ms,
+        checked_at=checked_at,
+        protocol=candidate.protocol,
+        source=candidate.source,
+        country=candidate.country,
+        city=candidate.city,
+        anonymity=candidate.anonymity,
+        uptime_percent=candidate.uptime_percent,
+        source_latency_ms=candidate.latency_ms,
         last_checked=(candidate.last_checked.isoformat() if candidate.last_checked else None),
-        https_supported=candidate.https_supported, successful_requests=stats.successful_requests,
-        failed_requests=stats.failed_requests, success_rate=round(stats.success_rate, 4),
-        average_latency_ms=stats.average_latency_ms, last_success=stats.last_success, last_failure=stats.last_failure,
-        consecutive_failures=stats.consecutive_failures, error_types=dict(stats.error_types),
+        https_supported=candidate.https_supported,
+        successful_requests=stats.successful_requests,
+        failed_requests=stats.failed_requests,
+        success_rate=round(stats.success_rate, 4),
+        average_latency_ms=stats.average_latency_ms,
+        last_success=stats.last_success,
+        last_failure=stats.last_failure,
+        consecutive_failures=stats.consecutive_failures,
+        error_types=dict(stats.error_types),
     )
 
 
 def _build_report(
-    *, provider: str, providers: list[str],
-    raw_candidates: list[ProxyCandidate], selection, raw_source_counts: dict[str, int],
-    catalog_errors: dict[str, str], stage1_successes: list[Stage1Success], stage1_failures: list[Stage1Failure],
-    stage2_checks: list[Stage2Check], records: list[VerifiedProxy], db_path: Path,
-    database_replaced: bool, csv_candidates: int, free_proxy_candidates: int,
+    *,
+    provider: str,
+    providers: list[str],
+    raw_candidates: list[ProxyCandidate],
+    selection,
+    raw_source_counts: dict[str, int],
+    catalog_errors: dict[str, str],
+    stage1_successes: list[Stage1Success],
+    stage1_failures: list[Stage1Failure],
+    stage2_checks: list[Stage2Check],
+    records: list[VerifiedProxy],
+    db_path: Path,
+    database_replaced: bool,
+    csv_candidates: int,
+    free_proxy_candidates: int,
 ) -> dict:
     verified_keys = {(record.url, record.user_agent, record.transport) for record in records}
     stage2_error_counts: Counter[str] = Counter()
@@ -597,7 +675,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--publish-after", type=int, metavar="N", help="Publish the first N distinct verified proxies before the scan ends."
     )
     parser.add_argument(
-        "--provider", choices=list(PROVIDER_CHOICES), default="public",
+        "--provider",
+        choices=list(PROVIDER_CHOICES),
+        default="public",
         help=(
             "Candidate source: public (ProxyScrape/HProxy/Proxifly, default), all, "
             "both (iplocate + free-proxy), or one named source."
@@ -608,86 +688,125 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--source", default=settings.proxy_source_url)
     parser.add_argument(
-        "--limit", type=int, default=None,
+        "--limit",
+        type=int,
+        default=None,
         help=("Total candidate cap after filtering; 0 = all (default: PROXY_MAX_CANDIDATES)."),
     )
     parser.add_argument(
-        "--max-per-source", type=int, default=None,
+        "--max-per-source",
+        type=int,
+        default=None,
         help="Per-source cap after filtering; 0 = all (default: PROXY_MAX_PER_SOURCE).",
     )
     parser.add_argument(
-        "--concurrency", type=int, default=settings.proxy_check_concurrency,
+        "--concurrency",
+        type=int,
+        default=settings.proxy_check_concurrency,
         help="Stage-1 concurrent proxy checks (default: %(default)s).",
     )
     parser.add_argument(
-        "--stage2-concurrency", type=int, default=settings.proxy_stage2_concurrency,
+        "--stage2-concurrency",
+        type=int,
+        default=settings.proxy_stage2_concurrency,
         help="Stage-2 concurrent target checks (default: %(default)s).",
     )
     parser.add_argument(
-        "--timeout", type=float, default=settings.proxy_stage2_timeout,
+        "--timeout",
+        type=float,
+        default=settings.proxy_stage2_timeout,
         help="Stage-2 target request timeout (default: %(default)s).",
     )
     parser.add_argument(
-        "--stage1-timeout", type=float, default=settings.proxy_stage1_timeout,
+        "--stage1-timeout",
+        type=float,
+        default=settings.proxy_stage1_timeout,
         help="Stage-1 HTTPS check total timeout (default: %(default)s).",
     )
     parser.add_argument(
-        "--stage1-connect-timeout", type=float, default=settings.proxy_stage1_connect_timeout,
+        "--stage1-connect-timeout",
+        type=float,
+        default=settings.proxy_stage1_connect_timeout,
         help="Stage-1 connect timeout (default: %(default)s).",
     )
     parser.add_argument(
-        "--stage1-check-url", default=settings.proxy_stage1_check_url,
+        "--stage1-check-url",
+        default=settings.proxy_stage1_check_url,
         help="HTTPS endpoint used for the stage-1 reachability check.",
     )
     parser.add_argument(
-        "--min-uptime", type=float, default=settings.proxy_stage1_min_uptime,
+        "--min-uptime",
+        type=float,
+        default=settings.proxy_stage1_min_uptime,
         help=("Reject candidates with measured uptime below this value (default: %(default)s)."),
     )
     parser.add_argument(
-        "--max-latency-ms", type=float, default=settings.proxy_stage1_max_latency_ms,
+        "--max-latency-ms",
+        type=float,
+        default=settings.proxy_stage1_max_latency_ms,
         help=("Reject candidates with measured latency above this value (default: %(default)s)."),
     )
     parser.add_argument(
-        "--preferred-age-minutes", type=float, default=settings.proxy_stage1_preferred_age_minutes,
+        "--preferred-age-minutes",
+        type=float,
+        default=settings.proxy_stage1_preferred_age_minutes,
         help=("Prefer candidates checked within this many minutes (default: %(default)s)."),
     )
     parser.add_argument(
-        "--max-age-minutes", type=float, default=settings.proxy_stage1_max_age_minutes,
+        "--max-age-minutes",
+        type=float,
+        default=settings.proxy_stage1_max_age_minutes,
         help=("Hard-reject candidates older than this many minutes (default: %(default)s)."),
     )
     parser.add_argument(
-        "--require-https", action=argparse.BooleanOptionalAction, default=settings.proxy_stage1_require_https,
+        "--require-https",
+        action=argparse.BooleanOptionalAction,
+        default=settings.proxy_stage1_require_https,
         help="Reject candidates explicitly marked as not supporting HTTPS.",
     )
     parser.add_argument(
-        "--requests-per-second", type=float, default=settings.proxy_stage2_requests_per_second,
+        "--requests-per-second",
+        type=float,
+        default=settings.proxy_stage2_requests_per_second,
         help="Stage-2 target request start rate; 0 disables pacing.",
     )
     parser.add_argument(
-        "--stage2-attempts", type=int, default=settings.proxy_stage2_attempts,
+        "--stage2-attempts",
+        type=int,
+        default=settings.proxy_stage2_attempts,
         help="Stage-2 attempts per proxy combination (default: %(default)s).",
     )
     parser.add_argument(
-        "--stage2-retry-delay", type=float, default=settings.proxy_stage2_retry_delay,
+        "--stage2-retry-delay",
+        type=float,
+        default=settings.proxy_stage2_retry_delay,
         help="Base stage-2 retry delay in seconds (default: %(default)s).",
     )
     parser.add_argument(
-        "--stage2-max-retry-delay", type=float, default=settings.proxy_stage2_max_retry_delay,
+        "--stage2-max-retry-delay",
+        type=float,
+        default=settings.proxy_stage2_max_retry_delay,
         help="Maximum stage-2 retry delay in seconds (default: %(default)s).",
     )
     parser.add_argument(
-        "--min-success-rate", type=float, default=settings.proxy_stage2_min_success_rate,
+        "--min-success-rate",
+        type=float,
+        default=settings.proxy_stage2_min_success_rate,
         help="Minimum stage-2 success rate to store a proxy (default: %(default)s).",
     )
     parser.add_argument(
-        "--min-successes", type=int, default=settings.proxy_stage2_min_successes,
+        "--min-successes",
+        type=int,
+        default=settings.proxy_stage2_min_successes,
         help=("Minimum successful stage-2 attempts to store a proxy (default: %(default)s)."),
     )
     parser.add_argument(
         "--report", type=Path, default=settings.proxy_report_path, help="JSON report path (default: %(default)s)."
     )
     parser.add_argument(
-        "--transport", choices=["both", "aiohttp", "curl_cffi"], default="both",
+        "--transport",
+        choices=["both", "aiohttp", "curl_cffi"],
+        default="both",
         help="Verify one transport or both (default: both).",
     )
     return parser
@@ -718,16 +837,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         report = asyncio.run(
             collect(
-                csv_path=args.csv, db_path=args.db, source_url=args.source,
-                provider=args.provider, limit=args.limit, concurrency=args.concurrency,
-                timeout=args.timeout, transports=transports, requests_per_second=args.requests_per_second,
-                max_per_source=args.max_per_source, stage2_concurrency=args.stage2_concurrency,
-                stage1_check_url=args.stage1_check_url, stage1_timeout=args.stage1_timeout,
-                stage1_connect_timeout=args.stage1_connect_timeout, min_uptime=args.min_uptime,
-                max_latency_ms=args.max_latency_ms, preferred_age_minutes=args.preferred_age_minutes,
-                max_age_minutes=args.max_age_minutes, require_https=args.require_https, stage2_attempts=args.stage2_attempts,
-                stage2_retry_delay=args.stage2_retry_delay, stage2_max_retry_delay=args.stage2_max_retry_delay,
-                min_success_rate=args.min_success_rate, min_successes=args.min_successes, report_path=args.report,
+                csv_path=args.csv,
+                db_path=args.db,
+                source_url=args.source,
+                provider=args.provider,
+                limit=args.limit,
+                concurrency=args.concurrency,
+                timeout=args.timeout,
+                transports=transports,
+                requests_per_second=args.requests_per_second,
+                max_per_source=args.max_per_source,
+                stage2_concurrency=args.stage2_concurrency,
+                stage1_check_url=args.stage1_check_url,
+                stage1_timeout=args.stage1_timeout,
+                stage1_connect_timeout=args.stage1_connect_timeout,
+                min_uptime=args.min_uptime,
+                max_latency_ms=args.max_latency_ms,
+                preferred_age_minutes=args.preferred_age_minutes,
+                max_age_minutes=args.max_age_minutes,
+                require_https=args.require_https,
+                stage2_attempts=args.stage2_attempts,
+                stage2_retry_delay=args.stage2_retry_delay,
+                stage2_max_retry_delay=args.stage2_max_retry_delay,
+                min_success_rate=args.min_success_rate,
+                min_successes=args.min_successes,
+                report_path=args.report,
                 publish_after=args.publish_after,
             )
         )
