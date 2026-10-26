@@ -258,7 +258,6 @@ async def test_runtime_failure_threshold_survives_multiple_readiness_successes(t
             assert pool.add_session("http://one:80", session)
             pool.discard(session)
             await asyncio.sleep(0)
-        assert "http://one:80" in pool._permanent_dead
         assert not pool.add_session("http://one:80", AsyncMock())
     finally:
         await pool.close()

@@ -211,5 +211,5 @@ async def test_exhausted_proxy_pool_does_not_fall_back_to_direct_connection():
     client._proxy_pool = pool
     with pytest.raises(HTTPClientError, match="pool is empty"):
         await client.request("GET", "/test")
-    assert client._session is None
+    assert client.metrics.counts["direct_attempts"] == 0
     await client.close()
