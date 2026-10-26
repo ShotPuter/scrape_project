@@ -308,7 +308,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         logger.warning("Interrupted by user. Shutting down...")
         return EXIT_INTERRUPTED
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI boundary converts failures into an exit code
         logger.exception("Fatal error: %s", exc)
         return EXIT_FAILURE
 

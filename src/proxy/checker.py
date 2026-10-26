@@ -62,7 +62,7 @@ class ProxyChecker:
                         error_message=None if is_ready else f"HTTP {response.status}",
                     )
 
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - one bad proxy must not stop the check
                 return VerifiedProxy(url=proxy_url, is_working=False, error_message=type(error).__name__)
 
     async def verify_many(self, proxy_urls: Sequence[str]) -> list[VerifiedProxy]:

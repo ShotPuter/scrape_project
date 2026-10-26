@@ -162,23 +162,40 @@ class HttpClient:
                 self._session = self._session_factory.create()
 
     async def close(self) -> None:
-        if self._pool_watch_task is not None:
-            self._pool_watch_task.cancel()
+        """Release every owned resource, even if one closer fails.
+
+        All references are detached before awaiting so repeated calls are safe
+        and a partially failed shutdown cannot leak the remaining sessions.
+        """
+        watch_task = self._pool_watch_task
+        self._pool_watch_task = None
+        if watch_task is not None:
+            watch_task.cancel()
             try:
-                await self._pool_watch_task
+                await watch_task
             except asyncio.CancelledError:
                 pass
             except Exception as exc:
                 self.logger.debug("Proxy watch task stopped with %s", type(exc).__name__)
-            self._pool_watch_task = None
-        await asyncio.gather(*(s.close() for s in self._direct_retired), return_exceptions=True)
+
+        retired = list(self._direct_retired)
         self._direct_retired.clear()
-        if self._session is not None:
-            await self._session.close()
-            self._session = None
-        if self._proxy_pool is not None:
-            await self._proxy_pool.close()
-            self._proxy_pool = None
+        session = self._session
+        self._session = None
+        pool = self._proxy_pool
+        self._proxy_pool = None
+
+        closers = [retired_session.close() for retired_session in retired]
+        if session is not None:
+            closers.append(session.close())
+        if closers:
+            await asyncio.gather(*closers, return_exceptions=True)
+
+        if pool is not None:
+            try:
+                await pool.close()
+            except Exception as exc:  # noqa: BLE001 - shutdown must release remaining resources
+                self.logger.debug("Proxy pool shutdown failed with %s", type(exc).__name__)
 
     async def _create_proxy_pool(self) -> ProxyPool | None:
         if self.proxy_db_path is not None:
@@ -223,11 +240,14 @@ class HttpClient:
         if not self.proxy_warmup:
             try:
                 self._add_proxy_sessions(pool, proxies)
+            except asyncio.CancelledError:
+                await pool.close()
+                raise
             except Exception as exc:  # noqa: BLE001 - direct-only fallback stays usable
+                await pool.close()
                 if self.proxy_mode == "always":
                     raise
                 self.logger.warning("Proxy pool unusable (%s); continuing with direct requests", exc)
-                await pool.close()
                 return None
         elif self.proxy_mode == "fallback":
             # Fallback must not gate the run on warmup: direct requests start
@@ -582,7 +602,7 @@ class HttpClient:
             except asyncio.CancelledError:
                 event["error_class"] = "CancelledError"
                 raise
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - record the error class before re-raising
                 event["error_class"] = type(exc).__name__
                 raise
             finally:

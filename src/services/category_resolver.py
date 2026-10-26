@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from src.client.errors import HTTPClientError
 from src.models.publication import CatalogItem
+from src.utils.helpers import SeprecError
 from src.utils.logger import setup_logger
 
 logger = setup_logger("category_resolver")
@@ -61,7 +63,7 @@ class CategoryResolver:
 
         try:
             self._cached_catalogs = await self.client.get_catalogs()
-        except Exception as error:
+        except (SeprecError, HTTPClientError, OSError, TimeoutError) as error:
             logger.warning("Failed to fetch publication category catalog", extra={"error": str(error)})
             self._cached_catalogs = []
 

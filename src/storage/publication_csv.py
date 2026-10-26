@@ -5,15 +5,14 @@ from __future__ import annotations
 import asyncio
 import csv
 import os
-import tempfile
 from collections.abc import AsyncIterator, Iterable, Sequence
 from pathlib import Path
 
 from config import settings
 from src.models.publication import STATUS_DOWNLOADED, STATUS_GENERATED_PDF, PublicationRecord
 from src.storage.integrity import CSV_FIELDS, SAVED_STATUSES, file_problem, read_records
+from src.utils.atomic import atomic_text_writer
 
-TEMPORARY_INDEX_SUFFIX = ".tmp"
 BYTES_PER_MEGABYTE = 1024 * 1024
 
 
@@ -49,8 +48,9 @@ class PublicationCsv:
                 updated_mapping = {**self._records, record.id: record}
                 await asyncio.to_thread(_write_snapshot, self.path, updated_mapping.values())
             else:
-                await asyncio.to_thread(_append_record, self.path, record)
+                await asyncio.to_thread(_append_or_rewrite, self.path, record, list(self._records.values()))
 
+            # Only mutate the in-memory index after the durable write succeeded.
             self._records[record.id] = record
 
     async def filter_unprocessed_ids(self, publication_ids: Sequence[str]) -> list[str]:
@@ -98,6 +98,46 @@ def _extract_valid_identifiers(records: list[PublicationRecord], verify_files: b
     return {record.id for record in records if file_problem(record.file_path, record.file_size_bytes) is None}
 
 
+def _append_or_rewrite(path: Path, record: PublicationRecord, existing: list[PublicationRecord]) -> None:
+    """Append when the file is healthy, otherwise repair it with a full snapshot."""
+    if _can_append_safely(path):
+        try:
+            _append_record(path, record)
+            return
+        except OSError:
+            # A partially written append is repaired below instead of being
+            # left in place as a malformed trailing row.
+            pass
+    _write_snapshot(path, [*existing, record])
+
+
+def _can_append_safely(path: Path) -> bool:
+    """Check the CSV header and trailing newline before appending in place."""
+    try:
+        size = path.stat().st_size
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    if size == 0:
+        return True
+
+    try:
+        with path.open("rb") as file_handle:
+            header_line = file_handle.readline()
+            file_handle.seek(-1, os.SEEK_END)
+            last_byte = file_handle.read(1)
+    except OSError:
+        return False
+
+    try:
+        header = header_line.decode("utf-8-sig").rstrip("\r\n")
+        fields = tuple(next(csv.reader([header])))
+    except (UnicodeDecodeError, csv.Error, StopIteration):
+        return False
+    return fields == CSV_FIELDS and last_byte in {b"\n", b"\r"}
+
+
 def _append_record(path: Path, record: PublicationRecord) -> None:
     """Append a single record row to the CSV file, adding headers if newly created."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -115,18 +155,8 @@ def _append_record(path: Path, record: PublicationRecord) -> None:
 
 
 def _write_snapshot(path: Path, records: Iterable[PublicationRecord]) -> None:
-    """Atomically rewrite complete CSV snapshot via temporary file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    file_descriptor, temp_path = tempfile.mkstemp(prefix=f".{path.name}.", suffix=TEMPORARY_INDEX_SUFFIX, dir=path.parent)
-    try:
-        with os.fdopen(file_descriptor, "w", newline="", encoding="utf-8-sig") as file_handle:
-            if path.exists():
-                os.chmod(temp_path, path.stat().st_mode & 0o777)
-            writer = csv.DictWriter(file_handle, fieldnames=CSV_FIELDS)
-            writer.writeheader()
-            writer.writerows(record.model_dump(mode="json") for record in records)
-            file_handle.flush()
-            os.fsync(file_handle.fileno())
-        os.replace(temp_path, path)
-    finally:
-        Path(temp_path).unlink(missing_ok=True)
+    """Atomically rewrite a complete CSV snapshot via a sibling temporary file."""
+    with atomic_text_writer(path, encoding="utf-8-sig", newline="") as file_handle:
+        writer = csv.DictWriter(file_handle, fieldnames=CSV_FIELDS)
+        writer.writeheader()
+        writer.writerows(record.model_dump(mode="json") for record in records)

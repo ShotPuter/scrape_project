@@ -9,9 +9,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, Self
-from urllib.parse import urlsplit
 
 from src.client.network import TimeoutPolicy, mark, trace_config
+from src.utils.proxy_url import is_socks_proxy
 
 try:
     from aiohttp import ClientError, ClientSession, ClientTimeout, TCPConnector
@@ -129,7 +129,7 @@ class AiohttpSession:
 
 
 def _is_socks_proxy(proxy: str | None) -> bool:
-    return bool(proxy and urlsplit(proxy).scheme.startswith("socks"))
+    return is_socks_proxy(proxy)
 
 
 def _request_options(

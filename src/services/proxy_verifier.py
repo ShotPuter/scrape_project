@@ -14,7 +14,6 @@ import time
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
 from typing import Any
 
 from curl_cffi.requests import AsyncSession
@@ -36,7 +35,9 @@ from curl_cffi.requests.exceptions import (
 from config import settings
 from src.client.aiohttp_session import AIOHTTP_AVAILABLE, AiohttpSession
 from src.client.network import NetworkBudget, TimeoutPolicy
+from src.client.readiness import is_catalog_payload, is_search_payload
 from src.models.publication import PublicationSearchFilter
+from src.utils.http import parse_retry_after
 from src.utils.logger import setup_logger
 
 logger = setup_logger("proxy_verifier")
@@ -178,14 +179,11 @@ class _AttemptOutcome:
 
 
 def catalog_ready(data: object) -> bool:
-    return isinstance(data, dict) and data.get("finalizado") is True and isinstance(data.get("datos"), list)
+    return is_catalog_payload(data)
 
 
 def search_ready(data: object) -> bool:
-    if not isinstance(data, dict) or data.get("finalizado") is not True:
-        return False
-    payload = data.get("datos")
-    return isinstance(payload, dict) and isinstance(payload.get("filas"), list) and "total" in payload
+    return is_search_payload(data)
 
 
 def classify_status(status: int) -> str:
@@ -256,22 +254,12 @@ def retry_delay_for(
 
 
 def _retry_after(headers: Any) -> float | None:
-    if not headers:
+    if not headers or not hasattr(headers, "get"):
         return None
-    raw = headers.get("Retry-After") if hasattr(headers, "get") else None
+    raw = headers.get("Retry-After")
     if raw is None:
         return None
-    try:
-        return max(0.0, float(str(raw).strip()))
-    except ValueError:
-        pass
-    try:
-        parsed = parsedate_to_datetime(str(raw))
-    except (TypeError, ValueError, OverflowError):
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return max(0.0, (parsed - datetime.now(UTC)).total_seconds())
+    return parse_retry_after(str(raw).strip())
 
 
 def _session_for(proxy_url: str, *, transport: str, user_agent: str, policy: TimeoutPolicy):

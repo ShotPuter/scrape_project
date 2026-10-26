@@ -9,6 +9,7 @@ import time
 import uuid
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -99,7 +100,12 @@ class SeprecScraper:
             await self.store.load()
             await self.client.open()
         except BaseException:
-            self._executor.shutdown(wait=False)
+            try:
+                # open() may have created sessions before failing; release them.
+                with suppress(Exception):
+                    await self.client.close()
+            finally:
+                self._executor.shutdown(wait=False)
             raise
 
         self._monitor_task = asyncio.create_task(self._monitor_performance())
@@ -195,7 +201,7 @@ class SeprecScraper:
                 )
                 return record
 
-            except Exception as processing_error:
+            except Exception as processing_error:  # noqa: BLE001 - one publication must not abort the batch
                 logger.error(
                     "Failed to process publication document",
                     extra={"publication_id": summary.id, "error": str(processing_error)}, exc_info=True,

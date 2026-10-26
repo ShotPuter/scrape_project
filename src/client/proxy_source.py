@@ -4,17 +4,17 @@ from __future__ import annotations
 
 import csv
 import json
-import os
-import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
+from src.utils.atomic import atomic_text_writer, atomic_write_json
+from src.utils.proxy_url import SUPPORTED_PROXY_SCHEMES, parse_proxy_url
+
 DEFAULT_SOURCE_URL = "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/all-proxies.txt"
-SUPPORTED_SCHEMES = {"http", "https", "socks4", "socks4a", "socks5", "socks5h"}
+SUPPORTED_SCHEMES = SUPPORTED_PROXY_SCHEMES
 DEFAULT_REFRESH_MINUTES = 30.0
 DEFAULT_TIMEOUT_SECONDS = 30.0
 CSV_FIELDNAMES = ("alive", "protocol", "proxy")
@@ -37,21 +37,10 @@ def parse_proxies(text: str) -> list[tuple[str, str]]:
 
 
 def write_proxy_csv(proxies: list[tuple[str, str]], path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
-            writer = csv.writer(handle)
-            writer.writerow(CSV_FIELDNAMES)
-            writer.writerows(("true", protocol, address) for protocol, address in proxies)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_name, path)
-    finally:
-        try:
-            os.unlink(temp_name)
-        except FileNotFoundError:
-            pass
+    with atomic_text_writer(path, newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(CSV_FIELDNAMES)
+        writer.writerows(("true", protocol, address) for protocol, address in proxies)
 
 
 def sync_proxy_source(
@@ -77,18 +66,10 @@ def _utc_now() -> datetime:
 
 
 def _parse_proxy_line(line: str) -> tuple[str, str] | None:
-    value = line.strip()
-    if not value or value.startswith("#"):
+    address = parse_proxy_url(line)
+    if address is None:
         return None
-
-    url = value if "://" in value else f"http://{value}"
-    try:
-        parsed = urlsplit(url)
-    except ValueError:
-        return None
-    if parsed.scheme.lower() not in SUPPORTED_SCHEMES or not parsed.hostname or not parsed.port:
-        return None
-    return parsed.scheme.lower(), f"{parsed.hostname}:{parsed.port}"
+    return address.scheme, address.host_port
 
 
 def _validate_sync(source_url: str, csv_path: Path | None, refresh_minutes: float, timeout: float) -> None:
@@ -186,7 +167,4 @@ def _load_state(path: Path) -> dict[str, Any]:
 
 
 def _save_state(path: Path, state: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(f"{path.name}.tmp")
-    temp.write_text(json.dumps(state, indent=2), encoding="utf-8")
-    os.replace(temp, path)
+    atomic_write_json(path, state, indent=2)

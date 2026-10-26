@@ -19,6 +19,7 @@ from config import settings
 from src.client.aiohttp_session import AIOHTTP_AVAILABLE, AiohttpSession
 from src.client.network import TimeoutPolicy
 from src.utils.logger import setup_logger
+from src.utils.proxy_url import SUPPORTED_PROXY_SCHEMES, normalize_proxy_url
 
 logger = setup_logger("proxy_catalog")
 
@@ -28,7 +29,7 @@ HPROXY_URL = "https://hproxy.com/api/proxy-list?format=json"
 PROXIFLY_URL = "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/all/data.json"
 SOURCE_URLS = {"proxyscrape": PROXYSCRAPE_URL, "hproxy": HPROXY_URL, "proxifly": PROXIFLY_URL}
 PUBLIC_SOURCES = tuple(SOURCE_URLS)
-SUPPORTED_SCHEMES = {"http", "https", "socks4", "socks4a", "socks5", "socks5h"}
+SUPPORTED_SCHEMES = SUPPORTED_PROXY_SCHEMES
 DEAD_STATUSES = {"dead", "down", "offline", "inactive", "removed", "failed", "unreachable"}
 SOURCE_RANK = {"proxyscrape": 0, "hproxy": 0, "iplocate": 1, "free-proxy": 1, "proxifly": 2}
 USER_AGENT = "gaceta-scraper/1.0"
@@ -202,15 +203,7 @@ def _candidate_url(address: str, protocol: str) -> str | None:
     if not value:
         return None
     url = value if "://" in value else f"{protocol}://{value}"
-    try:
-        parsed = urlsplit(url)
-    except ValueError:
-        return None
-    scheme = parsed.scheme.lower()
-    if scheme not in SUPPORTED_SCHEMES or not parsed.hostname or not parsed.port:
-        return None
-    netloc = parsed.netloc
-    return f"{scheme}://{netloc}"
+    return normalize_proxy_url(url)
 
 
 def _https_supported(raw: Mapping[str, object], protocol: str) -> bool | None:
@@ -392,7 +385,7 @@ async def _fetch_source(source: str, timeout: float) -> object:  # noqa: ASYNC10
             return _source_response_payload(response)
         finally:
             await session.close()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - both transports are wrapped into one domain error
         raise ProxyCatalogError(f"{source}: {exc}") from (last_error or exc)
 
 

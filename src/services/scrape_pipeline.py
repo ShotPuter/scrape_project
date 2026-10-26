@@ -123,7 +123,7 @@ class ScrapePipeline:
                 page_number += 1
                 await self.polite_delay()
 
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - producer boundary records fatal pagination errors
             counters.fatal_error = str(error)
             logger.error(
                 "Pagination aborted due to unexpected error", extra={"page": page_number, "error": str(error)}, exc_info=True

@@ -8,10 +8,9 @@ by :mod:`src.services.proxy_collector` before it reaches SQLite.
 from __future__ import annotations
 
 import asyncio
-from urllib.parse import urlsplit
 
-from src.client.proxy_source import SUPPORTED_SCHEMES
 from src.utils.logger import setup_logger
+from src.utils.proxy_url import normalize_proxy_url
 
 logger = setup_logger("free_proxy_source")
 
@@ -35,19 +34,7 @@ def _import_free_proxy():
 
 def normalise_proxy_address(address: str) -> str | None:
     """Turn ``ip:port`` (or a URL) into a supported proxy URL."""
-    value = address.strip()
-    if not value:
-        return None
-    url = value if "://" in value else f"http://{value}"
-    try:
-        parsed = urlsplit(url)
-    except ValueError:
-        return None
-    if parsed.scheme.lower() not in SUPPORTED_SCHEMES:
-        return None
-    if not parsed.hostname or not parsed.port:
-        return None
-    return f"{parsed.scheme.lower()}://{parsed.hostname}:{parsed.port}"
+    return normalize_proxy_url(address)
 
 
 async def load_free_proxy_candidates(*, request_timeout: float = 10) -> list[str]:

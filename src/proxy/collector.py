@@ -65,7 +65,7 @@ class ProxyCollector:
                             normalized = normalize_proxy_url(match)
                             if normalized:
                                 candidates.append(normalized)
-                except Exception as error:
+                except (aiohttp.ClientError, TimeoutError, OSError, UnicodeError) as error:
                     logger.debug("Failed fetching from public proxy source %s: %s", url, error)
 
         return list(dict.fromkeys(candidates))

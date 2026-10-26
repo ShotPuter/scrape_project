@@ -87,5 +87,5 @@ def _attach_rotating_file_handler(target_logger: logging.Logger) -> None:
             _FILE_HANDLERS[log_file_path] = existing_handler
 
         target_logger.addHandler(existing_handler)
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - logging setup must never crash the application
         target_logger.warning("Could not initialize rotating file logger", extra={"error": str(error)})

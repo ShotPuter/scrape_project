@@ -73,7 +73,7 @@ class AsyncScheduler:
             await self.job()
         except asyncio.CancelledError:
             raise
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - a scheduler cycle must survive job failures
             self.logger.exception("Scheduled job run failed; continuing scheduler cycle", extra={"error": str(error)})
 
     async def _wait_before_first_run(self) -> bool:

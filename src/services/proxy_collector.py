@@ -18,15 +18,12 @@ import argparse
 import asyncio
 import csv
 import json
-import os
 import sys
-import tempfile
 from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from config import settings
 from src.client.free_proxy_source import load_free_proxy_candidates
@@ -44,9 +41,11 @@ from src.client.proxy_pool import dead_proxy_path
 from src.client.proxy_source import ProxySourceError, sync_proxy_source
 from src.services.proxy_verifier import Stage1Result, Stage2Result, compatible_transports, verify_stage1, verify_stage2
 from src.storage.proxy_database import ProxyDatabase, VerifiedProxy
+from src.utils.atomic import atomic_write_json
+from src.utils.proxy_url import SUPPORTED_PROXY_SCHEMES, normalize_proxy_url, parse_proxy_url, proxy_host
 
 PROGRESS_EVERY = 25
-SUPPORTED_SCHEMES = {"http", "https", "socks4", "socks4a", "socks5", "socks5h"}
+SUPPORTED_SCHEMES = SUPPORTED_PROXY_SCHEMES
 DEFAULT_USER_AGENTS = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -85,14 +84,10 @@ def proxy_url(row: dict[str, str]) -> str | None:
         return None
     protocol = row.get("protocol", "http").strip().lower()
     address = row.get("proxy", "").strip() or f"{row.get('ip', '')}:{row.get('port', '')}"
-    url = address if "://" in address else f"{protocol}://{address}"
-    try:
-        parsed = urlsplit(url)
-        if parsed.scheme not in SUPPORTED_SCHEMES or not parsed.hostname or not parsed.port:
-            return None
-    except ValueError:
+    if not address.strip():
         return None
-    return url
+    url = address if "://" in address else f"{protocol}://{address}"
+    return normalize_proxy_url(url)
 
 
 def read_candidates(path: Path, limit: int | None = None) -> list[str]:
@@ -129,13 +124,10 @@ def clear_dead_proxies(db_path: Path) -> None:
 
 
 def _candidate_from_url(url: str, source: str) -> ProxyCandidate | None:
-    try:
-        parsed = urlsplit(url)
-    except ValueError:
+    address = parse_proxy_url(url)
+    if address is None:
         return None
-    if parsed.scheme not in SUPPORTED_SCHEMES or not parsed.hostname or not parsed.port:
-        return None
-    return ProxyCandidate(url=url, protocol=parsed.scheme.lower(), source=source)
+    return ProxyCandidate(url=address.url, protocol=address.scheme, source=source)
 
 
 def _candidates_from_urls(urls: Iterable[str], source: str) -> list[ProxyCandidate]:
@@ -350,7 +342,7 @@ async def _stage1_scan(
         compatible = compatible_transports(candidate.protocol, transports)
         if not compatible:
             return [], Stage1Failure(candidate, "unsupported_protocol", "no compatible HTTP transport")
-        host = urlsplit(candidate.url).hostname or candidate.url
+        host = proxy_host(candidate.url)
         found: list[Stage1Success] = []
         last_failure: Stage1Result | None = None
         async with host_locks.setdefault(host, asyncio.Lock()):
@@ -441,7 +433,7 @@ async def _stage2_scan(
                 async with lock:
                     active += 1
                 try:
-                    host = urlsplit(success.candidate.url).hostname or success.candidate.url
+                    host = proxy_host(success.candidate.url)
                     async with host_locks.setdefault(host, asyncio.Lock()):
                         result = await verify_stage2(
                             success.candidate.url, transport=success.transport, user_agent=success.user_agent,
@@ -588,19 +580,7 @@ def _build_report(
 
 
 def _write_report(path: Path, report: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(report, handle, indent=2, ensure_ascii=False, sort_keys=True)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_name, path)
-    finally:
-        try:
-            os.unlink(temp_name)
-        except FileNotFoundError:
-            pass
+    atomic_write_json(path, report, indent=2, sort_keys=True)
 
 
 def _report_progress(checked: int, total: int, verified: int, active: int, *, prefix: str = "Checked") -> None:

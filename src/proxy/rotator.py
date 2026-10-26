@@ -6,28 +6,12 @@ import csv
 import time
 from collections.abc import Iterable
 from pathlib import Path
-from urllib.parse import urlsplit
+
+from src.utils.proxy_url import SUPPORTED_PROXY_SCHEMES, normalize_proxy_url
 
 DEFAULT_MAX_CONSECUTIVE_FAILURES = 2
 DEFAULT_COOLDOWN_SECONDS = 180.0
-SUPPORTED_SCHEMES = frozenset({"http", "https", "socks4", "socks5", "socks5h"})
-
-
-def normalize_proxy_url(raw_value: str) -> str | None:
-    """Validate and format a raw proxy address into a standardized URL."""
-    cleaned = raw_value.strip()
-    if not cleaned or cleaned.startswith("#"):
-        return None
-
-    candidate = cleaned if "://" in cleaned else f"http://{cleaned}"
-    parsed = urlsplit(candidate)
-
-    if parsed.scheme.lower() not in SUPPORTED_SCHEMES:
-        return None
-    if not parsed.hostname or not parsed.port:
-        return None
-
-    return candidate
+SUPPORTED_SCHEMES = SUPPORTED_PROXY_SCHEMES
 
 
 class ProxyRotator:

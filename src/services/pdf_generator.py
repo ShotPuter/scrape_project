@@ -15,6 +15,7 @@ from reportlab.lib.units import inch
 from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from src.models.publication import PublicationDetail
+from src.utils.atomic import atomic_write_bytes
 from src.utils.helpers import PDFGenerationError
 from src.utils.logger import setup_logger
 
@@ -222,12 +223,11 @@ def generate_pdf_for_publication(
 
         if isinstance(output_dest, (str, Path)):
             destination_path = Path(output_dest)
-            destination_path.parent.mkdir(parents=True, exist_ok=True)
-            destination_path.write_bytes(rendered_bytes)
+            atomic_write_bytes(destination_path, rendered_bytes)
 
         return rendered_bytes
 
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - reportlab failures are wrapped as a domain error
         logger.error(
             "PDF generation failed for publication", extra={"publication_id": publication.id, "error": str(error)},
             exc_info=True,

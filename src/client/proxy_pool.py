@@ -6,8 +6,6 @@ import asyncio
 import csv
 import json
 import logging
-import os
-import tempfile
 import time
 import uuid
 from collections.abc import Callable, Iterable
@@ -15,16 +13,19 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from curl_cffi.requests import AsyncSession
 
 from src.client.errors import HTTPClientError
 from src.client.network import NetworkBudget, RequestMetrics, attempt_context, proxy_id
+from src.client.readiness import is_ready_response
+from src.utils.atomic import atomic_write_json
+from src.utils.http import parse_retry_after
+from src.utils.proxy_url import SUPPORTED_PROXY_SCHEMES as _SUPPORTED_PROXY_SCHEMES, normalize_proxy_url, proxy_host
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_PROXY_SCHEMES = {"http", "https", "socks4", "socks4a", "socks5", "socks5h"}
+SUPPORTED_PROXY_SCHEMES = _SUPPORTED_PROXY_SCHEMES
 DEAD_PROXY_TTL_HOURS = 1.0
 WARMUP_PROGRESS_EVERY = 25
 HARD_TIMEOUT_GRACE_SECONDS = 1.0
@@ -104,15 +105,10 @@ def _parse_proxy_row(row: dict[str, str]) -> str | None:
 
     protocol = row.get("protocol", "http").strip().lower()
     address = row.get("proxy", "").strip() or f"{row.get('ip', '')}:{row.get('port', '')}"
+    if not address.strip():
+        return None
     url = address if "://" in address else f"{protocol}://{address}"
-
-    try:
-        parsed = urlsplit(url)
-    except ValueError:
-        return None
-    if parsed.scheme not in SUPPORTED_PROXY_SCHEMES or not parsed.hostname or not parsed.port:
-        return None
-    return url
+    return normalize_proxy_url(url)
 
 
 class ProxyPool:
@@ -157,6 +153,7 @@ class ProxyPool:
         self._host_in_flight: dict[str, int] = {}
         self._changed = asyncio.Event()
         self._closed = False
+        self._close_lock = asyncio.Lock()
         self._probe_slots = asyncio.Semaphore(1)
         self._persist_task: asyncio.Task[None] | None = None
         self._dirty = False
@@ -188,7 +185,7 @@ class ProxyPool:
 
     @staticmethod
     def _host(proxy: str) -> str:
-        return urlsplit(proxy).hostname or proxy
+        return proxy_host(proxy)
 
     async def _wait_changed(self, seconds: float) -> None:
         try:
@@ -385,7 +382,7 @@ class ProxyPool:
             cancelled = True
             event["error_class"] = "CancelledError"
             raise
-        except Exception as exc:  # one bad endpoint must not abort readiness
+        except Exception as exc:  # noqa: BLE001 - one bad endpoint must not abort readiness
             event["error_class"] = type(exc).__name__
             logger.debug("Proxy %s failed readiness: %s", proxy_id(proxy_url), type(exc).__name__)
         finally:
@@ -413,10 +410,8 @@ class ProxyPool:
     def _pause_if_rate_limited(self, response) -> None:
         if response.status_code != 429:
             return
-        try:
-            self.budget.pause(float(response.headers.get("Retry-After", "1")))
-        except ValueError:
-            self.budget.pause(1)
+        delay = parse_retry_after(str(response.headers.get("Retry-After", "1")))
+        self.budget.pause(1 if delay is None else delay)
 
     def _handle_failure(self, proxy: str, *, persist: bool) -> None:
         self._failures_total[proxy] = self._failures_total.get(proxy, 0) + 1
@@ -583,31 +578,39 @@ class ProxyPool:
         return bool(self.sessions)
 
     async def close(self) -> None:
-        self._closed = True
-        self._changed.set()
-        current = asyncio.current_task()
-        tasks = [
-            task
-            for task in (self._warmup_task, self._replenish_task)
-            if task is not None and task is not current and not task.done()
-        ]
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        """Stop background work and close every owned session exactly once."""
+        async with self._close_lock:
+            self._closed = True
+            self._changed.set()
+            current = asyncio.current_task()
+            tasks = [
+                task
+                for task in (self._warmup_task, self._replenish_task)
+                if task is not None and task is not current and not task.done()
+            ]
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            self._warmup_task = None
+            self._replenish_task = None
 
-        self._flush_dead()
-        if self._persist_task:
-            await self._persist_task
-        if self._close_tasks:
-            await asyncio.gather(*self._close_tasks, return_exceptions=True)
-        sessions = [*self.sessions, *self.retired]
-        await asyncio.gather(*(session.close() for session in sessions), return_exceptions=True)
-        self.sessions.clear()
-        self.retired.clear()
-        self.session_proxies.clear()
-        self.session_latency.clear()
-        self._active.clear()
+            self._flush_dead()
+            if self._persist_task is not None:
+                await asyncio.gather(self._persist_task, return_exceptions=True)
+                self._persist_task = None
+            if self._close_tasks:
+                await asyncio.gather(*tuple(self._close_tasks), return_exceptions=True)
+                self._close_tasks.clear()
+
+            sessions = [*self.sessions, *self.retired]
+            self.sessions.clear()
+            self.retired.clear()
+            self.session_proxies.clear()
+            self.session_latency.clear()
+            self.in_flight.clear()
+            self._active.clear()
+            await asyncio.gather(*(session.close() for session in sessions), return_exceptions=True)
 
     @staticmethod
     async def _cancel(tasks: list[asyncio.Task]) -> None:
@@ -617,13 +620,7 @@ class ProxyPool:
 
 
 def _is_ready_response(response) -> bool:
-    if not 200 <= response.status_code < 300:
-        return False
-    try:
-        data = response.json()
-    except (ValueError, UnicodeError):
-        return False
-    return isinstance(data, dict) and data.get("finalizado") is True and isinstance(data.get("datos"), list)
+    return is_ready_response(response)
 
 
 async def _close_quietly(session) -> None:
@@ -662,16 +659,4 @@ def _load_dead_proxies(path: Path | None, ttl_hours: float) -> dict[str, str]:
 
 
 def _save_dead_proxies(path: Path, dead: dict[str, str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(dead, handle, indent=2, sort_keys=True)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_name, path)
-    finally:
-        try:
-            os.unlink(temp_name)
-        except FileNotFoundError:
-            pass
+    atomic_write_json(path, dead, indent=2, sort_keys=True)

@@ -5,30 +5,16 @@ from __future__ import annotations
 import random
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
 from src.client.network import TimeoutPolicy
+from src.utils.http import parse_retry_after
 
 MAX_RETRY_DELAY_SECONDS = 60.0
 TRANSPORT_CHOICES = frozenset({"aiohttp", "curl_cffi", "auto"})
 PROXY_MODES = frozenset({"direct", "fallback", "always", "pool"})
 PROJECT_DIR = Path(__file__).resolve().parents[2]
-
-
-def parse_retry_after(raw: str) -> float | None:
-    """Parse a numeric or HTTP-date ``Retry-After`` value into seconds."""
-    try:
-        return max(0.0, float(raw))
-    except ValueError:
-        pass
-    try:
-        deadline = parsedate_to_datetime(raw)
-        return max(0.0, (deadline - datetime.now(UTC)).total_seconds())
-    except (ValueError, TypeError, OverflowError):
-        return None
 
 
 @dataclass(frozen=True, slots=True)

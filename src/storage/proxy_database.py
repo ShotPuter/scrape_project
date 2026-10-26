@@ -167,7 +167,7 @@ class ProxyDatabase:
             await self._ensure_columns(conn)
             await conn.execute(CREATE_VERIFIED_PROXIES_INDEX)
             await conn.commit()
-        except Exception as exc:
+        except (aiosqlite.Error, OSError) as exc:
             logger.error("Failed to initialize proxy database: %s", exc)
             raise StorageError(f"Proxy database initialization error: {exc}") from exc
 
@@ -195,7 +195,7 @@ class ProxyDatabase:
             await conn.commit()
             logger.info("Replaced proxy database with %d verified proxy/transport combinations", len(proxies))
             await _compact_database(conn)
-        except Exception as exc:
+        except (aiosqlite.Error, OSError) as exc:
             await conn.rollback()
             raise StorageError(f"Proxy database save error: {exc}") from exc
 
@@ -280,5 +280,5 @@ async def _compact_database(conn: aiosqlite.Connection) -> None:
     try:
         await conn.execute("VACUUM")
         await conn.commit()
-    except Exception as exc:  # noqa: BLE001 - compaction is best-effort
+    except (aiosqlite.Error, OSError) as exc:
         logger.warning("Proxy database VACUUM failed: %s", exc)

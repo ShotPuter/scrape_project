@@ -2,18 +2,15 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
 from pathlib import Path
 
 from config import settings
 from src.models.publication import PublicationDetail
+from src.utils.atomic import atomic_write_bytes
 from src.utils.helpers import StorageError, build_pdf_filename, decode_base64_pdf, extract_period
 from src.utils.logger import setup_logger
 
 logger = setup_logger("file_storage")
-
-TEMPORARY_FILE_SUFFIX = ".tmp"
 
 
 class FileStorage:
@@ -44,7 +41,7 @@ class FileStorage:
 
         try:
             self._write_atomically(target_path, document_bytes)
-        except Exception as error:
+        except OSError as error:
             logger.error(
                 "Failed to persist publication document to disk",
                 extra={"publication_id": publication.id, "error": str(error)}, exc_info=True,
@@ -81,23 +78,4 @@ class FileStorage:
     @staticmethod
     def _write_atomically(destination: Path, payload: bytes) -> None:
         """Write file contents to a tempfile first and rename atomically."""
-        temp_path = _create_temporary_sibling(destination)
-        try:
-            with temp_path.open("wb") as file_handle:
-                file_handle.write(payload)
-                file_handle.flush()
-                os.fsync(file_handle.fileno())
-            os.replace(temp_path, destination)
-        except Exception:
-            temp_path.unlink(missing_ok=True)
-            raise
-
-
-def _create_temporary_sibling(destination: Path) -> Path:
-    """Create a temporary sibling file in the same directory for atomic rename."""
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    file_descriptor, temporary_path = tempfile.mkstemp(
-        prefix=f".{destination.name}.", suffix=TEMPORARY_FILE_SUFFIX, dir=destination.parent
-    )
-    os.close(file_descriptor)
-    return Path(temporary_path)
+        atomic_write_bytes(destination, payload)
