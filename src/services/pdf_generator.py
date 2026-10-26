@@ -238,14 +238,3 @@ def generate_pdf_for_publication(
             exc_info=True,
         )
         raise PDFGenerationError(f"PDF generation failed for ID {publication.id}: {error}") from error
-
-
-class PDFGenerator:
-    """Class interface for PDF generation backward compatibility."""
-
-    @staticmethod
-    def generate_pdf_for_publication(
-        publication: PublicationDetail, output_dest: Path | str | io.BytesIO | None = None
-    ) -> bytes:
-        """High-level static API delegating to functional renderer."""
-        return generate_pdf_for_publication(publication, output_dest)

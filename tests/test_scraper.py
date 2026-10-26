@@ -2,6 +2,7 @@
 
 import pytest
 
+from src.client.network import RequestMetrics
 from src.models.publication import PublicationDetail, PublicationSummary
 from src.services.scraper import SeprecScraper
 from src.storage.file_storage import FileStorage
@@ -16,6 +17,7 @@ class FakeSeprecClient:
         self.details = details
         self.requests_made = 0
         self.retries_made = 0
+        self.metrics = RequestMetrics()
         self.detail_requests = []
         self.closed = False
 

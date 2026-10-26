@@ -76,9 +76,9 @@ class FileStorage:
                     extra={"publication_id": publication.id, "error": str(error)},
                 )
 
-        from src.services.pdf_generator import PDFGenerator
+        from src.services.pdf_generator import generate_pdf_for_publication
 
-        generated_bytes = PDFGenerator.generate_pdf_for_publication(publication)
+        generated_bytes = generate_pdf_for_publication(publication)
         logger.debug(
             "Synthesized PDF from text preview content",
             extra={"publication_id": publication.id, "byte_length": len(generated_bytes)},
