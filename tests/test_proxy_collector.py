@@ -43,10 +43,9 @@ def test_clear_dead_proxies_removes_sidecar(tmp_path):
 
 
 def _success_stats(latency_ms: float = 10.0) -> CheckStats:
-    stats = CheckStats(
+    return CheckStats(
         successful_requests=3, failed_requests=0, total_attempts=3, average_latency_ms=latency_ms, consecutive_failures=0
     )
-    return stats
 
 
 @pytest.mark.asyncio

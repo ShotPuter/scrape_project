@@ -75,10 +75,9 @@ def test_atomic_writer_keeps_original_when_body_raises(tmp_path):
     target = tmp_path / "state.json"
     target.write_text("original", encoding="utf-8")
 
-    with pytest.raises(RuntimeError, match="boom"):
-        with atomic_text_writer(target) as handle:
-            handle.write("partial")
-            raise RuntimeError("boom")
+    with pytest.raises(RuntimeError, match="boom"), atomic_text_writer(target) as handle:
+        handle.write("partial")
+        raise RuntimeError("boom")
 
     assert target.read_text(encoding="utf-8") == "original"
     assert list(tmp_path.glob(".*.tmp")) == []

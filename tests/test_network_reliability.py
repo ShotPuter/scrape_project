@@ -149,15 +149,14 @@ async def test_document_total_is_separate_from_api_timeout():
     app = web.Application()
     app.router.add_get("/api/publicaciones/1", slow)
     app.router.add_post("/api/publicaciones", slow)
-    async with local_api(app) as base_url:
-        async with BaseHTTPClient(
-            base_url, retry_attempts=1, api_timeout_policy=TimeoutPolicy(total=0.02),
-            detail_timeout_policy=TimeoutPolicy(total=0.3),
-        ) as client:
-            assert await client._request("GET", "publicaciones/1") == {"ok": True}
-            with pytest.raises(HTTPClientError):
-                await client._request("POST", "publicaciones")
-            assert client.metrics.samples[-1]["timeout_kind"] == "total"
+    async with local_api(app) as base_url, BaseHTTPClient(
+        base_url, retry_attempts=1, api_timeout_policy=TimeoutPolicy(total=0.02),
+        detail_timeout_policy=TimeoutPolicy(total=0.3),
+    ) as client:
+        assert await client._request("GET", "publicaciones/1") == {"ok": True}
+        with pytest.raises(HTTPClientError):
+            await client._request("POST", "publicaciones")
+        assert client.metrics.samples[-1]["timeout_kind"] == "total"
 
 
 @pytest.mark.asyncio
@@ -171,15 +170,14 @@ async def test_read_inactivity_is_identified_separately():
 
     app = web.Application()
     app.router.add_get("/api/publicaciones/1", slow_body)
-    async with local_api(app) as base_url:
-        async with BaseHTTPClient(
-            base_url, retry_attempts=1, detail_timeout_policy=TimeoutPolicy(total=0.5, sock_read=0.02)
-        ) as client:
-            with pytest.raises(HTTPClientError):
-                await client._request("GET", "publicaciones/1")
-            event = client.metrics.samples[-1]
-            assert event["timeout_kind"] == "read_inactivity"
-            assert event["error_stage"] == "body_read"
+    async with local_api(app) as base_url, BaseHTTPClient(
+        base_url, retry_attempts=1, detail_timeout_policy=TimeoutPolicy(total=0.5, sock_read=0.02)
+    ) as client:
+        with pytest.raises(HTTPClientError):
+            await client._request("GET", "publicaciones/1")
+        event = client.metrics.samples[-1]
+        assert event["timeout_kind"] == "read_inactivity"
+        assert event["error_stage"] == "body_read"
 
 
 @pytest.mark.asyncio
@@ -189,15 +187,14 @@ async def test_traces_measure_full_body_and_decode_without_credentials(caplog):
 
     app = web.Application()
     app.router.add_get("/api/publicaciones/1", handler)
-    async with local_api(app) as base_url:
-        async with BaseHTTPClient(base_url) as client:
-            await client._request("GET", "publicaciones/1")
-            event = client.metrics.samples[-1]
-            assert event["response_bytes"] > 0
-            assert event["connection_setup_ms"] >= 0
-            assert event["first_body_chunk_ms"] >= event["response_headers_ms"]
-            assert event["body_read_ms"] >= 0
-            assert event["json_decode_ms"] >= 0
+    async with local_api(app) as base_url, BaseHTTPClient(base_url) as client:
+        await client._request("GET", "publicaciones/1")
+        event = client.metrics.samples[-1]
+        assert event["response_bytes"] > 0
+        assert event["connection_setup_ms"] >= 0
+        assert event["first_body_chunk_ms"] >= event["response_headers_ms"]
+        assert event["body_read_ms"] >= 0
+        assert event["json_decode_ms"] >= 0
     assert "secret" not in proxy_id("http://user:secret@host:80")
 
 

@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 
-import src.cli as cli
+from src import cli
 from src.cli import _execute_scrape, build_parser
 from src.storage.proxy_database import ProxyDatabase, VerifiedProxy
 

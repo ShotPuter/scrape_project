@@ -230,7 +230,6 @@ async def test_queue_budget_counts_failures_and_deduplicates(tmp_path, monkeypat
 
         async def process(summary, **kwargs):
             attempted.append(summary.id)
-            return None
 
         monkeypatch.setattr(scraper, "_process_single_publication", process)
         report = await scraper.run(max_items=2)

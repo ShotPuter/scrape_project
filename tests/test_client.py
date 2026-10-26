@@ -188,14 +188,13 @@ async def test_exhausted_retries_count_only_actual_repeats(status):
 
     app = web.Application()
     app.router.add_post("/api/publicaciones", handler)
-    async with local_api(app) as base_url:
-        async with make_client(base_url, retry_attempts=2) as client:
-            error_type = SeprecRateLimitError if status == 429 else SeprecAPIError
-            with pytest.raises(error_type) as error:
-                await client.search_publications(PublicationSearchFilter())
-            assert error.value.status_code == status
-            assert client.requests_made == 2
-            assert client.retries_made == 1
+    async with local_api(app) as base_url, make_client(base_url, retry_attempts=2) as client:
+        error_type = SeprecRateLimitError if status == 429 else SeprecAPIError
+        with pytest.raises(error_type) as error:
+            await client.search_publications(PublicationSearchFilter())
+        assert error.value.status_code == status
+        assert client.requests_made == 2
+        assert client.retries_made == 1
 
 
 @pytest.mark.asyncio
@@ -217,12 +216,11 @@ async def test_malformed_search_response_is_not_an_empty_page(body):
 
     app = web.Application()
     app.router.add_post("/api/publicaciones", handler)
-    async with local_api(app) as base_url:
-        async with make_client(base_url) as client:
-            with pytest.raises(SeprecAPIError):
-                await client.search_publications(PublicationSearchFilter())
-            assert client.requests_made == 1
-            assert client.retries_made == 0
+    async with local_api(app) as base_url, make_client(base_url) as client:
+        with pytest.raises(SeprecAPIError):
+            await client.search_publications(PublicationSearchFilter())
+        assert client.requests_made == 1
+        assert client.retries_made == 0
 
 
 @pytest.mark.asyncio
@@ -232,11 +230,10 @@ async def test_cloudflare_challenge_is_not_retried():
 
     app = web.Application()
     app.router.add_post("/api/publicaciones", handler)
-    async with local_api(app) as base_url:
-        async with make_client(base_url) as client:
-            with pytest.raises(SeprecAPIError, match="Cloudflare challenge"):
-                await client.search_publications(PublicationSearchFilter())
-            assert client.requests_made == 1
+    async with local_api(app) as base_url, make_client(base_url) as client:
+        with pytest.raises(SeprecAPIError, match="Cloudflare challenge"):
+            await client.search_publications(PublicationSearchFilter())
+        assert client.requests_made == 1
 
 
 def test_retry_after_supports_http_dates():
