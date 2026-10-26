@@ -1,0 +1,12 @@
+# Only runtime sources enter the build context; exclude local data and secrets.
+*
+!Dockerfile
+!requirements.txt
+!config.py
+!main.py
+!collect_proxies.py
+!proxy_tool.py
+!src/
+!src/**
+**/__pycache__
+**/*.py[cod]

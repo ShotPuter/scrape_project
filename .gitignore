@@ -1,0 +1,38 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environments
+venv/
+.env
+.venv/
+env/
+ENV/
+
+# Scraper output & local data
+data/*
+!data/.gitkeep
+*.db
+*.sqlite
+*.sqlite3
+*.csv
+*.log
+*.part
+
+# Tool caches
+.ruff_cache/
+
+# IDE & OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Local cookies may contain session credentials.
+cookies*.txt

@@ -1,0 +1,51 @@
+x-scraper: &scraper
+  image: gaceta-scraper:local
+  build:
+    context: .
+    args:
+      SCRAPER_UID: ${SCRAPER_UID:-1000}
+      SCRAPER_GID: ${SCRAPER_GID:-1000}
+  init: true
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    # Keep all default output paths on the persistent bind mount.
+    STORAGE_BASE_DIR: /app/data
+    PDF_STORAGE_DIR: /app/data/pdf
+    CSV_EXPORT_PATH: /app/data/publications.csv
+    LOG_FILE: /app/data/scraper.log
+    PROXY_DB_PATH: /app/data/proxies.db
+    PROXY_REPORT_PATH: /app/data/proxy-report.json
+    PROXY_LIST_PATH: /app/data/iplocate-proxies.csv
+    PROXY_STATE_PATH: /app/data/iplocate-proxies.state.json
+  volumes:
+    - ./data:/app/data
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: 128
+  stop_grace_period: 2m
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  # One-shot jobs: docker compose run --rm scraper [CLI options]
+  scraper:
+    <<: *scraper
+    restart: "no"
+    command: []
+
+  # Opt-in daemon: docker compose --profile scheduler up -d scheduler
+  scheduler:
+    <<: *scraper
+    profiles: [scheduler]
+    restart: unless-stopped
+    command: ["--schedule"]

@@ -1,0 +1,32 @@
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+
+[tool.coverage.run]
+branch = true
+source = ["src", "config.py"]
+
+[tool.coverage.report]
+omit = ["src/__main__.py"]
+
+[tool.ruff]
+line-length = 125
+target-version = "py311"
+
+[tool.ruff.format]
+skip-magic-trailing-comma = true
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+ignore = [
+    "UP041",  # asyncio.TimeoutError is part of the public network-error tuple
+]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+split-on-trailing-comma = false
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
