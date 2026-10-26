@@ -9,35 +9,31 @@ import time
 import uuid
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
+from dataclasses import asdict
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Self
 
-from curl_cffi.requests import AsyncSession
 from curl_cffi.requests.exceptions import RequestException
 
-from src.client.aiohttp_session import NETWORK_ERRORS as AIOHTTP_NETWORK_ERRORS, AiohttpSession
+from src.client.aiohttp_session import NETWORK_ERRORS as AIOHTTP_NETWORK_ERRORS
+from src.client.config import ClientConfig, ProxyConfig, RetryConfig, TimeoutConfig, parse_retry_after as _parse_retry_after
 from src.client.errors import HTTPClientError
 from src.client.network import NetworkBudget, RequestMetrics, TimeoutPolicy, attempt_context, mark, proxy_id, work_context
 from src.client.proxy_pool import ProxyEndpoint, ProxyPool, dead_proxy_path, load_dead_proxies, load_proxies
 from src.client.session_factory import SessionFactory
+from src.client.transport import Transport, transport_for
 from src.storage.proxy_database import ProxyDatabase
 
 logger = logging.getLogger(__name__)
 
 NETWORK_ERRORS = (RequestException, asyncio.TimeoutError) + AIOHTTP_NETWORK_ERRORS
-MAX_RETRY_DELAY_SECONDS = 60.0
 MAX_ERROR_BODY_CHARS = 2000
 HARD_TIMEOUT_GRACE_SECONDS = 1.0
-TRANSPORT_CHOICES = frozenset({"aiohttp", "curl_cffi", "auto"})
 # Only connect-level (fast) direct failures prove an IP block; slow body reads
 # are ordinary server throttling and must not cool the direct route down.
 DIRECT_BLOCK_FAILURE_THRESHOLD = 3
 DIRECT_BLOCK_MAX_FAILURE_SECONDS = 30.0
-PROXY_MODES = frozenset({"direct", "fallback", "always", "pool"})
 PROXY_LATENCY_TIMEOUT_DIVISOR = 5.0
 MAX_PROXY_TIMEOUT_SCALE = 2.5
 
@@ -47,31 +43,13 @@ class Route(StrEnum):
     POOL = "pool"
 
 
-@dataclass(frozen=True)
-class RetryPolicy:
-    attempts: int = 3
-    backoff_factor: float = 1.5
-    jitter_seconds: float = 0.3
-    max_delay_seconds: float = MAX_RETRY_DELAY_SECONDS
-
-    def __post_init__(self) -> None:
-        if self.attempts < 1:
-            raise ValueError("Retry attempts must be >= 1")
-        if self.backoff_factor < 0 or self.jitter_seconds < 0:
-            raise ValueError("Retry delays must be non-negative")
-
-    def delay_for(self, attempt: int, retry_after: str | None = None) -> float:
-        if retry_after and (server_delay := _parse_retry_after(retry_after)) is not None:
-            # Cloudflare can send very distant Retry-After dates. Cap the wait so a
-            # single rate-limited response cannot stall the whole scrape for hours.
-            return min(self.max_delay_seconds, server_delay)
-        exponential = self.backoff_factor * 2 ** (attempt - 1)
-        return min(self.max_delay_seconds, exponential) + random.uniform(0, self.jitter_seconds)
+# Kept as an alias: the validated retry data now lives in ``RetryConfig``.
+RetryPolicy = RetryConfig
 
 
-class BaseHTTPClient:
+class HttpClient:
     def __init__(
-        self, base_url: str, headers: Mapping[str, str] | None = None,
+        self, base_url: str = "", headers: Mapping[str, str] | None = None,
         timeout_seconds: float = 30, retry_attempts: int = 3, retry_backoff_factor: float = 1.5,
         retry_jitter_seconds: float = 0.3, connection_limit: int = 9, impersonate: str = "chrome",
         proxy_file: Path | None = None, proxy_db_path: Path | None = None, proxy_sample_size: int = 0,
@@ -82,36 +60,44 @@ class BaseHTTPClient:
         api_timeout_policy: TimeoutPolicy | None = None, detail_timeout_policy: TimeoutPolicy | None = None,
         requests_per_second: float = 0, proxy_per_ip_limit: int = 1, proxy_probe_concurrency: int = 2,
         proxy_acquire_timeout: float = 150, direct_block_cooldown_seconds: float = 300, proxy_mode: str = "pool",
-        proxy_mix_share: float = 0,
+        proxy_mix_share: float = 0, config: ClientConfig | None = None,
     ):
-        if proxy_mode.lower() not in PROXY_MODES:
-            raise ValueError("proxy_mode must be 'direct', 'fallback', 'always' or 'pool'")
-        if direct_block_cooldown_seconds <= 0:
-            raise ValueError("direct_block_cooldown_seconds must be positive")
-        if not 0 <= proxy_mix_share <= 1:
-            raise ValueError("proxy_mix_share must be between 0 and 1")
-        validate_client_config(
-            timeout_seconds, retry_attempts, retry_backoff_factor,
-            retry_jitter_seconds, connection_limit, proxy_sample_size,
-            proxy_check_concurrency, proxy_check_timeout, proxy_min_ready,
-            proxy_replenish_threshold, proxy_failure_cooldown_seconds, proxy_max_failures,
-            proxy_dead_ttl_hours, proxy_file, proxy_db_path,
-            proxy_check_path, transport,
-        )
-        self.retry_policy = RetryPolicy(retry_attempts, retry_backoff_factor, retry_jitter_seconds)
-        self.base_url = base_url.rstrip("/")
-        self.headers = dict(headers or {})
-        self.timeout = timeout_seconds
-        self.api_timeout_policy = api_timeout_policy or TimeoutPolicy(total=timeout_seconds)
-        self.detail_timeout_policy = detail_timeout_policy or self.api_timeout_policy
-        self.budget = NetworkBudget(connection_limit, requests_per_second)
+        if config is None:
+            api_policy = api_timeout_policy or TimeoutPolicy(total=timeout_seconds)
+            config = ClientConfig(
+                base_url=base_url, headers=dict(headers or {}),
+                timeouts=TimeoutConfig(api=api_policy, detail=detail_timeout_policy or api_policy),
+                retry=RetryConfig(retry_attempts, retry_backoff_factor, retry_jitter_seconds),
+                proxy=ProxyConfig(
+                    file=proxy_file, db_path=proxy_db_path, mode=proxy_mode, sample_size=proxy_sample_size,
+                    check_concurrency=proxy_check_concurrency, check_timeout=proxy_check_timeout,
+                    min_ready=proxy_min_ready, replenish_threshold=proxy_replenish_threshold,
+                    failure_cooldown_seconds=proxy_failure_cooldown_seconds, max_failures=proxy_max_failures,
+                    dead_ttl_hours=proxy_dead_ttl_hours, check_path=proxy_check_path,
+                    check_payload=dict(proxy_check_payload or {}), warmup=proxy_warmup,
+                    per_ip_limit=proxy_per_ip_limit, probe_concurrency=proxy_probe_concurrency,
+                    acquire_timeout=proxy_acquire_timeout,
+                    direct_block_cooldown_seconds=direct_block_cooldown_seconds, mix_share=proxy_mix_share,
+                ),
+                connection_limit=connection_limit, impersonate=impersonate, cookies_file=cookies_file,
+                transport=transport, requests_per_second=requests_per_second,
+            )
+        self.config = config
+        proxy = config.proxy
+        self.retry_policy = config.retry
+        self.base_url = config.base_url
+        self.headers = dict(config.headers)
+        self.timeout = config.timeouts.api.total
+        self.api_timeout_policy = config.timeouts.api
+        self.detail_timeout_policy = config.timeouts.policy_for("detail")
+        self.budget = NetworkBudget(config.connection_limit, config.requests_per_second)
         self.metrics = RequestMetrics()
-        self.proxy_per_ip_limit = proxy_per_ip_limit
-        self.proxy_probe_concurrency = proxy_probe_concurrency
-        self.proxy_acquire_timeout = proxy_acquire_timeout
-        self.proxy_mode = proxy_mode.lower()
-        self.direct_block_cooldown_seconds = direct_block_cooldown_seconds
-        self.proxy_mix_share = proxy_mix_share
+        self.proxy_per_ip_limit = proxy.per_ip_limit
+        self.proxy_probe_concurrency = proxy.probe_concurrency
+        self.proxy_acquire_timeout = proxy.acquire_timeout
+        self.proxy_mode = proxy.mode
+        self.direct_block_cooldown_seconds = proxy.direct_block_cooldown_seconds
+        self.proxy_mix_share = proxy.mix_share
         self._direct_blocked_until = 0.0
         self._direct_block_kind: str | None = None
         self._direct_net_failures = 0
@@ -120,33 +106,34 @@ class BaseHTTPClient:
         self.retry_attempts = self.retry_policy.attempts
         self.retry_backoff_factor = self.retry_policy.backoff_factor
         self.retry_jitter_seconds = self.retry_policy.jitter_seconds
-        self.proxy_file = proxy_file
-        self.proxy_db_path = proxy_db_path
-        self.proxy_sample_size = proxy_sample_size
-        self.proxy_check_concurrency = proxy_check_concurrency
-        self.proxy_check_timeout = proxy_check_timeout
-        self.proxy_min_ready = proxy_min_ready
-        self.proxy_replenish_threshold = proxy_replenish_threshold
-        self.proxy_failure_cooldown_seconds = proxy_failure_cooldown_seconds
-        self.proxy_max_failures = proxy_max_failures
-        self.proxy_dead_ttl_hours = proxy_dead_ttl_hours
-        self.proxy_check_path = proxy_check_path
-        self.proxy_check_payload = proxy_check_payload or {}
-        self.proxy_warmup = proxy_warmup
+        self.proxy_file = proxy.file
+        self.proxy_db_path = proxy.db_path
+        self.proxy_sample_size = proxy.sample_size
+        self.proxy_check_concurrency = proxy.check_concurrency
+        self.proxy_check_timeout = proxy.check_timeout
+        self.proxy_min_ready = proxy.min_ready
+        self.proxy_replenish_threshold = proxy.replenish_threshold
+        self.proxy_failure_cooldown_seconds = proxy.failure_cooldown_seconds
+        self.proxy_max_failures = proxy.max_failures
+        self.proxy_dead_ttl_hours = proxy.dead_ttl_hours
+        self.proxy_check_path = proxy.check_path
+        self.proxy_check_payload = dict(proxy.check_payload)
+        self.proxy_warmup = proxy.warmup
         self.logger = logger
         self._session_factory = SessionFactory(
-            headers=self.headers, timeout=timeout_seconds, connection_limit=connection_limit,
-            impersonate=impersonate, cookies_file=cookies_file, transport=transport,
+            headers=self.headers, timeout=self.timeout, connection_limit=config.connection_limit,
+            impersonate=config.impersonate, cookies_file=config.cookies_file, transport=config.transport,
             sock_read_timeout=self.api_timeout_policy.sock_read,
         )
-        self._session: AsyncSession | None = None
+        self._session = None
         self._proxy_pool: ProxyPool | None = None
         self._open_lock = asyncio.Lock()
         self._transport_lock = asyncio.Lock()
-        self.connection_limit = connection_limit
+        self.connection_limit = config.connection_limit
         self._semaphore = self.budget.semaphore
         self.requests_made = 0
         self.retries_made = 0
+        self.run_id: str | None = None
 
     async def __aenter__(self) -> Self:
         await self.open()
@@ -305,16 +292,16 @@ class BaseHTTPClient:
         if not pool.sessions:
             raise RuntimeError("None of the configured proxies could be initialised")
 
-    async def _switch_to_curl(self, session) -> None:
+    async def _switch_to_curl(self, transport: Transport) -> None:
         async with self._transport_lock:
             if self._session_factory.using_curl:
                 return
             self.logger.warning("aiohttp direct transport failed; falling back to curl_cffi")
             self._session_factory.switch_to_curl()
-            if self._session is session:
+            if self._session is transport.raw:
                 self._session = self._session_factory.create()
                 # Other direct requests may still be using the old session.
-                self._direct_retired.append(session)
+                self._direct_retired.append(transport.raw)
 
     def _backoff_seconds(self, attempt: int, retry_after: str | None = None) -> float:
         return self.retry_policy.delay_for(attempt, retry_after)
@@ -434,13 +421,14 @@ class BaseHTTPClient:
         else:
             route = Route.DIRECT if use_direct else Route.POOL
         async with self._lease(route) as session:
+            transport = transport_for(session)
             event = attempt_context.get() or {}
             use_direct = event.get("route", route.value) == Route.DIRECT.value
             self.metrics.counts["direct_attempts" if use_direct else "proxy_attempts"] += 1
             attempt_started = time.monotonic()
             try:
                 async with self.budget.slot():
-                    response = await self._send(session, method, url, json_data, params)
+                    response = await self._send(transport, method, url, json_data, params)
             except NETWORK_ERRORS:
                 # A slow stream that dies near its deadline is normal server
                 # throttling; only a quick failure counts as an IP-block signal.
@@ -451,7 +439,7 @@ class BaseHTTPClient:
             mark("http_status", status)
             if status >= 400:
                 return await self._handle_error_response(
-                    session, method, url, json_data, params, response, status, use_direct
+                    transport, method, url, json_data, params, response, status, use_direct
                 )
             mark("stage", "json_decode")
             started = time.monotonic()
@@ -464,12 +452,12 @@ class BaseHTTPClient:
             return data
 
     async def _handle_error_response(
-        self, session, method, url, json_data, params, response, status, use_direct
+        self, transport: Transport, method, url, json_data, params, response, status, use_direct
     ) -> dict[str, Any]:
         challenge = status == 403 and response.headers.get("cf-mitigated") == "challenge"
-        if challenge and use_direct and isinstance(session, AiohttpSession) and not self._session_factory.using_curl:
+        if challenge and use_direct and transport.name == "aiohttp" and not self._session_factory.using_curl:
             # Retry once with browser-like TLS before cooling down the direct route.
-            await self._switch_to_curl(session)
+            await self._switch_to_curl(transport)
             return await self._request_once(method, url, json_data, params)
         if challenge:
             if use_direct:
@@ -478,7 +466,7 @@ class BaseHTTPClient:
                 "Cloudflare challenge blocked the request", status, retryable=use_direct and self._proxy_pool is not None
             )
         if status in {403, 407}:
-            self._discard_proxy(session)
+            self._discard_proxy(transport.raw)
             if use_direct:
                 self._mark_direct_blocked(f"HTTP {status}")
         if status == 429:
@@ -491,10 +479,11 @@ class BaseHTTPClient:
         retry_after = _retry_after_from_response(response)
         server_delay = _parse_retry_after(retry_after) if retry_after else None
         delay = server_delay if server_delay is not None else self._backoff_seconds(1)
-        if use_direct:
+        if use_direct and self._proxy_pool is not None:
             # Keep proxy requests running while the direct route cools down.
             self._mark_direct_blocked("HTTP 429", delay)
             return
+        # Proxy route or a direct-only client: pause the shared origin budget.
         self.budget.pause(delay)
 
     async def _select_session(self):
@@ -505,42 +494,24 @@ class BaseHTTPClient:
             raise HTTPClientError("All proxies have failed; working proxy pool is empty")
         return self._proxy_pool.choose()
 
-    async def _send(self, session, method: str, url: str, json_data, params):
+    async def _send(self, transport: Transport, method: str, url: str, json_data, params):
         event = attempt_context.get() or {}
         policy = self.detail_timeout_policy if event.get("endpoint_kind") == "detail" else self.api_timeout_policy
         if self._proxy_pool is not None:
-            latency_ms = self._proxy_pool.latency_for(session)
+            latency_ms = self._proxy_pool.latency_for(transport.raw)
             if latency_ms:
                 mark("proxy_latency_ms", latency_ms)
-        policy = self._timeout_policy_for(session, policy)
-        options = {"json": json_data, "params": params}
-        if isinstance(session, AiohttpSession):
-            options["timeout"] = policy
-        else:
-            # curl_cffi sums the pair; keep the resulting total equal to policy.total.
-            connect = min(policy.connect, policy.sock_connect, policy.total)
-            options["timeout"] = (connect, max(0, policy.total - connect))
-        mark("transport", "aiohttp" if isinstance(session, AiohttpSession) else "curl_cffi")
+        policy = self._timeout_policy_for(transport.raw, policy)
+        mark("transport", transport.name)
         mark("timeout_policy", asdict(policy))
         mark("stage", "transport")
         guard = asyncio.timeout(policy.total + HARD_TIMEOUT_GRACE_SECONDS)
         try:
             async with guard:
                 self.metrics.counts["wire_requests"] += 1
-                response = await session.request(method, url, **options)
-            if isinstance(session, AsyncSession):
-                from curl_cffi import CurlInfo
-
-                for info, key in (
-                    (CurlInfo.NAMELOOKUP_TIME, "curl_namelookup_ms"),
-                    (CurlInfo.CONNECT_TIME, "curl_connect_ms"),
-                    (CurlInfo.APPCONNECT_TIME, "curl_appconnect_ms"),
-                    (CurlInfo.STARTTRANSFER_TIME, "curl_starttransfer_ms"),
-                    (CurlInfo.TOTAL_TIME, "curl_total_ms"),
-                ):
-                    if info in response.infos:
-                        mark(key, round(response.infos[info] * 1000, 3))
-                mark("response_bytes", len(response.content))
+                response = await transport.request(
+                    method, url, json_data=json_data, params=params, timeout=policy
+                )
             return response
         except NETWORK_ERRORS as exc:
             mark("error_class", type(exc).__name__)
@@ -555,15 +526,21 @@ class BaseHTTPClient:
             # Certificate errors are not cured by retries or transport fallback.
             if "certificate" in type(exc).__name__.lower() or getattr(exc, "code", None) == 60:
                 raise HTTPClientError("TLS certificate verification failed", retryable=False) from exc
-            if self._proxy_pool is None and isinstance(session, AiohttpSession):
-                await self._switch_to_curl(session)
+            if self._proxy_pool is None and transport.name == "aiohttp":
+                await self._switch_to_curl(transport)
             else:
-                self._discard_proxy(session)
+                self._discard_proxy(transport.raw)
             raise
 
     def _discard_proxy(self, session) -> None:
         if self._proxy_pool is not None and self._proxy_pool.discard(session):
             self.logger.warning("Removed failed proxy from rotation; %d remain", len(self._proxy_pool.sessions))
+
+    async def request(
+        self, method: str, path: str, json_data: dict[str, Any] | None = None, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Public entry point for API calls."""
+        return await self._request(method, path, json_data, params)
 
     async def _request(
         self, method: str, path: str, json_data: dict[str, Any] | None = None, params: dict[str, Any] | None = None
@@ -622,30 +599,8 @@ class BaseHTTPClient:
         await asyncio.sleep(delay)
 
 
-def validate_client_config(
-    timeout_seconds: float, retry_attempts: int, retry_backoff_factor: float,
-    retry_jitter_seconds: float, connection_limit: int, proxy_sample_size: int,
-    proxy_check_concurrency: int, proxy_check_timeout: float, proxy_min_ready: int,
-    proxy_replenish_threshold: int, proxy_failure_cooldown_seconds: float, proxy_max_failures: int,
-    proxy_dead_ttl_hours: float, proxy_file: Path | None, proxy_db_path: Path | None,
-    proxy_check_path: str, transport: str,
-) -> None:
-    if timeout_seconds <= 0 or retry_attempts < 1 or connection_limit < 1:
-        raise ValueError("Timeout, attempt count, and connection limit must be positive")
-    if retry_backoff_factor < 0 or retry_jitter_seconds < 0:
-        raise ValueError("Retry delays must be non-negative")
-    if proxy_sample_size < 0 or proxy_check_concurrency < 1 or proxy_check_timeout <= 0:
-        raise ValueError("Proxy sample size must be >= 0 (0 = all); check limits must be positive")
-    if proxy_min_ready < 1 or proxy_max_failures < 1:
-        raise ValueError("Proxy readiness and failure limits must be positive")
-    if proxy_replenish_threshold < 0 or proxy_failure_cooldown_seconds < 0:
-        raise ValueError("Proxy replenish limits must be non-negative")
-    if proxy_dead_ttl_hours < 0:
-        raise ValueError("Proxy dead TTL must be non-negative")
-    if (proxy_file or proxy_db_path) and not proxy_check_path:
-        raise ValueError("Proxy mode requires a readiness endpoint")
-    if transport.lower() not in TRANSPORT_CHOICES:
-        raise ValueError("transport must be 'aiohttp', 'curl_cffi' or 'auto'")
+# Backwards-compatible name: the client is designed for composition, not subclassing.
+BaseHTTPClient = HttpClient
 
 
 def _retry_after_from_response(response) -> str | None:
@@ -659,18 +614,6 @@ def _retry_after_from_response(response) -> str | None:
         return header
     value = payload.get("retry_after")
     return str(value) if value is not None else header
-
-
-def _parse_retry_after(raw: str) -> float | None:
-    try:
-        return max(0.0, float(raw))
-    except ValueError:
-        pass
-    try:
-        deadline = parsedate_to_datetime(raw)
-        return max(0.0, (deadline - datetime.now(UTC)).total_seconds())
-    except (ValueError, TypeError, OverflowError):
-        return None
 
 
 def _decode_json(response, url: str, status: int) -> dict[str, Any]:

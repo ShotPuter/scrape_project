@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Self, TypeVar
 
 from pydantic import TypeAdapter, ValidationError
 
-from config import BASE_DIR, settings
-from src.client.base_client import BaseHTTPClient
+from config import BASE_DIR, Settings, settings
+from src.client.base_client import HttpClient
+from src.client.config import ClientConfig, client_config_from_settings
 from src.client.errors import HTTPClientError
-from src.client.network import TimeoutPolicy
 from src.models.publication import CatalogItem, PublicationDetail, PublicationSearchFilter, PublicationSummary
 from src.utils.helpers import SeprecAPIError, SeprecRateLimitError
 from src.utils.logger import setup_logger
@@ -27,10 +27,13 @@ PUBLICATIONS_SEARCH_ENDPOINT = "publicaciones"
 RATE_LIMIT_STATUS_CODE = 429
 
 
-class SeprecClient(BaseHTTPClient):
+class SeprecClient:
     """
     High-level API client for the SEPREC Bolivian Commercial Gazette.
-    Encapsulates endpoint paths, request data extraction, and Pydantic validation.
+
+    Wraps a generic ``HttpClient`` and encapsulates endpoint paths, request data
+    extraction, and Pydantic validation. Configuration comes from the composition
+    root as a ``ClientConfig`` (or from ``Settings`` as a convenience default).
     """
 
     def __init__(
@@ -39,44 +42,71 @@ class SeprecClient(BaseHTTPClient):
         retry_jitter_seconds: float | None = None, connection_limit: int | None = None, proxy_warmup: bool | None = None,
         proxy_file: Path | None = None, proxy_db_path: Path | None = None, transport: str | None = None,
         proxy_mode: str | None = None, proxy_mix_share: float | None = None,
+        config: ClientConfig | None = None, app_settings: Settings | None = None,
     ) -> None:
-        resolved_timeout = settings.request_timeout_seconds if timeout_seconds is None else timeout_seconds
-        api_timeout = TimeoutPolicy(
-            total=resolved_timeout, connect=settings.connect_timeout_seconds,
-            sock_connect=settings.sock_connect_timeout_seconds, sock_read=settings.sock_read_timeout_seconds,
-        )
-        detail_timeout = TimeoutPolicy(
-            total=settings.detail_timeout_seconds if timeout_seconds is None else timeout_seconds,
-            connect=settings.connect_timeout_seconds, sock_connect=settings.sock_connect_timeout_seconds,
-            sock_read=settings.sock_read_timeout_seconds,
-        )
-
-        super().__init__(
-            base_url=base_url or settings.api_base_url, headers={**settings.default_headers, **(headers or {})},
-            timeout_seconds=resolved_timeout,
-            retry_attempts=(settings.retry_attempts if retry_attempts is None else retry_attempts),
-            retry_backoff_factor=(settings.retry_backoff_factor if retry_backoff_factor is None else retry_backoff_factor),
-            retry_jitter_seconds=(settings.retry_jitter_seconds if retry_jitter_seconds is None else retry_jitter_seconds),
-            connection_limit=(settings.max_concurrent_requests if connection_limit is None else connection_limit),
-            impersonate=settings.browser_profile,
-            proxy_file=proxy_file or (BASE_DIR / settings.proxy_file if settings.proxy_file else None),
-            proxy_db_path=proxy_db_path, proxy_sample_size=settings.proxy_sample_size,
-            proxy_check_concurrency=settings.proxy_check_concurrency, proxy_check_timeout=settings.proxy_check_timeout,
-            proxy_min_ready=settings.proxy_min_ready, proxy_replenish_threshold=settings.proxy_replenish_threshold,
-            proxy_failure_cooldown_seconds=settings.proxy_failure_cooldown_seconds,
-            proxy_max_failures=settings.proxy_max_failures, proxy_dead_ttl_hours=settings.proxy_dead_ttl_hours,
-            proxy_check_path=CATALOGS_ENDPOINT, proxy_check_payload={"codigo": ""},
-            cookies_file=(BASE_DIR / settings.cookies_file if settings.cookies_file else None),
-            proxy_warmup=(settings.proxy_warmup if proxy_warmup is None else proxy_warmup),
-            transport=settings.http_transport if transport is None else transport, api_timeout_policy=api_timeout,
-            detail_timeout_policy=detail_timeout, requests_per_second=settings.http_requests_per_second,
-            proxy_per_ip_limit=settings.proxy_per_ip_limit, proxy_probe_concurrency=settings.proxy_probe_concurrency,
-            proxy_acquire_timeout=settings.proxy_acquire_timeout,
-            direct_block_cooldown_seconds=settings.direct_block_cooldown_seconds,
-            proxy_mode=settings.proxy_mode if proxy_mode is None else proxy_mode,
-            proxy_mix_share=(settings.proxy_mix_share if proxy_mix_share is None else proxy_mix_share),
+        resolved_settings = app_settings or settings
+        self._client = HttpClient(
+            config=config
+            or client_config_from_settings(
+                resolved_settings,
+                base_url=base_url, headers=headers, timeout_seconds=timeout_seconds,
+                retry_attempts=retry_attempts, retry_backoff_factor=retry_backoff_factor,
+                retry_jitter_seconds=retry_jitter_seconds, connection_limit=connection_limit,
+                proxy_warmup=proxy_warmup, proxy_file=proxy_file, proxy_db_path=proxy_db_path,
+                transport=transport, proxy_mode=proxy_mode, proxy_mix_share=proxy_mix_share,
+                proxy_check_path=CATALOGS_ENDPOINT, proxy_check_payload={"codigo": ""},
+                project_dir=BASE_DIR,
+            )
         )
         self.logger = logger
+
+    @property
+    def http(self) -> HttpClient:
+        return self._client
+
+    @property
+    def requests_made(self) -> int:
+        return self._client.requests_made
+
+    @property
+    def retries_made(self) -> int:
+        return self._client.retries_made
+
+    @property
+    def metrics(self):
+        return self._client.metrics
+
+    @property
+    def budget(self):
+        return self._client.budget
+
+    @property
+    def proxy_mode(self) -> str:
+        return self._client.proxy_mode
+
+    @property
+    def run_id(self) -> str | None:
+        return self._client.run_id
+
+    @run_id.setter
+    def run_id(self, value: str | None) -> None:
+        self._client.run_id = value
+
+    async def __aenter__(self) -> Self:
+        await self.open()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        await self.close()
+
+    async def open(self) -> None:
+        await self._client.open()
+
+    async def close(self) -> None:
+        await self._client.close()
+
+    def _backoff_seconds(self, attempt: int, retry_after: str | None = None) -> float:
+        return self._client._backoff_seconds(attempt, retry_after)
 
     async def get_catalogs(self) -> list[CatalogItem]:
         """Fetch categories and subcategories definitions from SEPREC catalog."""
@@ -117,7 +147,7 @@ class SeprecClient(BaseHTTPClient):
     async def _request_data(self, method: str, path: str, payload: dict[str, Any] | None = None) -> Any:
         """Execute HTTP request, unwrap 'datos', and verify business completion flag."""
         try:
-            response_json = await self._request(method, path, payload)
+            response_json = await self._client.request(method, path, payload)
         except HTTPClientError as client_error:
             if client_error.status_code == RATE_LIMIT_STATUS_CODE:
                 raise SeprecRateLimitError(str(client_error), status_code=client_error.status_code) from client_error
