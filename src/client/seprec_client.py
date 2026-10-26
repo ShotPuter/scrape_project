@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from types import TracebackType
 from typing import Any, Self, TypeVar
 
 from pydantic import TypeAdapter, ValidationError
@@ -12,6 +13,7 @@ from config import BASE_DIR, Settings, settings
 from src.client.base_client import HttpClient
 from src.client.config import ClientConfig, client_config_from_settings
 from src.client.errors import HTTPClientError
+from src.client.network import NetworkBudget, RequestMetrics
 from src.models.publication import CatalogItem, PublicationDetail, PublicationSearchFilter, PublicationSummary
 from src.utils.helpers import SeprecAPIError, SeprecRateLimitError
 from src.utils.logger import setup_logger
@@ -70,11 +72,11 @@ class SeprecClient:
         return self._client.retries_made
 
     @property
-    def metrics(self):
+    def metrics(self) -> RequestMetrics:
         return self._client.metrics
 
     @property
-    def budget(self):
+    def budget(self) -> NetworkBudget:
         return self._client.budget
 
     @property
@@ -93,7 +95,9 @@ class SeprecClient:
         await self.open()
         return self
 
-    async def __aexit__(self, _exc_type, _exc_val, _exc_tb) -> None:
+    async def __aexit__(
+        self, _exc_type: type[BaseException] | None, _exc_val: BaseException | None, _exc_tb: TracebackType | None
+    ) -> None:
         await self.close()
 
     async def open(self) -> None:

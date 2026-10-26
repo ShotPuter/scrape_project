@@ -37,7 +37,7 @@ class RetryConfig:
             # single rate-limited response cannot stall the whole scrape for hours.
             return min(self.max_delay_seconds, server_delay)
         exponential = self.backoff_factor * 2 ** (attempt - 1)
-        return min(self.max_delay_seconds, exponential) + random.uniform(0, self.jitter_seconds)
+        return float(min(self.max_delay_seconds, exponential) + random.uniform(0, self.jitter_seconds))
 
 
 @dataclass(frozen=True, slots=True)

@@ -11,6 +11,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from datetime import datetime
+from types import TracebackType
 from typing import Any, NamedTuple
 
 from config import settings
@@ -125,7 +126,9 @@ class SeprecScraper:
         )
         return self
 
-    async def __aexit__(self, _exc_type, _exc_val, _exc_tb) -> None:
+    async def __aexit__(
+        self, _exc_type: type[BaseException] | None, _exc_val: BaseException | None, _exc_tb: TracebackType | None
+    ) -> None:
         if self._monitor_task:
             self._monitor_task.cancel()
             await asyncio.gather(self._monitor_task, return_exceptions=True)

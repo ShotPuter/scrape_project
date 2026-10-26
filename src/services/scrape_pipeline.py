@@ -7,6 +7,7 @@ import math
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Protocol
 
 from config import settings
 from src.client.network import work_context
@@ -22,6 +23,10 @@ MILLISECONDS_PER_SECOND = 1_000.0
 ProcessPublication = Callable[..., Awaitable[PublicationRecord | None]]
 FilterSummaries = Callable[[list[PublicationSummary]], Awaitable[tuple[list[PublicationSummary], int]]]
 PoliteDelay = Callable[[], Awaitable[None]]
+
+
+class PublicationSearchClient(Protocol):
+    async def search_publications(self, filters: PublicationSearchFilter) -> tuple[int, list[PublicationSummary]]: ...
 
 
 @dataclass
@@ -66,7 +71,7 @@ class ScrapePipeline:
     def __init__(
         self,
         *,
-        client,
+        client: PublicationSearchClient,
         process_publication: ProcessPublication,
         filter_new_summaries: FilterSummaries,
         polite_delay: PoliteDelay,
