@@ -1,4 +1,8 @@
-"""Regression checks for the audit findings. All networking is loopback-only."""
+"""Regression checks for the audit findings. All networking is loopback-only.
+
+Private-state setup is used only to inject deterministic routing and retry failures;
+assertions about request outcomes go through the public client surface.
+"""
 
 import asyncio
 import time
@@ -36,7 +40,7 @@ async def test_incomplete_read_retries_another_proxy_and_closes_retired():
     client = make_http_client()
     client._proxy_pool = pool
     try:
-        assert await client._request("GET", "publicaciones/1") == Response().json()
+        assert await client.request("GET", "publicaciones/1") == Response().json()
         assert client.retries_made == 1
         first.close.assert_awaited_once()
         assert not pool.retired
@@ -158,9 +162,9 @@ async def test_document_total_is_separate_from_api_timeout():
             base_url, attempts=1, timeouts=TimeoutConfig(api=TimeoutPolicy(total=0.02), detail=TimeoutPolicy(total=0.3))
         ) as client,
     ):
-        assert await client._request("GET", "publicaciones/1") == {"ok": True}
+        assert await client.request("GET", "publicaciones/1") == {"ok": True}
         with pytest.raises(HTTPClientError):
-            await client._request("POST", "publicaciones")
+            await client.request("POST", "publicaciones")
         assert client.metrics.samples[-1]["timeout_kind"] == "total"
 
 
@@ -182,7 +186,7 @@ async def test_read_inactivity_is_identified_separately():
         ) as client,
     ):
         with pytest.raises(HTTPClientError):
-            await client._request("GET", "publicaciones/1")
+            await client.request("GET", "publicaciones/1")
         event = client.metrics.samples[-1]
         assert event["timeout_kind"] == "read_inactivity"
         assert event["error_stage"] == "body_read"
@@ -196,7 +200,7 @@ async def test_traces_measure_full_body_and_decode_without_credentials(caplog):
     app = web.Application()
     app.router.add_get("/api/publicaciones/1", handler)
     async with local_api(app) as base_url, make_http_client(base_url) as client:
-        await client._request("GET", "publicaciones/1")
+        await client.request("GET", "publicaciones/1")
         event = client.metrics.samples[-1]
         assert event["response_bytes"] > 0
         assert event["connection_setup_ms"] >= 0
@@ -227,7 +231,7 @@ async def test_no_warmup_still_allows_runtime_recovery(tmp_path):
     )
     client._session_factory.create = Mock(side_effect=[first, second])
     try:
-        assert await client._request("GET", "test") == Response().json()
+        assert await client.request("GET", "test") == Response().json()
         second.post.assert_awaited_once()
         assert client.retries_made == 1
     finally:
@@ -268,7 +272,7 @@ async def test_proxy_credentials_are_not_logged(caplog):
     with caplog.at_level(logging.DEBUG):
         try:
             with pytest.raises(HTTPClientError):
-                await client._request("GET", "test")
+                await client.request("GET", "test")
         finally:
             await client.close()
     assert "private-password" not in caplog.text
@@ -283,7 +287,7 @@ async def test_global_slot_wait_is_outside_request_timeout():
     client._session.request.return_value = Response()
     try:
         async with client.budget.slot():
-            task = asyncio.create_task(client._request("GET", "test"))
+            task = asyncio.create_task(client.request("GET", "test"))
             await asyncio.sleep(0.04)
             assert not task.done()
         await task
@@ -353,7 +357,7 @@ async def test_fallback_prefers_direct_requests():
     direct.request.return_value = FakeResponse()
     client = fallback_client(direct, proxied)
     try:
-        assert await client._request("GET", "publicaciones/1") == {"finalizado": True, "datos": []}
+        assert await client.request("GET", "publicaciones/1") == {"finalizado": True, "datos": []}
         assert direct.request.await_count == 1
         assert proxied.request.await_count == 0
     finally:
@@ -367,7 +371,7 @@ async def test_fallback_routes_to_proxies_after_direct_403():
     proxied.request.return_value = FakeResponse()
     client = fallback_client(direct, proxied, attempts=2)
     try:
-        assert await client._request("GET", "publicaciones/1") == {"finalizado": True, "datos": []}
+        assert await client.request("GET", "publicaciones/1") == {"finalizado": True, "datos": []}
         assert client.retries_made == 1
         assert direct.request.await_count == 1
         assert proxied.request.await_count == 1
@@ -383,10 +387,10 @@ async def test_fallback_recovers_direct_after_the_cooldown_expires():
     proxied.request.return_value = FakeResponse()
     client = fallback_client(direct, proxied, attempts=3)
     try:
-        await client._request("GET", "publicaciones/1")
+        await client.request("GET", "publicaciones/1")
         assert client._direct_blocked_until > time.monotonic()
         client._direct_blocked_until = time.monotonic() - 1
-        assert await client._request("GET", "publicaciones/1") == {"finalizado": True, "datos": []}
+        assert await client.request("GET", "publicaciones/1") == {"finalizado": True, "datos": []}
         assert direct.request.await_count == 2
         assert proxied.request.await_count == 1
         assert client._direct_blocked_until == 0.0
@@ -401,7 +405,7 @@ async def test_direct_429_cools_the_route_without_pausing_the_pool():
     proxied.request.return_value = FakeResponse()
     client = fallback_client(direct, proxied, attempts=2)
     try:
-        assert await client._request("GET", "publicaciones/1") == {"finalizado": True, "datos": []}
+        assert await client.request("GET", "publicaciones/1") == {"finalizado": True, "datos": []}
         assert client.retries_made == 1
         assert client.budget._paused_until <= time.monotonic()
         assert client._direct_blocked_until > time.monotonic()
@@ -416,7 +420,7 @@ async def test_cloudflare_challenge_on_direct_is_retried_via_proxies():
     proxied.request.return_value = FakeResponse()
     client = fallback_client(direct, proxied, attempts=2)
     try:
-        assert await client._request("GET", "publicaciones/1") == {"finalizado": True, "datos": []}
+        assert await client.request("GET", "publicaciones/1") == {"finalizado": True, "datos": []}
         assert direct.request.await_count == 1
         assert proxied.request.await_count == 1
     finally:
@@ -430,7 +434,7 @@ async def test_cloudflare_challenge_stays_final_without_a_pool():
     client = make_http_client(attempts=2)
     client._session = direct
     with pytest.raises(HTTPClientError) as exc_info:
-        await client._request("GET", "publicaciones/1")
+        await client.request("GET", "publicaciones/1")
     assert not exc_info.value.retryable
     assert client.retries_made == 0
 
@@ -444,7 +448,7 @@ async def test_three_direct_network_failures_cool_the_route_down():
     direct.request.side_effect = [TimeoutError(), TimeoutError(), TimeoutError(), None]
     proxied.request.return_value = FakeResponse()
     try:
-        assert await client._request("GET", "publicaciones/1") == {"finalizado": True, "datos": []}
+        assert await client.request("GET", "publicaciones/1") == {"finalizado": True, "datos": []}
         assert direct.request.await_count == 3
         assert proxied.request.await_count == 1
         assert client.retries_made == 3
@@ -460,7 +464,9 @@ async def test_mix_share_routes_share_of_attempts_through_pool():
     proxied.request.return_value = FakeResponse()
     client = fallback_client(direct, proxied, mix_share=1)
     try:
-        assert client._route() is Route.POOL
+        assert await client.request("GET", "publicaciones/1") == {"finalizado": True, "datos": []}
+        assert proxied.request.await_count == 1
+        assert direct.request.await_count == 0
     finally:
         await client.close()
 
@@ -471,7 +477,9 @@ async def test_zero_mix_share_keeps_all_attempts_direct():
     direct.request.return_value = FakeResponse()
     client = fallback_client(direct, proxied)
     try:
-        assert client._route() is Route.DIRECT
+        assert await client.request("GET", "publicaciones/1") == {"finalizado": True, "datos": []}
+        assert direct.request.await_count == 1
+        assert proxied.request.await_count == 0
     finally:
         await client.close()
 
@@ -499,8 +507,7 @@ async def test_pool_mode_prefers_the_proxy_pool():
     client._session = direct
     client._proxy_pool = FakePool(proxied)
     try:
-        assert client._route() is Route.POOL
-        await client._request("GET", "publicaciones/1")
+        await client.request("GET", "publicaciones/1")
         assert proxied.request.await_count == 1
         assert direct.request.await_count == 0
     finally:
@@ -515,8 +522,7 @@ async def test_pool_mode_uses_direct_when_the_pool_is_empty():
     client._session = direct
     client._proxy_pool = UnusablePool(proxied)
     try:
-        assert client._route() is Route.POOL
-        assert await client._request("GET", "publicaciones/1") == {"finalizado": True, "datos": []}
+        assert await client.request("GET", "publicaciones/1") == {"finalizado": True, "datos": []}
         assert direct.request.await_count == 1
         assert client.metrics.counts["direct_attempts"] == 1
     finally:
@@ -532,7 +538,7 @@ async def test_fallback_blocked_with_empty_pool_does_not_use_direct():
     client._direct_block_kind = "origin"
     try:
         with pytest.raises(HTTPClientError):
-            await client._request("GET", "publicaciones/1")
+            await client.request("GET", "publicaciones/1")
         assert direct.request.await_count == 0
     finally:
         await client.close()
@@ -547,7 +553,7 @@ async def test_network_block_with_empty_pool_keeps_trying_direct():
     client._proxy_pool = EmptyPool(proxied)
     try:
         with pytest.raises(HTTPClientError):
-            await client._request("GET", "publicaciones/1")
+            await client.request("GET", "publicaciones/1")
         assert proxied.request.await_count == 0
         assert direct.request.await_count == 3
         assert client._direct_block_kind == "network"

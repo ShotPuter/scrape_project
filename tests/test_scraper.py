@@ -153,7 +153,7 @@ async def test_context_manager_closes_resources(tmp_path, detail_text_payload):
     )
 
     async with scraper:
-        assert scraper.store._loaded is True
+        assert await scraper.store.get_all_records() == []
 
     assert client.closed is True
 

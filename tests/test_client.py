@@ -257,11 +257,11 @@ async def test_transport_retries_network_errors_and_propagates_cancellation(monk
     client = make_http_client("http://localhost")
     request = AsyncMock(side_effect=[ConnectionError("disconnected"), {"ok": True}])
     monkeypatch.setattr(client, "_request_once", request)
-    assert await client._request("GET", "test") == {"ok": True}
+    assert await client.request("GET", "test") == {"ok": True}
     assert (client.requests_made, client.retries_made) == (2, 1)
     request.side_effect = asyncio.CancelledError()
     with pytest.raises(asyncio.CancelledError):
-        await client._request("GET", "test")
+        await client.request("GET", "test")
     assert client.retries_made == 1
 
 

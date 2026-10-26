@@ -86,7 +86,7 @@ async def test_failed_append_does_not_mutate_the_in_memory_index(tmp_path, monke
     with pytest.raises(OSError, match="disk full"):
         await store.save(record)
 
-    assert store._records == {}
+    assert await store.get_all_records() == []
     assert not store.path.exists()
 
 
@@ -104,5 +104,5 @@ async def test_failed_update_keeps_the_previous_record_in_memory(tmp_path, monke
     with pytest.raises(OSError, match="disk full"):
         await store.save(PublicationRecord(id="1", title="updated"))
 
-    assert store._records["1"] == original
+    assert await store.get_all_records() == [original]
     assert read_records(store.path)["1"] == original

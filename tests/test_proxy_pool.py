@@ -1,4 +1,8 @@
-"""Proxy selection checks without connecting to public proxies."""
+"""Proxy selection checks without connecting to public proxies.
+
+A few tests inspect pool counters directly because they simulate failures that are
+otherwise timing-dependent; user-visible behavior is asserted where practical.
+"""
 
 import asyncio
 import json
@@ -294,11 +298,11 @@ async def test_network_failure_removes_proxy_and_retry_uses_another():
     pool.sessions = [first, second]
     client = make_http_client()
     client._proxy_pool = pool
-    assert await client._request("GET", "/test") == {"ok": True}
+    assert await client.request("GET", "/test") == {"ok": True}
     assert pool.sessions == [second]
     assert pool.retired == []
     first.close.assert_awaited_once()
-    assert await client._request("GET", "/test") == {"ok": True}
+    assert await client.request("GET", "/test") == {"ok": True}
     assert first.request.await_count == 1
     await client.close()
     first.close.assert_awaited_once()
@@ -318,6 +322,6 @@ async def test_exhausted_proxy_pool_does_not_fall_back_to_direct_connection():
     client = make_http_client(proxy=ProxyConfig(mode="always"))
     client._proxy_pool = pool
     with pytest.raises(HTTPClientError, match="pool is empty"):
-        await client._request("GET", "/test")
+        await client.request("GET", "/test")
     assert client._session is None
     await client.close()
