@@ -59,6 +59,7 @@ class SeprecClient:
             )
         )
         self.logger = logger
+        self.metrics_before_run: dict[str, int] = {}
 
     @property
     def http(self) -> HttpClient:

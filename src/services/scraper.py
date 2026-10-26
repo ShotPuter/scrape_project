@@ -156,7 +156,9 @@ class SeprecScraper:
         return run_identifier, datetime.utcnow()
 
     def _capture_metrics_baseline(self) -> tuple[int, int]:
-        self.client.metrics_before_run = dict(self.client.metrics.counts) if hasattr(self.client, "metrics") else {}
+        self.client.metrics_before_run = (
+            dict(self.client.metrics.counts) if hasattr(self.client, "metrics") else {}
+        )
         return self.client.requests_made, self.client.retries_made
 
     async def _process_single_publication(

@@ -12,6 +12,7 @@ import json
 import ssl
 import time
 from collections import Counter
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -324,10 +325,8 @@ async def verify_stage1(
         return Stage1Result(False, latency_ms, error_type, f"{type(exc).__name__}: {exc}")
     finally:
         if session is not None:
-            try:
+            with suppress(Exception):  # noqa: BLE001
                 await session.close()
-            except Exception:  # noqa: BLE001
-                pass
 
 
 def _check_response(response: Any, validator) -> tuple[bool, str, str, float | None]:
@@ -401,10 +400,8 @@ async def verify_stage2(
             outcome = _AttemptOutcome(False, latency_ms, classify_exception(exc), f"{type(exc).__name__}: {exc}")
         finally:
             if session is not None:
-                try:
+                with suppress(Exception):  # noqa: BLE001
                     await session.close()
-                except Exception:  # noqa: BLE001
-                    pass
 
         if outcome.ok:
             stats.record_success(outcome.latency_ms)

@@ -14,7 +14,7 @@ import asyncio
 import sys
 import time
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from config import BASE_DIR, settings
@@ -117,15 +117,11 @@ async def stop_process(process: asyncio.subprocess.Process, timeout: float) -> N
         await asyncio.wait_for(process.wait(), timeout)
     except TimeoutError:
         logger.warning("Proxy collector ignored terminate for %.0fs; killing it", timeout)
-        try:
+        with suppress(ProcessLookupError):
             process.kill()
-        except ProcessLookupError:
-            pass
         await _reap(process)
 
 
 async def _reap(process: asyncio.subprocess.Process) -> None:
-    try:
+    with suppress(ProcessLookupError):
         await process.wait()
-    except ProcessLookupError:
-        pass

@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field, fields
 from pathlib import Path
+from typing import Any, cast
 
 from dotenv import load_dotenv
 
@@ -174,7 +175,7 @@ class Settings:
         entry point for production configuration and test overrides.
         """
         load_dotenv()
-        overrides = {}
+        overrides: dict[str, object] = {}
         for setting in fields(cls):
             if not setting.init:
                 continue
@@ -188,7 +189,7 @@ class Settings:
             if raw == "" and value_type == "Path":
                 continue
             overrides[setting.name] = _coerce_env_value(setting.name, env_name, raw, value_type)
-        return cls(**overrides)
+        return cls(**cast(Any, overrides))
 
     def _validate_core(self) -> None:
         self._require(self.max_concurrent_requests >= 1, "MAX_CONCURRENT_REQUESTS must be >= 1")

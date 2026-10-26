@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from curl_cffi import CurlInfo
 from curl_cffi.requests import AsyncSession
@@ -91,7 +91,7 @@ CURL_INFO_KEYS = (
 class CurlTransport:
     name = "curl_cffi"
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession[Any]) -> None:
         self.raw = session
 
     async def request(
@@ -106,7 +106,8 @@ class CurlTransport:
         # curl_cffi sums the pair; keep the resulting total equal to policy.total.
         connect = min(timeout.connect, timeout.sock_connect, timeout.total)
         response = await self.raw.request(
-            method, url, json=json_data, params=params, timeout=(connect, max(0, timeout.total - connect))
+            cast(Any, method), url, json=json_data, params=params,
+            timeout=(connect, max(0, timeout.total - connect)),
         )
         infos = getattr(response, "infos", None)
         if isinstance(infos, Mapping):

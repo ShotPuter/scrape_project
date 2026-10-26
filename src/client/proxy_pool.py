@@ -9,7 +9,7 @@ import logging
 import time
 import uuid
 from collections.abc import Callable, Iterable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -192,10 +192,8 @@ class ProxyPool:
         return proxy_host(proxy)
 
     async def _wait_changed(self, seconds: float) -> None:
-        try:
+        with suppress(TimeoutError):
             await asyncio.wait_for(self._changed.wait(), max(0.001, seconds))
-        except TimeoutError:
-            pass
 
     @asynccontextmanager
     async def _host_slot(self, proxy: str):
@@ -499,11 +497,14 @@ class ProxyPool:
             self._persist_task = asyncio.create_task(self._persist_dead())
 
     async def _persist_dead(self) -> None:
+        dead_path = self.dead_path
+        if dead_path is None:
+            return
         while self._dirty:
             self._dirty = False
             snapshot = dict(self._dead)
             try:
-                await asyncio.to_thread(_save_dead_proxies, self.dead_path, snapshot)
+                await asyncio.to_thread(_save_dead_proxies, dead_path, snapshot)
             except OSError:
                 logger.warning("Could not persist proxy exclusions")
 
@@ -581,11 +582,14 @@ class ProxyPool:
             self._flush_dead()
 
     async def _probe_candidates(self, candidates: list[ProxyEndpoint], *, persist_failure: bool) -> None:
+        warmup_url = self._warmup_url
+        if warmup_url is None:
+            return
         semaphore = asyncio.Semaphore(self._warmup_concurrency)
         tasks = [
             asyncio.create_task(
                 self._check_proxy(
-                    proxy, self._warmup_url, self._warmup_payload,
+                    proxy, warmup_url, self._warmup_payload,
                     semaphore, self._warmup_timeout, persist_failure=persist_failure,
                 )
             )
@@ -656,10 +660,8 @@ def _is_ready_response(response) -> bool:
 async def _close_quietly(session) -> None:
     if session is None:
         return
-    try:
+    with suppress(Exception):  # noqa: BLE001 - cleanup must not mask the original failure
         await session.close()
-    except Exception:  # noqa: BLE001 - cleanup must not mask the original failure
-        pass
 
 
 def _load_dead_proxies(path: Path | None, ttl_hours: float) -> dict[str, str]:

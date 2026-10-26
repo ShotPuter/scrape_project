@@ -11,8 +11,10 @@ from __future__ import annotations
 import asyncio
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from urllib.parse import urlsplit
 
 from config import settings
@@ -216,8 +218,11 @@ def _https_supported(raw: Mapping[str, object], protocol: str) -> bool | None:
     protocols = raw.get("protocols")
     if isinstance(protocols, str) and "https" in protocols.lower():
         return True
-    is_protocol_list = isinstance(protocols, Sequence) and not isinstance(protocols, (str, bytes))
-    if is_protocol_list and any(str(item).lower() == "https" for item in protocols):
+    if (
+        isinstance(protocols, Sequence)
+        and not isinstance(protocols, (str, bytes))
+        and any(str(item).lower() == "https" for item in protocols)
+    ):
         return True
     if protocol == "https":
         return True
@@ -292,10 +297,7 @@ def parse_proxy_text(text: str, *, source: str) -> list[ProxyCandidate]:
         value = line.strip()
         if not value or value.startswith("#"):
             continue
-        if "://" in value:
-            protocol = _normalise_protocol(urlsplit(value).scheme) or "http"
-        else:
-            protocol = "http"
+        protocol = (_normalise_protocol(urlsplit(value).scheme) or "http") if "://" in value else "http"
         url = _candidate_url(value, protocol)
         if url is None:
             continue
@@ -323,6 +325,8 @@ def parse_source_payload(payload: object, *, source: str) -> list[ProxyCandidate
     for row in rows:
         if isinstance(row, str):
             candidates.extend(parse_proxy_text(row, source=source))
+            continue
+        if not isinstance(row, Mapping):
             continue
         candidate = normalise_candidate(row, source=source)
         if candidate is not None:
@@ -362,29 +366,29 @@ async def _fetch_source(source: str, timeout: float) -> object:  # noqa: ASYNC10
     policy = TimeoutPolicy(total=timeout, connect=min(10.0, timeout), sock_connect=min(10.0, timeout), sock_read=timeout)
     last_error: Exception | None = None
     if AIOHTTP_AVAILABLE:
-        session = None
+        aiohttp_session = None
         try:
-            session = AiohttpSession(headers=headers, timeout=policy, max_clients=2)
-            response = await asyncio.wait_for(session.request("GET", url), timeout + 5)
+            aiohttp_session = AiohttpSession(headers=headers, timeout=policy, max_clients=2)
+            response = await asyncio.wait_for(aiohttp_session.request("GET", url), timeout + 5)
             return _source_response_payload(response)
         except Exception as exc:  # noqa: BLE001 - curl_cffi is the fallback
             last_error = exc
         finally:
-            if session is not None:
-                try:
-                    await session.close()
-                except Exception:  # noqa: BLE001
-                    pass
+            if aiohttp_session is not None:
+                with suppress(Exception):  # noqa: BLE001
+                    await aiohttp_session.close()
 
     try:
         from curl_cffi.requests import AsyncSession
 
-        session = AsyncSession(headers=headers, timeout=(min(10.0, timeout), timeout), trust_env=False, max_clients=2)
+        curl_session: Any = AsyncSession(
+            headers=headers, timeout=(min(10.0, timeout), timeout), trust_env=False, max_clients=2
+        )
         try:
-            response = await asyncio.wait_for(session.get(url), timeout + 5)
+            response = await asyncio.wait_for(curl_session.get(url), timeout + 5)
             return _source_response_payload(response)
         finally:
-            await session.close()
+            await curl_session.close()
     except Exception as exc:  # noqa: BLE001 - both transports are wrapped into one domain error
         raise ProxyCatalogError(f"{source}: {exc}") from (last_error or exc)
 
@@ -513,9 +517,8 @@ def _limit_candidates(
     capped_by_source: dict[str, list[ProxyCandidate]] = {}
     for source, source_candidates in candidates_by_source.items():
         source_candidates.sort(key=priority)
-        if max_per_source > 0:
-            source_candidates = source_candidates[:max_per_source]
-        capped_by_source[source] = source_candidates
+        limited_candidates = source_candidates[:max_per_source] if max_per_source > 0 else source_candidates
+        capped_by_source[source] = limited_candidates
 
     if max_total <= 0:
         selected = [candidate for source_candidates in capped_by_source.values() for candidate in source_candidates]

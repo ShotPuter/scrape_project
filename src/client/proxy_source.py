@@ -48,6 +48,7 @@ def sync_proxy_source(
     refresh_minutes: float = DEFAULT_REFRESH_MINUTES, timeout: float = DEFAULT_TIMEOUT_SECONDS, force: bool = False,
 ) -> dict[str, Any]:
     _validate_sync(source_url, csv_path, refresh_minutes, timeout)
+    assert csv_path is not None
     state_path = state_path or csv_path.with_suffix(".state.json")
     state = _load_state(state_path)
     checked_at = _utc_now()

@@ -6,6 +6,7 @@ import logging
 import math
 from http.cookiejar import MozillaCookieJar
 from pathlib import Path
+from typing import Any, cast
 
 from curl_cffi import CurlInfo, CurlOpt
 from curl_cffi.requests import AsyncSession
@@ -58,6 +59,9 @@ class SessionFactory:
             return self.make_curl(proxy, headers=headers)
 
     def make_curl(self, proxy: str | None = None, *, headers: dict[str, str] | None = None) -> AsyncSession:
+        extra: dict[str, Any] = {}
+        if proxy:
+            extra["proxy"] = proxy
         return AsyncSession(
             headers=headers or self.headers, timeout=self.timeout, max_clients=self.connection_limit,
             impersonate=self.impersonate, cookies=_load_mozilla_cookies(self.cookies_file), trust_env=False,
@@ -69,7 +73,7 @@ class SessionFactory:
                 CurlInfo.STARTTRANSFER_TIME,
                 CurlInfo.TOTAL_TIME,
             ],
-            **({"proxy": proxy} if proxy else {}),
+            **extra,
         )
 
     def make_aiohttp(self, proxy: str | None = None, *, headers: dict[str, str] | None = None) -> AiohttpSession:
@@ -92,7 +96,10 @@ class SessionFactory:
             scheme = "https" if cookie.secure else "http"
             path = cookie.path or "/"
             try:
-                jar.update_cookies({cookie.name: cookie.value}, response_url=URL(f"{scheme}://{domain}{path}"))
+                jar.update_cookies(
+                    {cookie.name: cast(str, cookie.value)},
+                    response_url=URL(f"{scheme}://{domain}{path}"),
+                )
             except (TypeError, ValueError):
                 continue
         return jar

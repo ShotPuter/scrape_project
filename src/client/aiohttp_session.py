@@ -37,7 +37,7 @@ try:
     AIOHTTP_SOCKS_ERRORS = (ProxyError, ProxyConnectionError, ProxyTimeoutError, SocksError, SocksConnectionError)
 except ImportError:  # SOCKS proxies fall back to curl_cffi
     ProxyConnector = None  # type: ignore[assignment,misc]
-    AIOHTTP_SOCKS_ERRORS = ()
+    AIOHTTP_SOCKS_ERRORS = ()  # type: ignore[assignment]
 
 NETWORK_ERRORS = (ClientError, TimeoutError, asyncio.IncompleteReadError) + AIOHTTP_SOCKS_ERRORS
 
@@ -68,10 +68,12 @@ class AiohttpSession:
         self._uses_socks = _is_socks_proxy(proxy)
         if self._uses_socks and ProxyConnector is None:
             raise ImportError("aiohttp_socks is required for SOCKS proxies")
-
-        connector = (
-            ProxyConnector.from_url(proxy, limit=max_clients) if self._uses_socks else TCPConnector(limit=max_clients)
-        )
+        connector: Any
+        if self._uses_socks:
+            assert proxy is not None
+            connector = ProxyConnector.from_url(proxy, limit=max_clients)
+        else:
+            connector = TCPConnector(limit=max_clients)
         self._session = ClientSession(
             headers=headers,
             timeout=(timeout.aiohttp() if isinstance(timeout, TimeoutPolicy) else ClientTimeout(total=timeout)),
@@ -97,7 +99,7 @@ class AiohttpSession:
             mark("response_headers_ms", round((headers_at - started) * 1000, 3))
             mark("http_status", response.status)
             mark("stage", "body_read")
-            chunks = []
+            chunks: list[bytes] = []
             size = 0
             async for chunk in response.content.iter_chunked(65536):
                 if not chunks:

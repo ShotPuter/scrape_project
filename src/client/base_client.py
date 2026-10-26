@@ -7,7 +7,7 @@ import logging
 import random
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from enum import StrEnum
@@ -17,13 +17,14 @@ from typing import Any, Self
 from curl_cffi.requests.exceptions import RequestException
 
 from src.client.aiohttp_session import NETWORK_ERRORS as AIOHTTP_NETWORK_ERRORS
-from src.client.config import ClientConfig, ProxyConfig, RetryConfig, TimeoutConfig, parse_retry_after as _parse_retry_after
+from src.client.config import ClientConfig, ProxyConfig, RetryConfig, TimeoutConfig
 from src.client.errors import HTTPClientError
 from src.client.network import NetworkBudget, RequestMetrics, TimeoutPolicy, attempt_context, mark, proxy_id, work_context
 from src.client.proxy_pool import ProxyEndpoint, ProxyPool, dead_proxy_path, load_dead_proxies, load_proxies
 from src.client.session_factory import SessionFactory
 from src.client.transport import Transport, transport_for
 from src.storage.proxy_database import ProxyDatabase
+from src.utils.http import parse_retry_after as _parse_retry_after
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +106,7 @@ class HttpClient:
         self._direct_block_kind: str | None = None
         self._direct_net_failures = 0
         self._pool_watch_task: asyncio.Task[None] | None = None
-        self._direct_retired = []
+        self._direct_retired: list[Any] = []
         self.retry_attempts = self.retry_policy.attempts
         self.retry_backoff_factor = self.retry_policy.backoff_factor
         self.retry_jitter_seconds = self.retry_policy.jitter_seconds
@@ -203,6 +204,7 @@ class HttpClient:
                 self.logger.debug("Proxy pool shutdown failed with %s", type(exc).__name__)
 
     async def _create_proxy_pool(self) -> ProxyPool | None:
+        proxies: Sequence[ProxyEndpoint | str]
         if self.proxy_db_path is not None:
             max_age = self.proxy_db_max_age_hours if self.proxy_db_max_age_hours > 0 else None
             async with ProxyDatabase(self.proxy_db_path) as database:
@@ -299,7 +301,7 @@ class HttpClient:
 
         self._pool_watch_task = asyncio.create_task(watch())
 
-    async def _warm_up_pool(self, pool: ProxyPool, proxies: list[ProxyEndpoint | str]) -> None:
+    async def _warm_up_pool(self, pool: ProxyPool, proxies: Sequence[ProxyEndpoint | str]) -> None:
         self.logger.info(
             "Checking %d proxy candidates against the API (timeout %.0fs)...",
             len(proxies), self.proxy_warmup_timeout_seconds,
@@ -326,7 +328,7 @@ class HttpClient:
             pool.checked, len(proxies),
         )
 
-    def _add_proxy_sessions(self, pool: ProxyPool, proxies: list[ProxyEndpoint | str]) -> None:
+    def _add_proxy_sessions(self, pool: ProxyPool, proxies: Sequence[ProxyEndpoint | str]) -> None:
         self.logger.info("Skipping proxy warmup; using all %d candidates directly", len(proxies))
         for proxy in proxies:
             try:
@@ -463,10 +465,8 @@ class HttpClient:
 
     async def _request_once(self, method, url, json_data, params, use_direct=None) -> dict[str, Any]:
         await self.open()
-        if use_direct is None:
-            route = self._route()
-        else:
-            route = Route.DIRECT if use_direct else Route.POOL
+        route = self._route() if use_direct is None else (Route.DIRECT if use_direct else Route.POOL)
+
         async with self._lease(route) as session:
             transport = transport_for(session)
             event = attempt_context.get() or {}
@@ -495,6 +495,7 @@ class HttpClient:
             if use_direct:
                 self._note_direct_success()
             else:
+                assert self._proxy_pool is not None
                 self._proxy_pool.record_runtime_success(session)
             return data
 
@@ -556,10 +557,9 @@ class HttpClient:
         try:
             async with guard:
                 self.metrics.counts["wire_requests"] += 1
-                response = await transport.request(
+                return await transport.request(
                     method, url, json_data=json_data, params=params, timeout=policy
                 )
-            return response
         except NETWORK_ERRORS as exc:
             mark("error_class", type(exc).__name__)
             if isinstance(exc, TimeoutError):

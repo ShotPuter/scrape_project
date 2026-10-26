@@ -19,9 +19,16 @@ target-version = "py311"
 skip-magic-trailing-comma = true
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "ASYNC"]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RET", "PL", "ASYNC"]
 ignore = [
     "UP041",  # asyncio.TimeoutError is part of the public network-error tuple
+    "PLC0415",  # deliberate lazy imports at entry points and optional dependencies
+    "PLR0911",  # control-flow size is reviewed manually instead of by rule
+    "PLR0912",  # control-flow size is reviewed manually instead of by rule
+    "PLR0913",  # constructors intentionally accept explicit configuration knobs
+    "PLR0915",  # control-flow size is reviewed manually instead of by rule
+    "PLR0917",  # positional-argument limits follow the public signatures
+    "PLR2004",  # domain thresholds are named during the configuration cleanup
 ]
 
 [tool.ruff.lint.isort]
@@ -30,3 +37,41 @@ split-on-trailing-comma = false
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["B011"]
+
+[tool.mypy]
+python_version = "3.11"
+plugins = ["pydantic.mypy"]
+files = ["config.py", "src"]
+exclude = ["^tests/"]
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = [
+    "src.cli",
+    "src.client.errors",
+    "src.client.readiness",
+    "src.client.transport",
+    "src.services.category_resolver",
+    "src.services.pdf_generator",
+    "src.services.proxy_bootstrap",
+    "src.storage.file_storage",
+    "src.storage.integrity",
+    "src.storage.publication_csv",
+    "src.utils.atomic",
+    "src.utils.http",
+    "src.utils.proxy_url",
+    "src.utils.runtime",
+]
+disallow_any_generics = true
+disallow_incomplete_defs = true
+disallow_untyped_calls = true
+disallow_untyped_defs = true
+no_implicit_reexport = true
+strict_equality = true
+warn_return_any = true
