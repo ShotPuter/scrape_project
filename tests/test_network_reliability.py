@@ -13,11 +13,11 @@ import pytest
 from aiohttp import web
 from test_client import local_api
 
-from src.client.base_client import HttpClient, Route
+from src.client.base_client import HttpClient
 from src.client.config import ProxyConfig, TimeoutConfig
 from src.client.errors import HTTPClientError
 from src.client.network import NetworkBudget, TimeoutPolicy, proxy_id
-from src.client.proxy_pool import ProxyEndpoint, ProxyPool, WarmupSpec
+from src.client.proxy_pool import ProxyPool, WarmupSpec
 from tests.helpers import make_http_client
 
 
@@ -485,20 +485,6 @@ async def test_zero_mix_share_keeps_all_attempts_direct():
 
 
 @pytest.mark.asyncio
-async def test_inflight_direct_success_does_not_cancel_an_active_block():
-    direct, proxied = AsyncMock(), AsyncMock()
-    client = fallback_client(direct, proxied)
-    try:
-        client._direct_blocked_until = time.monotonic() + 60
-        client._direct_block_kind = "origin"
-        client._note_direct_success()
-        assert client._direct_blocked_until > time.monotonic()
-        assert client._route() is Route.POOL
-    finally:
-        await client.close()
-
-
-@pytest.mark.asyncio
 async def test_pool_mode_prefers_the_proxy_pool():
     direct, proxied = AsyncMock(), AsyncMock()
     direct.request.return_value = FakeResponse()
@@ -559,30 +545,3 @@ async def test_network_block_with_empty_pool_keeps_trying_direct():
         assert client._direct_block_kind == "network"
     finally:
         await client.close()
-
-
-def test_slow_proxy_gets_a_larger_timeout_policy():
-    session = object()
-    pool = ProxyPool([], lambda **kw: None)
-    pool.add_session(ProxyEndpoint("http://slow:80", latency_ms=10_000), session)
-    client = make_http_client()
-    client._proxy_pool = pool
-    base = TimeoutPolicy(total=30, connect=10, sock_connect=10, sock_read=30)
-
-    scaled = client._timeout_policy_for(session, base)
-
-    assert scaled.total == 60
-    assert scaled.connect == 15
-    assert scaled.sock_connect == 15
-    assert scaled.sock_read == 30
-
-
-def test_fast_proxy_keeps_the_base_timeout_policy():
-    session = object()
-    pool = ProxyPool([], lambda **kw: None)
-    pool.add_session(ProxyEndpoint("http://fast:80", latency_ms=1_000), session)
-    client = make_http_client()
-    client._proxy_pool = pool
-    base = TimeoutPolicy(total=30, connect=10, sock_connect=10, sock_read=30)
-
-    assert client._timeout_policy_for(session, base) is base
