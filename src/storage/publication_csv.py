@@ -48,7 +48,7 @@ class PublicationCsv:
                 updated_mapping = {**self._records, record.id: record}
                 await asyncio.to_thread(_write_snapshot, self.path, updated_mapping.values())
             else:
-                await asyncio.to_thread(_append_or_rewrite, self.path, record, list(self._records.values()))
+                await asyncio.to_thread(_append_or_rewrite, self.path, record, self._records.values())
 
             # Only mutate the in-memory index after the durable write succeeded.
             self._records[record.id] = record
@@ -87,7 +87,7 @@ def _extract_valid_identifiers(records: list[PublicationRecord], verify_files: b
     return {record.id for record in records if file_problem(record.file_path, record.file_size_bytes) is None}
 
 
-def _append_or_rewrite(path: Path, record: PublicationRecord, existing: list[PublicationRecord]) -> None:
+def _append_or_rewrite(path: Path, record: PublicationRecord, existing: Iterable[PublicationRecord]) -> None:
     """Append when healthy; rewrite only for recoverable write/format damage."""
     if _can_append_safely(path):
         try:

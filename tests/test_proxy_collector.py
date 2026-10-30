@@ -7,19 +7,15 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from src.client.proxy_catalog import CatalogLoadResult, ProxyCandidate, filter_and_limit_candidates, parse_source_payload
-from src.client.proxy_pool import dead_proxy_path
-from src.services import proxy_collector
-from src.services.proxy_collector import (
-    Stage1Failure,
-    Stage1Success,
-    Stage2Check,
-    build_parser,
-    clear_dead_proxies,
-    read_candidates,
-)
-from src.services.proxy_verifier import CheckStats, Stage2Result
-from src.storage.proxy_database import ProxyDatabase, VerifiedProxy
+from src.proxy import collector as proxy_collector
+from src.proxy.checker import CheckStats, Stage2Result
+from src.proxy.collector import Stage1Failure, Stage1Success, Stage2Check, clear_dead_proxies, read_candidates
+from src.proxy.config import CollectorConfig
+from src.proxy.pool import dead_proxy_path
+from src.proxy.repository import ProxyDatabase, VerifiedProxy
+from src.proxy.sources.catalog import CatalogLoadResult, ProxyCandidate, filter_and_limit_candidates, parse_source_payload
+from src.services.proxy_collector import build_parser
+from src.services.seprec_proxy_probe import seprec_target_probe
 
 
 def test_provider_defaults_to_public_sources():
@@ -67,10 +63,13 @@ async def test_collect_replaces_database_and_clears_dead_list(tmp_path, monkeypa
             for candidate in candidates
             if candidate.source == "free-proxy"
         ]
-        return successes, []
+        found = successes
+        for success in found:
+            await kwargs["on_success"](success)
+        return found, []
 
     async def fake_stage2(stage1_successes, **kwargs):
-        return [Stage2Check(success, Stage2Result(True, _success_stats(10.0))) for success in stage1_successes]
+        return [Stage2Check(success, Stage2Result(True, _success_stats(10.0))) async for success in stage1_successes]
 
     async def empty_public_sources(*args, **kwargs):
         return CatalogLoadResult()
@@ -81,7 +80,14 @@ async def test_collect_replaces_database_and_clears_dead_list(tmp_path, monkeypa
     monkeypatch.setattr(proxy_collector, "_stage2_scan", fake_stage2)
 
     report = await proxy_collector.collect(
-        csv_path=csv_path, db_path=db_path, source_url="", provider="all", concurrency=1, timeout=1
+        config=CollectorConfig(),
+        target=seprec_target_probe("https://example.test/api"),
+        csv_path=csv_path,
+        db_path=db_path,
+        source_url="",
+        provider="all",
+        concurrency=1,
+        timeout=1,
     )
 
     assert report["database_replaced"] is True
@@ -112,7 +118,10 @@ async def test_collect_keeps_existing_database_when_scan_finds_nothing(tmp_path,
         return []
 
     async def fake_stage1(candidates, **kwargs):
-        return [], [Stage1Failure(candidate, "connect_timeout", "timed out") for candidate in candidates]
+        found = []
+        for success in found:
+            await kwargs["on_success"](success)
+        return found, [Stage1Failure(candidate, "connect_timeout", "timed out") for candidate in candidates]
 
     async def empty_public_sources(*args, **kwargs):
         return CatalogLoadResult()
@@ -122,7 +131,14 @@ async def test_collect_keeps_existing_database_when_scan_finds_nothing(tmp_path,
     monkeypatch.setattr(proxy_collector, "_stage1_scan", fake_stage1)
 
     report = await proxy_collector.collect(
-        csv_path=csv_path, db_path=db_path, source_url="", provider="all", concurrency=1, timeout=1
+        config=CollectorConfig(),
+        target=seprec_target_probe("https://example.test/api"),
+        csv_path=csv_path,
+        db_path=db_path,
+        source_url="",
+        provider="all",
+        concurrency=1,
+        timeout=1,
     )
 
     assert report["database_replaced"] is False
@@ -146,7 +162,10 @@ async def test_collect_publishes_first_verified_proxies_before_scan_finishes(tmp
     checked = 0
 
     async def fake_stage1(candidates, **kwargs):
-        return [Stage1Success(candidate, "aiohttp", "UA", 5.0) for candidate in candidates], []
+        found = [Stage1Success(candidate, "aiohttp", "UA", 5.0) for candidate in candidates]
+        for success in found:
+            await kwargs["on_success"](success)
+        return found, []
 
     async def fake_verify_stage2(url, **kwargs):
         nonlocal checked
@@ -161,6 +180,8 @@ async def test_collect_publishes_first_verified_proxies_before_scan_finishes(tmp
 
     scan = asyncio.create_task(
         proxy_collector.collect(
+            config=CollectorConfig(),
+            target=seprec_target_probe("https://example.test/api"),
             csv_path=csv_path,
             db_path=db_path,
             source_url="",
@@ -196,7 +217,10 @@ async def test_collect_falls_back_to_csv_when_free_proxy_is_missing(tmp_path, mo
         raise RuntimeError("free-proxy is not installed")
 
     async def fake_stage1(candidates, **kwargs):
-        return [], []
+        found = []
+        for success in found:
+            await kwargs["on_success"](success)
+        return found, []
 
     async def empty_public_sources(*args, **kwargs):
         return CatalogLoadResult()
@@ -206,7 +230,14 @@ async def test_collect_falls_back_to_csv_when_free_proxy_is_missing(tmp_path, mo
     monkeypatch.setattr(proxy_collector, "_stage1_scan", fake_stage1)
 
     report = await proxy_collector.collect(
-        csv_path=csv_path, db_path=db_path, source_url="", provider="all", concurrency=1, timeout=1
+        config=CollectorConfig(),
+        target=seprec_target_probe("https://example.test/api"),
+        csv_path=csv_path,
+        db_path=db_path,
+        source_url="",
+        provider="all",
+        concurrency=1,
+        timeout=1,
     )
 
     assert report["free_proxy_candidates"] == 0

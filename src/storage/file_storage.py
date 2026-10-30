@@ -25,9 +25,11 @@ class SavedDocument:
 class FileStorage:
     """Manages filesystem organization, atomic persistence, and PDF validation."""
 
-    def __init__(self, pdf_dir: Path | str | None = None) -> None:
+    def __init__(self, pdf_dir: Path | str | None = None, *, discard: bool = False) -> None:
+        self.discard = discard
         self.pdf_dir = Path(pdf_dir or settings.pdf_storage_dir)
-        self.pdf_dir.mkdir(parents=True, exist_ok=True)
+        if not discard:
+            self.pdf_dir.mkdir(parents=True, exist_ok=True)
 
     def save_publication_document(self, publication: PublicationDetail) -> SavedDocument:
         """
@@ -47,7 +49,8 @@ class FileStorage:
         document_bytes, has_original_file = self._load_or_generate_pdf(publication)
 
         try:
-            self._write_atomically(target_path, document_bytes)
+            if not self.discard:
+                self._write_atomically(target_path, document_bytes)
         except OSError as error:
             logger.error(
                 "Failed to persist publication document to disk",

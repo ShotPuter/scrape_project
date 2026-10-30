@@ -7,9 +7,9 @@ from aiohttp import web
 
 from src.client.base_client import HttpClient
 from src.client.config import ClientConfig, RetryConfig
-from src.client.network import TimeoutPolicy
 from src.client.seprec_client import SeprecClient
 from src.models.publication import PublicationSearchFilter
+from src.network.budget import TimeoutPolicy
 from src.utils.helpers import SeprecAPIError
 
 

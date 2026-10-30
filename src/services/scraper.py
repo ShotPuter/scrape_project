@@ -16,7 +16,6 @@ from typing import Any, NamedTuple
 
 from config import settings
 from src.client.config import ClientConfig
-from src.client.network import work_context
 from src.client.seprec_client import SeprecClient
 from src.models.publication import (
     STATUS_DOWNLOADED,
@@ -25,6 +24,7 @@ from src.models.publication import (
     PublicationRecord,
     PublicationSummary,
 )
+from src.network.budget import work_context
 from src.services.category_resolver import CategoryResolver
 from src.services.run_reporter import RunReporter
 from src.services.scrape_pipeline import ScrapePipeline, ScrapeRequest
@@ -89,8 +89,10 @@ class SeprecScraper:
         client_config: ClientConfig | None = None,
     ):
         self.max_concurrency = max_concurrency or (
-            client_config.connection_limit if client_config else settings.max_concurrent_requests
+            settings.download_workers
+            or (client_config.connection_limit if client_config else settings.max_concurrent_requests)
         )
+        self.failed_documents = 0
         self.client = client or SeprecClient(config=client_config)
         self.store = store or PublicationCsv()
         self.file_storage = file_storage or FileStorage()
@@ -212,6 +214,7 @@ class SeprecScraper:
                 return record
 
             except Exception as processing_error:  # noqa: BLE001 - one publication must not abort the batch
+                self.failed_documents += 1
                 logger.error(
                     "Failed to process publication document",
                     extra={"publication_id": summary.id, "error": str(processing_error)},

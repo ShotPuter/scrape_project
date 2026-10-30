@@ -6,8 +6,8 @@ from unittest.mock import Mock
 
 import pytest
 
+from src.proxy.repository import ProxyDatabase, VerifiedProxy
 from src.services import proxy_bootstrap
-from src.storage.proxy_database import ProxyDatabase, VerifiedProxy
 
 
 class FakeProcess:

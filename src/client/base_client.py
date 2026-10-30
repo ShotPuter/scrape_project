@@ -16,11 +16,13 @@ from typing import Any, Self
 
 from curl_cffi.requests.exceptions import RequestException
 
-from src.client.aiohttp_session import NETWORK_ERRORS as AIOHTTP_NETWORK_ERRORS
 from src.client.config import ClientConfig
-from src.client.errors import HTTPClientError
-from src.client.network import NetworkBudget, RequestMetrics, TimeoutPolicy, attempt_context, mark, proxy_id, work_context
-from src.client.proxy_pool import (
+from src.network.aiohttp_session import NETWORK_ERRORS as AIOHTTP_NETWORK_ERRORS
+from src.network.budget import NetworkBudget, RequestMetrics, TimeoutPolicy, attempt_context, mark, proxy_id, work_context
+from src.network.errors import HTTPClientError
+from src.network.session_factory import SessionFactory
+from src.network.transport import Response, Transport, transport_for
+from src.proxy.pool import (
     ProxyEndpoint,
     ProxyPool,
     ProxySession,
@@ -29,10 +31,8 @@ from src.client.proxy_pool import (
     load_dead_proxies,
     load_proxies,
 )
-from src.client.session_factory import SessionFactory
-from src.client.transport import Response, Transport, transport_for
-from src.storage.proxy_database import ProxyDatabase
-from src.utils.http import parse_retry_after as _parse_retry_after
+from src.proxy.repository import ProxyDatabase
+from src.utils.http import parse_retry_after as _parse_retry_after, retry_after_from_response
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +60,7 @@ class HttpClient:
         self._direct_block_kind: str | None = None
         self._direct_net_failures = 0
         self._pool_watch_task: asyncio.Task[None] | None = None
+        self._database_watch_task: asyncio.Task[None] | None = None
         self._direct_retired: list[Any] = []
         self.logger = logger
         self._session_factory = SessionFactory(
@@ -102,10 +103,37 @@ class HttpClient:
             pool = await self._create_proxy_pool()
             self._proxy_pool = pool
             if self.config.proxy.mode == "fallback" or pool is None:
-                # Fallback keeps a healthy direct session; the pool is only used when
-                # the origin blocks the direct route. Pool mode creates its direct
-                # fallback lazily, only if the pool turns out to be empty.
                 self._session = self._session_factory.create()
+
+            if self.config.proxy.db_path is not None and self.config.proxy.db_refresh_seconds > 0:
+                self._database_watch_task = asyncio.create_task(self._watch_proxy_database())
+
+    async def _watch_proxy_database(self) -> None:
+        while True:
+            await asyncio.sleep(self.config.proxy.db_refresh_seconds)
+            try:
+                await self._refresh_proxy_database()
+            except Exception as exc:  # noqa: BLE001 - a failed refresh must preserve the current pool
+                self.logger.warning("Proxy database refresh failed: %s", type(exc).__name__)
+
+    async def _refresh_proxy_database(self) -> None:
+        path = self.config.proxy.db_path
+        if path is None:
+            return
+        max_age = self.config.proxy.db_max_age_hours or None
+        async with ProxyDatabase(path) as database:
+            records = await database.list_active(limit=self.config.proxy.sample_size or None, max_age_hours=max_age)
+        if self._proxy_pool is not None:
+            self._proxy_pool.update_candidates(
+                [
+                    ProxyEndpoint(
+                        record.url, record.user_agent, record.transport, record.latency_ms, record.checked_at, record.source
+                    )
+                    for record in records
+                ]
+            )
+        elif records:
+            self._proxy_pool = await self._create_proxy_pool()
 
     async def close(self) -> None:
         """Release every owned resource, even if one closer fails.
@@ -113,6 +141,11 @@ class HttpClient:
         All references are detached before awaiting so repeated calls are safe
         and a partially failed shutdown cannot leak the remaining sessions.
         """
+        database_task = self._database_watch_task
+        self._database_watch_task = None
+        if database_task is not None:
+            database_task.cancel()
+            await asyncio.gather(database_task, return_exceptions=True)
         watch_task = self._pool_watch_task
         self._pool_watch_task = None
         if watch_task is not None:
@@ -166,7 +199,12 @@ class HttpClient:
                 return None
             endpoints = [
                 ProxyEndpoint(
-                    url=record.url, user_agent=record.user_agent, transport=record.transport, latency_ms=record.latency_ms
+                    url=record.url,
+                    user_agent=record.user_agent,
+                    transport=record.transport,
+                    latency_ms=record.latency_ms,
+                    checked_at=record.checked_at,
+                    source=record.source,
                 )
                 for record in records
             ]
@@ -193,7 +231,17 @@ class HttpClient:
             per_ip_limit=self.config.proxy.per_ip_limit,
             network_budget=self.budget,
             metrics=self.metrics,
+            verified_reuse_seconds=self.config.proxy.verified_reuse_seconds if self.config.proxy.db_path else 0,
+            rate_limit_pause_seconds=self.config.rate_limit_pause_seconds,
         )
+        if self.config.proxy.warmup and self.config.proxy.db_path is not None:
+            reused = pool.reuse_verified(endpoints)
+            if reused:
+                self.logger.info("Reusing %d recently verified proxies without a readiness request", reused)
+                pool.configure_warmup(self._pool_warmup_spec())
+                if reused < len(endpoints):
+                    pool.start_warmup(self._pool_warmup_spec())
+                return pool
         if not self.config.proxy.warmup:
             pool.configure_warmup(self._pool_warmup_spec())
             try:
@@ -203,9 +251,7 @@ class HttpClient:
                         pool.add_session(proxy, pool.create_session(proxy))
                     except Exception as exc:  # noqa: BLE001 - skip only the unusable candidate
                         endpoint = proxy.url if isinstance(proxy, ProxyEndpoint) else proxy
-                        self.logger.debug(
-                            "Session unavailable for proxy %s: %s", proxy_id(endpoint), type(exc).__name__
-                        )
+                        self.logger.debug("Session unavailable for proxy %s: %s", proxy_id(endpoint), type(exc).__name__)
                         pool.record_dead(proxy)
                 pool.checked = len(endpoints)
                 if not pool.sessions:
@@ -243,6 +289,7 @@ class HttpClient:
             payload=dict(self.config.proxy.check_payload),
             concurrency=min(self.config.proxy.check_concurrency, self.config.proxy.probe_concurrency),
             timeout=self.config.proxy.check_timeout,
+            validator=self.config.proxy.check_validator,
         )
 
     def _start_background_warmup(self, pool: ProxyPool, candidate_count: int) -> None:
@@ -432,7 +479,7 @@ class HttpClient:
         status: int,
         route: Route,
     ) -> dict[str, Any]:
-        is_direct = route is Route.DIRECT
+        is_direct = (attempt_context.get() or {}).get("route", route.value) == Route.DIRECT.value
         challenge = status == 403 and response.headers.get("cf-mitigated") == "challenge"
         if challenge and is_direct and transport.name == "aiohttp" and not self._session_factory.using_curl:
             # Retry once with browser-like TLS before cooling down the direct route.
@@ -455,6 +502,14 @@ class HttpClient:
             if is_direct and self._proxy_pool is not None:
                 # Keep proxy requests running while the direct route cools down.
                 self._mark_direct_blocked("HTTP 429", delay)
+            elif not is_direct and self._proxy_pool is not None:
+                proxy_url = self._proxy_pool.session_proxies.get(transport.raw)
+                if proxy_url is None:
+                    self.budget.pause(delay)
+                    raise HTTPClientError("HTTP 429 from unidentified proxy", status, retry_after)
+                effective_pause = self._proxy_pool.handle_rate_limit(proxy_url, server_delay)
+                mark("retry_after_seconds", server_delay)
+                raise HTTPClientError("HTTP 429 from API", status, str(effective_pause))
             else:
                 # Proxy route or a direct-only client: pause the shared origin budget.
                 self.budget.pause(delay)
@@ -513,13 +568,19 @@ class HttpClient:
             self.logger.warning("Removed failed proxy from rotation; %d remain", len(self._proxy_pool.sessions))
 
     async def request(
-        self, method: str, path: str, json_data: dict[str, Any] | None = None, params: dict[str, Any] | None = None
+        self,
+        method: str,
+        path: str,
+        json_data: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+        *,
+        endpoint_kind: str = "api",
     ) -> dict[str, Any]:
         """Public entry point for API calls."""
         url = f"{self.config.base_url}/{path.lstrip('/')}"
         previous_proxy = None
         path_parts = path.strip("/").split("/")
-        kind = "detail" if method == "GET" and len(path_parts) == 2 and path_parts[0] == "publicaciones" else "api"
+        kind = endpoint_kind
         request_id = uuid.uuid4().hex
         for attempt in range(1, self.config.retry.attempts + 1):
             self.requests_made += 1
@@ -572,15 +633,7 @@ class HttpClient:
 
 def _retry_after_from_response(response: Response) -> str | None:
     """Prefer an explicit API ``retry_after`` value over the HTTP header."""
-    header = response.headers.get("Retry-After")
-    try:
-        payload = response.json()
-    except (ValueError, UnicodeError):
-        return header
-    if not isinstance(payload, dict):
-        return header
-    value = payload.get("retry_after")
-    return str(value) if value is not None else header
+    return retry_after_from_response(response)
 
 
 def _decode_json(response: Response, url: str, status: int) -> dict[str, Any]:

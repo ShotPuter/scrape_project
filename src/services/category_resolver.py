@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from src.client.errors import HTTPClientError
 from src.models.publication import CatalogItem
+from src.network.errors import HTTPClientError
 from src.utils.helpers import SeprecError
 from src.utils.logger import setup_logger
 

@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.client.proxy_pool import ProxyPool
+from src.proxy.pool import ProxyPool
 from src.services.scraper import SeprecScraper
 from src.storage.file_storage import FileStorage
 from src.storage.publication_csv import PublicationCsv

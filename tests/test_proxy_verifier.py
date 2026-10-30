@@ -6,9 +6,9 @@ import pytest
 from aiohttp import ClientProxyConnectionError, ConnectionTimeoutError
 from curl_cffi.requests.exceptions import ConnectionError as CurlConnectionError, Timeout as CurlTimeout
 
-from src.client.network import NetworkBudget
-from src.services import proxy_verifier
-from src.services.proxy_verifier import (
+from src.network.budget import NetworkBudget
+from src.proxy import checker as proxy_verifier
+from src.proxy.checker import (
     _AttemptOutcome,
     classify_exception,
     classify_status,
@@ -17,6 +17,7 @@ from src.services.proxy_verifier import (
     verify_stage1,
     verify_stage2,
 )
+from src.services.seprec_proxy_probe import seprec_target_probe
 
 
 def test_status_classification():
@@ -115,6 +116,7 @@ async def test_stage2_retries_transient_error_and_records_stats(monkeypatch):
     monkeypatch.setattr(proxy_verifier, "_target_attempt", fake_attempt)
     result = await verify_stage2(
         "http://proxy.example:8080",
+        target=seprec_target_probe("https://example.test/api"),
         transport="aiohttp",
         user_agent="UA",
         attempts=3,
@@ -151,6 +153,7 @@ async def test_stage2_403_gets_only_one_retry(monkeypatch):
     monkeypatch.setattr(proxy_verifier, "_target_attempt", fake_attempt)
     result = await verify_stage2(
         "http://proxy.example:8080",
+        target=seprec_target_probe("https://example.test/api"),
         transport="aiohttp",
         user_agent="UA",
         attempts=3,

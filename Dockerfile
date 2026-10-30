@@ -9,8 +9,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # Cache dependencies separately from application code. No build tools in runtime.
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.lock ./
+RUN pip install --no-cache-dir -r requirements.lock
 
 ARG SCRAPER_UID=1000
 ARG SCRAPER_GID=1000
@@ -25,6 +25,7 @@ COPY src ./src
 USER scraper:scraper
 VOLUME ["/app/data"]
 
-# Exec form forwards signals to Python.
+# asyncio.run handles SIGINT by cancelling tasks and flushing final reports.
+STOPSIGNAL SIGINT
 ENTRYPOINT ["python", "main.py"]
 CMD []

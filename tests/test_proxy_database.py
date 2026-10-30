@@ -5,7 +5,21 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from src.storage.proxy_database import ProxyDatabase, VerifiedProxy
+from src.proxy.repository import ProxyDatabase, VerifiedProxy
+
+
+@pytest.mark.asyncio
+async def test_incremental_publication_preserves_existing_rows_and_updates_receipts(tmp_path):
+    path = tmp_path / "proxies.db"
+    async with ProxyDatabase(path) as writer:
+        await writer.replace_all([VerifiedProxy("http://old:80", "UA", "aiohttp", latency_ms=100)])
+        await writer.upsert_many([VerifiedProxy("http://new:80", "UA", "aiohttp", latency_ms=50)])
+        async with ProxyDatabase(path) as reader:
+            assert {proxy.url for proxy in await reader.list_active()} == {"http://old:80", "http://new:80"}
+        await writer.upsert_many([VerifiedProxy("http://new:80", "UA", "aiohttp", latency_ms=10)])
+        active = await writer.list_active()
+        assert len(active) == 2
+        assert active[0].latency_ms == 10
 
 
 @pytest.mark.asyncio

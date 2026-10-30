@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from config import BASE_DIR, settings
-from src.storage.proxy_database import ProxyDatabase
+from src.proxy.repository import ProxyDatabase
 from src.utils.logger import setup_logger
 
 logger = setup_logger("proxy_bootstrap")
@@ -36,7 +36,7 @@ async def count_fresh_proxies(db_path: Path, *, max_age_hours: float, limit: int
 
 async def wait_for_proxies(  # noqa: ASYNC109 - explicit bounded wait
     db_path: Path,
-    process: asyncio.subprocess.Process,
+    process: asyncio.subprocess.Process | None,
     *,
     required: int,
     timeout: float,  # noqa: ASYNC109 - bounded wait is the whole point of this helper
@@ -48,6 +48,7 @@ async def wait_for_proxies(  # noqa: ASYNC109 - explicit bounded wait
     Returns the number of fresh proxies available at the end.  The caller decides
     whether that is enough to scrape or whether a direct fallback is preferable.
     """
+    db_path = await asyncio.to_thread(db_path.resolve)
     deadline = time.monotonic() + timeout
     started = time.monotonic()
     last_report = started
@@ -56,7 +57,7 @@ async def wait_for_proxies(  # noqa: ASYNC109 - explicit bounded wait
         if available >= required:
             logger.info("Verified proxy pool ready: %d fresh proxies", available)
             return available
-        if process.returncode is not None:
+        if process is not None and process.returncode is not None:
             logger.info(
                 "Proxy collector exited with code %d after publishing %d/%d fresh proxies",
                 process.returncode,
@@ -77,7 +78,12 @@ async def wait_for_proxies(  # noqa: ASYNC109 - explicit bounded wait
         if now - last_report >= WAIT_REPORT_INTERVAL_SECONDS:
             last_report = now
             logger.info(
-                "Waiting for proxies: %d/%d fresh, %.0fs elapsed, %.0fs left", available, required, now - started, remaining
+                "Waiting for proxies: %d/%d fresh, %.0fs elapsed, %.0fs left | DB: %s",
+                available,
+                required,
+                now - started,
+                remaining,
+                db_path,
             )
         await asyncio.sleep(min(poll_interval, remaining))
 

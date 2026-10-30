@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from config import settings
-from src.client.network import work_context
 from src.models.publication import PublicationRecord, PublicationSearchFilter, PublicationSummary
+from src.network.budget import work_context
 from src.utils.logger import setup_logger
 
 logger = setup_logger("scrape_pipeline")
@@ -146,9 +146,7 @@ class ScrapePipeline:
                 if self.request.incremental:
                     candidates, skipped_count = await self.filter_new_summaries(summaries)
                     counters.items_skipped += skipped_count
-                    counters.consecutive_skipped_pages = (
-                        counters.consecutive_skipped_pages + 1 if not candidates else 0
-                    )
+                    counters.consecutive_skipped_pages = counters.consecutive_skipped_pages + 1 if not candidates else 0
                     if counters.consecutive_skipped_pages >= MAX_CONSECUTIVE_SKIPPED_PAGES and not self.request.date_filter:
                         logger.info(
                             "Consecutive skip threshold reached; incremental run caught up",
@@ -174,8 +172,12 @@ class ScrapePipeline:
                 "Pagination aborted due to unexpected error", extra={"page": page_number, "error": str(error)}, exc_info=True
             )
         finally:
-            for _ in range(self.max_concurrency):
-                await queue.put(None)
+            task = asyncio.current_task()
+            # TaskGroup cancels consumers too. Enqueuing sentinels into a full
+            # queue at that point would leave the producer waiting forever.
+            if task is None or not task.cancelling():
+                for _ in range(self.max_concurrency):
+                    await queue.put(None)
 
     async def _consume_queue(self, queue: asyncio.Queue[PublicationSummary | None], counters: RunCounters) -> None:
         """Worker loop consuming items until sentinel value (None) is encountered."""

@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,9 @@ from src.client.seprec_client import SeprecClient
 from src.models.publication import STATUS_FAILED
 from src.services.proxy_bootstrap import count_fresh_proxies, proxy_collector, wait_for_proxies
 from src.services.scraper import SeprecScraper
+from src.storage.discard_store import DiscardStore
+from src.storage.file_storage import FileStorage
+from src.utils.atomic import atomic_write_json
 from src.utils.logger import setup_logger
 
 logger = setup_logger("cli")
@@ -59,6 +63,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--year", type=_year, help="Only collect publications from this calendar year.")
+    parser.add_argument(
+        "--discard-files",
+        action="store_true",
+        help="Download and validate PDFs without writing PDFs or the publication CSV.",
+    )
+    parser.add_argument(
+        "--stress-minutes", type=float, help="Repeat discard-mode downloads for this many minutes after startup."
+    )
+    parser.add_argument(
+        "--stress-report",
+        type=Path,
+        default=Path("data/stress-report.json"),
+        help="Discard-mode JSON report, updated every metrics interval and on exit.",
+    )
     parser.add_argument(
         "--category",
         choices=list(CATEGORY_CODES),
@@ -107,6 +125,19 @@ async def _run_once(args: argparse.Namespace) -> list[dict[str, Any]]:
         )
         return await _run_scraper(args, db_path)
 
+    if not settings.proxy_autocollect:
+        logger.info("Waiting for independently managed proxy collector | DB: %s", db_path.resolve())
+        fresh = await wait_for_proxies(
+            db_path,
+            None,
+            required=1 if settings.webshare_api_token.strip() else settings.proxy_min_ready,
+            timeout=settings.proxy_startup_timeout_seconds,
+            max_age_hours=settings.proxy_db_max_age_hours,
+        )
+        if not fresh and settings.proxy_mode == "always":
+            raise RuntimeError("External proxy collector produced no fresh verified proxies")
+        return await _run_scraper(args, db_path)
+
     logger.info(
         "No fresh verified proxies in %s; collecting before scraping (max %.0fs)",
         db_path,
@@ -116,7 +147,7 @@ async def _run_once(args: argparse.Namespace) -> list[dict[str, Any]]:
         fresh = await wait_for_proxies(
             db_path,
             process,
-            required=settings.proxy_min_ready,
+            required=1 if settings.webshare_api_token.strip() else settings.proxy_min_ready,
             timeout=settings.proxy_startup_timeout_seconds,
             max_age_hours=settings.proxy_db_max_age_hours,
         )
@@ -124,15 +155,93 @@ async def _run_once(args: argparse.Namespace) -> list[dict[str, Any]]:
             if settings.proxy_mode == "always":
                 raise RuntimeError("Proxy collection produced no fresh verified proxies")
             logger.warning("Proxy collection produced no usable proxies; continuing with direct requests")
-            return await _run_scraper(args, None)
+            return await _run_scraper(args, db_path)
         logger.info("Starting scrape with %d fresh verified proxies", fresh)
         return await _run_scraper(args, db_path)
 
 
 async def _run_scraper(args: argparse.Namespace, proxy_db: Path | None) -> list[dict[str, Any]]:
     client_config = SeprecClient.config_from_settings(proxy_db_path=proxy_db)
+    if args.discard_files:
+        return await _run_discard(args, client_config)
     async with SeprecScraper(client_config=client_config) as scraper:
         return await _execute_scrape(scraper, args)
+
+
+async def _run_discard(args: argparse.Namespace, client_config: Any) -> list[dict[str, Any]]:
+    store = DiscardStore()
+    async with SeprecScraper(client_config=client_config, store=store, file_storage=FileStorage(discard=True)) as scraper:
+        started = time.monotonic()
+        timed = args.stress_minutes is not None
+
+        def snapshot(status: str) -> dict[str, Any]:
+            elapsed = time.monotonic() - started
+            rss_kib = None
+            try:
+                for line in Path("/proc/self/status").read_text().splitlines():
+                    if line.startswith("VmRSS:"):
+                        rss_kib = int(line.split()[1])
+                        break
+            except (OSError, ValueError):
+                pass
+            return {
+                "status": status,
+                "mode": "discard",
+                "duration_seconds": round(elapsed, 2),
+                "rss_kib": rss_kib,
+                "documents_checked": store.completed,
+                "original_files": store.original,
+                "generated_files": store.generated,
+                "items_failed": scraper.failed_documents,
+                "pdf_bytes_checked": store.byte_count,
+                "files_per_minute": round(store.completed * 60 / max(elapsed, 0.001), 2),
+                "http_metrics": scraper.client.metrics.snapshot(),
+            }
+
+        async def monitor() -> None:
+            while True:
+                await asyncio.sleep(settings.metrics_interval_seconds)
+                report = snapshot("RUNNING")
+                await asyncio.to_thread(atomic_write_json, args.stress_report, report)
+                logger.info(
+                    "Discard test: checked=%d, failed=%d, speed=%.1f/min, rss_kib=%s",
+                    report["documents_checked"],
+                    report["items_failed"],
+                    report["files_per_minute"],
+                    report["rss_kib"],
+                )
+
+        async def download() -> None:
+            while True:
+                reports = await _execute_scrape(scraper, args)
+                if any(report["status"] == STATUS_FAILED for report in reports):
+                    raise RuntimeError("Stress scan failed; see category report")
+                if not timed:
+                    return
+                store.next_cycle()
+                await asyncio.sleep(1)  # avoid spinning when a year/category has no publications
+
+        monitor_task = asyncio.create_task(monitor())
+        status = "FAILED"
+        deadline = asyncio.timeout(args.stress_minutes * 60 if timed else None)
+        try:
+            async with deadline:
+                await download()
+            status = "COMPLETED"
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+            status = "DURATION_REACHED"
+        except asyncio.CancelledError:
+            status = "INTERRUPTED"
+            raise
+        finally:
+            monitor_task.cancel()
+            await asyncio.gather(monitor_task, return_exceptions=True)
+            report = snapshot(status)
+            await asyncio.to_thread(atomic_write_json, args.stress_report, report)
+            print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
+    return [report]
 
 
 async def _collect_proxies() -> int:
@@ -151,6 +260,12 @@ async def _collect_proxies() -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.stress_minutes is not None:
+        if not 0 < args.stress_minutes < float("inf"):
+            parser.error("--stress-minutes must be finite and positive")
+        args.discard_files = True
+    if args.collect_proxies and args.discard_files:
+        parser.error("--collect-proxies cannot be combined with discard/stress mode")
 
     try:
         if args.collect_proxies:

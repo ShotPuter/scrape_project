@@ -9,7 +9,7 @@ x-scraper: &scraper
   env_file:
     - path: .env
       required: false
-  environment:
+  environment: &scraper-environment
     # Keep all default output paths on the persistent bind mount.
     STORAGE_BASE_DIR: /app/data
     PDF_STORAGE_DIR: /app/data/pdf
@@ -19,8 +19,15 @@ x-scraper: &scraper
     PROXY_REPORT_PATH: /app/data/proxy-report.json
     PROXY_LIST_PATH: /app/data/iplocate-proxies.csv
     PROXY_STATE_PATH: /app/data/iplocate-proxies.state.json
+    PROXY_CATALOG_CACHE_DIR: /app/data/proxy-sources
+    # The independent collector keeps publishing while downloads are running.
+    PROXY_AUTOCOLLECT: "false"
+    PROXY_MODE: ${PROXY_MODE:-always}
+    PROXY_STARTUP_TIMEOUT_SECONDS: ${PROXY_STARTUP_TIMEOUT_SECONDS:-900}
+    WEBSHARE_API_TOKEN: ${WEBSHARE_API_TOKEN:-}
+    WEBSHARE_PROXY_MODE: ${WEBSHARE_PROXY_MODE:-direct}
   volumes:
-    - ./data:/app/data
+    - ${DATA_DIR:-./data}:/app/data
   read_only: true
   tmpfs:
     - /tmp:rw,noexec,nosuid,size=64m,mode=1777
@@ -28,7 +35,10 @@ x-scraper: &scraper
     - ALL
   security_opt:
     - no-new-privileges:true
-  pids_limit: 128
+  pids_limit: 256
+  mem_limit: ${CONTAINER_MEMORY_LIMIT:-2g}
+  cpus: ${CONTAINER_CPUS:-2}
+  stop_signal: SIGINT
   stop_grace_period: 2m
   logging:
     driver: json-file
@@ -42,3 +52,40 @@ services:
     <<: *scraper
     restart: "no"
     command: []
+    depends_on:
+      proxy-collector:
+        condition: service_started
+
+  proxy-collector:
+    <<: *scraper
+    entrypoint: [python, -m, src.proxy]
+    command: [--sources, "${PROXY_SOURCES:-all}", --watch]
+    restart: unless-stopped
+    environment:
+      <<: *scraper-environment
+      LOG_FILE: /app/data/proxy-collector.log
+
+  # Explicit opt-in: docker compose --profile stress up -d stress
+  stress:
+    <<: *scraper
+    profiles: [stress]
+    restart: "no"
+    depends_on:
+      proxy-collector:
+        condition: service_started
+    environment:
+      <<: *scraper-environment
+      STORAGE_BASE_DIR: /app/data/stress
+      PDF_STORAGE_DIR: /app/data/stress/pdf
+      CSV_EXPORT_PATH: /app/data/stress/publications.csv
+      LOG_FILE: /app/data/stress/scraper.log
+      DOWNLOAD_WORKERS: ${DOWNLOAD_WORKERS:-30}
+    command:
+      - --year
+      - "${STRESS_YEAR:-2022}"
+      - --category
+      - "${STRESS_CATEGORY:-all}"
+      - --stress-minutes
+      - "${STRESS_MINUTES:-480}"
+      - --stress-report
+      - /app/data/stress/stress-report.json

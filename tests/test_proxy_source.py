@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from src.client import proxy_source
+from src.proxy.sources import iplocate as proxy_source
 
 
 class FakeResponse:

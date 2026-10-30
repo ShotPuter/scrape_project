@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 SUPPORTED_PROXY_SCHEMES = frozenset({"http", "https", "socks4", "socks4a", "socks5", "socks5h"})
 DEFAULT_PROXY_SCHEME = "http"
+
+
+def redact_proxy_credentials(text: str) -> str:
+    """Remove URL userinfo from public reports and diagnostics."""
+    return re.sub(r"((?:https?|socks4a?|socks5h?)://)[^\s/@]+@", r"\1***@", text)
 
 
 @dataclass(frozen=True, slots=True)

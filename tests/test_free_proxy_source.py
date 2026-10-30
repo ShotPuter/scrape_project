@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.client import free_proxy_source
+from src.proxy.sources import free_proxy as free_proxy_source
 
 
 class FakeFreeProxyException(Exception):

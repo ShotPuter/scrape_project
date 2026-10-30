@@ -9,7 +9,7 @@ import pytest
 
 from src import cli
 from src.cli import build_parser
-from src.storage.proxy_database import ProxyDatabase, VerifiedProxy
+from src.proxy.repository import ProxyDatabase, VerifiedProxy
 
 
 def test_defaults_run_one_incremental_pass():
@@ -182,7 +182,7 @@ def test_stale_database_starts_bounded_collection_then_falls_back_to_direct(monk
 
     class FakeScraper:
         def __init__(self, **kwargs):
-            assert kwargs["client_config"].proxy.db_path is None
+            assert kwargs["client_config"].proxy.db_path == db_path
             events.append("scraper_open")
 
         async def __aenter__(self):
@@ -239,7 +239,7 @@ def test_collector_is_terminated_when_startup_timeout_expires(monkeypatch, tmp_p
 
     class FakeScraper:
         def __init__(self, **kwargs):
-            assert kwargs["client_config"].proxy.db_path is None
+            assert kwargs["client_config"].proxy.db_path == db_path
 
         async def __aenter__(self):
             return self
@@ -264,9 +264,18 @@ def test_collector_is_terminated_when_startup_timeout_expires(monkeypatch, tmp_p
     assert process.returncode == -15
 
 
-def test_only_category_and_year_options_remain():
+def test_supported_cli_options():
     options = {action.dest for action in build_parser()._actions}
-    assert options == {"help", "version", "year", "category", "collect_proxies"}
+    assert options == {
+        "help",
+        "version",
+        "year",
+        "category",
+        "collect_proxies",
+        "discard_files",
+        "stress_minutes",
+        "stress_report",
+    }
 
 
 def test_collect_command_uses_configured_paths(monkeypatch):

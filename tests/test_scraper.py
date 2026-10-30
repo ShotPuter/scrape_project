@@ -2,9 +2,10 @@
 
 import pytest
 
-from src.client.network import RequestMetrics
 from src.models.publication import PublicationDetail, PublicationSummary
+from src.network.budget import RequestMetrics
 from src.services.scraper import SeprecScraper
+from src.storage.discard_store import DiscardStore
 from src.storage.file_storage import FileStorage
 from src.storage.integrity import read_records
 from src.storage.publication_csv import PublicationCsv
@@ -57,6 +58,30 @@ class FakeSeprecClient:
         if isinstance(value, Exception):
             raise value
         return value
+
+
+@pytest.mark.asyncio
+async def test_discard_downloads_validates_and_does_not_write(tmp_path, detail_pdf_payload, detail_text_payload):
+    client = FakeSeprecClient(
+        {
+            "228340": PublicationDetail.model_validate(detail_pdf_payload),
+            "228345": PublicationDetail.model_validate(detail_text_payload),
+        }
+    )
+    store = DiscardStore()
+    async with SeprecScraper(
+        client=client, store=store, file_storage=FileStorage(tmp_path / "pdf", discard=True)
+    ) as scraper:
+        first = await scraper.run(category="1", max_pages=1)
+        second = await scraper.run(category="1", max_pages=1)
+        assert first["items_scraped"] == 2
+        assert second["items_scraped"] == 0
+        assert store.original == store.generated == 1
+        assert store.byte_count > 0
+        assert not store._records  # full publication text is never retained
+        assert not list(tmp_path.iterdir())
+        store.next_cycle()
+        assert (await scraper.run(category="1", max_pages=1))["items_scraped"] == 2
 
 
 @pytest.mark.asyncio

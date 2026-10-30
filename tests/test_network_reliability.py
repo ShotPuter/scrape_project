@@ -16,9 +16,9 @@ from test_client import local_api
 
 from src.client.base_client import HttpClient
 from src.client.config import ClientConfig, ProxyConfig, RetryConfig, TimeoutConfig
-from src.client.errors import HTTPClientError
-from src.client.network import NetworkBudget, TimeoutPolicy, proxy_id
-from src.client.proxy_pool import ProxyPool, WarmupSpec
+from src.network.budget import NetworkBudget, TimeoutPolicy, proxy_id
+from src.network.errors import HTTPClientError
+from src.proxy.pool import ProxyPool, WarmupSpec
 
 NO_WAIT = RetryConfig(backoff_factor=0.0, jitter_seconds=0.0)
 
@@ -164,7 +164,7 @@ async def test_document_total_is_separate_from_api_timeout():
             )
         ) as client,
     ):
-        assert await client.request("GET", "publicaciones/1") == {"ok": True}
+        assert await client.request("GET", "publicaciones/1", endpoint_kind="detail") == {"ok": True}
         with pytest.raises(HTTPClientError):
             await client.request("POST", "publicaciones")
         assert client.metrics.samples[-1]["timeout_kind"] == "total"
@@ -192,7 +192,7 @@ async def test_read_inactivity_is_identified_separately():
         ) as client,
     ):
         with pytest.raises(HTTPClientError):
-            await client.request("GET", "publicaciones/1")
+            await client.request("GET", "publicaciones/1", endpoint_kind="detail")
         event = client.metrics.samples[-1]
         assert event["timeout_kind"] == "read_inactivity"
         assert event["error_stage"] == "body_read"
@@ -276,10 +276,7 @@ async def test_proxy_credentials_are_not_logged(caplog):
     pool = ProxyPool([], lambda **kw: None)
     pool.add_session(secret_url, failed)
     client = HttpClient(
-        ClientConfig(
-            base_url="https://example.test",
-            retry=RetryConfig(attempts=1, backoff_factor=0.0, jitter_seconds=0.0),
-        )
+        ClientConfig(base_url="https://example.test", retry=RetryConfig(attempts=1, backoff_factor=0.0, jitter_seconds=0.0))
     )
     client._proxy_pool = pool
     with caplog.at_level(logging.DEBUG):
@@ -461,10 +458,7 @@ async def test_cloudflare_challenge_stays_final_without_a_pool():
     direct = AsyncMock()
     direct.request.return_value = FakeResponse(403, headers={"cf-mitigated": "challenge"})
     client = HttpClient(
-        ClientConfig(
-            base_url="https://example.test",
-            retry=RetryConfig(attempts=2, backoff_factor=0.0, jitter_seconds=0.0),
-        )
+        ClientConfig(base_url="https://example.test", retry=RetryConfig(attempts=2, backoff_factor=0.0, jitter_seconds=0.0))
     )
     client._session = direct
     with pytest.raises(HTTPClientError) as exc_info:

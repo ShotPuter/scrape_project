@@ -12,8 +12,9 @@ import pytest
 
 from src.client.base_client import HttpClient
 from src.client.config import ClientConfig, ProxyConfig
-from src.client.proxy_pool import ProxyPool, WarmupSpec, dead_proxy_path, load_proxies
-from src.client.session_factory import SessionFactory
+from src.client.readiness import is_ready_response
+from src.network.session_factory import SessionFactory
+from src.proxy.pool import ProxyPool, WarmupSpec, dead_proxy_path, load_proxies
 
 
 def test_text_candidates_respect_validation_deduplication_and_dead_list(tmp_path):
@@ -81,7 +82,7 @@ async def test_only_valid_api_responses_enter_rotation():
         return session
 
     pool = ProxyPool(["a", "b", "c", "d"], factory)
-    warmup_task = pool.start_warmup(WarmupSpec("https://example.test/catalog", concurrency=1))
+    warmup_task = pool.start_warmup(WarmupSpec("https://example.test/catalog", validator=is_ready_response, concurrency=1))
     await warmup_task
     await pool.wait_until_ready()
     assert pool.checked == 4
@@ -102,7 +103,7 @@ async def test_empty_pool_fails_without_direct_fallback():
     session = AsyncMock()
     session.post.return_value = Response(200, {"html": "challenge"})
     pool = ProxyPool(["a"], lambda **kwargs: session)
-    warmup_task = pool.start_warmup(WarmupSpec("https://example.test/catalog"))
+    warmup_task = pool.start_warmup(WarmupSpec("https://example.test/catalog", validator=is_ready_response))
     await warmup_task
     with pytest.raises(RuntimeError, match="None of 1"):
         await pool.wait_until_ready()
@@ -124,7 +125,7 @@ async def test_one_broken_proxy_is_cooled_down_without_permanent_exclusion(tmp_p
 
     dead_path = tmp_path / "proxies.dead.json"
     pool = ProxyPool(["broken", "working"], factory, dead_path=dead_path)
-    warmup_task = pool.start_warmup(WarmupSpec("https://example.test/catalog", concurrency=1))
+    warmup_task = pool.start_warmup(WarmupSpec("https://example.test/catalog", validator=is_ready_response, concurrency=1))
     await warmup_task
     await pool.wait_until_ready()
 
@@ -135,20 +136,18 @@ async def test_one_broken_proxy_is_cooled_down_without_permanent_exclusion(tmp_p
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("headers", "expected_delay"), [({}, 1), ({"Retry-After": "2.5"}, 2.5), ({"Retry-After": "invalid"}, 1)]
-)
-async def test_readiness_429_pauses_requests_and_closes_the_failed_session(headers, expected_delay):
+@pytest.mark.parametrize("headers", [{}, {"Retry-After": "2.5"}, {"Retry-After": "invalid"}])
+async def test_readiness_429_pauses_requests_and_closes_the_failed_session(headers):
     session = AsyncMock()
     session.post.return_value = Response(429, {}, headers)
     pool = ProxyPool(["http://proxy.test:80"], lambda **kwargs: session)
     pool.budget.pause = Mock()
     try:
-        warmup_task = pool.start_warmup(WarmupSpec("https://example.test/catalog"))
+        warmup_task = pool.start_warmup(WarmupSpec("https://example.test/catalog", validator=is_ready_response))
         await warmup_task
         with pytest.raises(RuntimeError, match="None of 1"):
             await pool.wait_until_ready()
-        pool.budget.pause.assert_called_once_with(expected_delay)
+        pool.budget.pause.assert_called_once_with(150)
         session.close.assert_awaited_once()
         assert pool.metrics.samples[-1]["error_class"] == "HTTP429"
         assert pool.budget.active == 0
@@ -201,7 +200,7 @@ async def test_network_failure_removes_proxy_and_retry_uses_another():
 async def test_exhausted_proxy_pool_does_not_fall_back_to_direct_connection():
     from curl_cffi.requests.exceptions import ConnectionError
 
-    from src.client.errors import HTTPClientError
+    from src.network.errors import HTTPClientError
 
     session = AsyncMock()
     session.request.side_effect = ConnectionError("failed")

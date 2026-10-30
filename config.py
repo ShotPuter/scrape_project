@@ -58,6 +58,7 @@ class Settings:
 
     # Networking, concurrency & rate limiting
     max_concurrent_requests: int = 15
+    download_workers: int = 0  # 0 uses the network concurrency; workers also cover retry waits and disk I/O.
     page_size: int = 50
     queue_high_watermark: int = 1000
     page_delay_seconds: float = 0.5
@@ -77,12 +78,22 @@ class Settings:
     retry_attempts: int = 3
     retry_backoff_factor: float = 1.5
     retry_jitter_seconds: float = 0.3
+    rate_limit_pause_seconds: float = 150
     browser_profile: str = "chrome"
     http_transport: str = "aiohttp"
     proxy_file: str = ""
     proxy_source_url: str = "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/all-proxies.txt"
     proxy_source_refresh_minutes: float = 30
     proxy_source_timeout: float = 30
+    proxy_sources: str = ""
+    webshare_api_token: str = field(default="", repr=False)
+    webshare_proxy_mode: str = "direct"
+    proxy_paid_file: Path = field(default_factory=lambda: BASE_DIR / "data" / "paid-proxies.txt")
+    proxy_source_max_response_bytes: int = 32 * 1024 * 1024
+    proxy_source_download_concurrency: int = 3
+    proxy_source_max_records: int = 10_000
+    proxy_catalog_cache_dir: Path = field(default_factory=lambda: BASE_DIR / "data" / "proxy-sources")
+    proxy_source_cache_max_age_hours: float = 24
     proxy_sample_size: int = 0
     proxy_check_concurrency: int = 50
     proxy_check_timeout: float = 10
@@ -101,7 +112,8 @@ class Settings:
     proxy_stage2_concurrency: int = 20
     proxy_stage2_timeout: float = 30
     proxy_stage2_connect_timeout: float = 10
-    proxy_stage2_attempts: int = 3
+    proxy_stage2_attempts: int = 1
+    proxy_user_agent_limit: int = 3
     proxy_stage2_retry_delay: float = 0.5
     proxy_stage2_max_retry_delay: float = 5
     proxy_stage2_requests_per_second: float = 5
@@ -116,6 +128,9 @@ class Settings:
     proxy_warmup: bool = True
     # Verified records older than this are ignored; stale proxies are worse than none.
     proxy_db_max_age_hours: float = 24
+    proxy_db_refresh_seconds: float = 30
+    proxy_verified_reuse_seconds: float = 300
+    proxy_autocollect: bool = True
     # Startup must stay bounded even when every candidate is slow or the collector hangs.
     proxy_warmup_timeout_seconds: float = 90
     proxy_startup_timeout_seconds: float = 180
@@ -185,6 +200,7 @@ class Settings:
 
     def _validate_core(self) -> None:
         self._require(self.max_concurrent_requests >= 1, "MAX_CONCURRENT_REQUESTS must be >= 1")
+        self._require(self.download_workers >= 0, "DOWNLOAD_WORKERS must be >= 0")
         self._require(self.page_size >= 10, "PAGE_SIZE must be >= 10 (SEPREC API minimum)")
         self._require(self.queue_high_watermark >= 1, "QUEUE_HIGH_WATERMARK must be >= 1")
         timeouts = (
@@ -206,6 +222,7 @@ class Settings:
         self._require(self.proxy_acquire_timeout > 0, "PROXY_ACQUIRE_TIMEOUT must be positive")
         self._require(self.metrics_interval_seconds > 0, "METRICS_INTERVAL_SECONDS must be positive")
         self._require(self.retry_attempts >= 1, "RETRY_ATTEMPTS must be >= 1")
+        self._require(self.rate_limit_pause_seconds > 0, "RATE_LIMIT_PAUSE_SECONDS must be positive")
         self._require(self.page_delay_seconds >= 0, "PAGE_DELAY_SECONDS must be >= 0")
         self._require(
             self.http_transport in {"aiohttp", "curl_cffi", "auto"},
@@ -213,6 +230,17 @@ class Settings:
         )
 
     def _validate_proxy(self) -> None:
+        self._require(self.webshare_proxy_mode in {"direct", "backbone"}, "WEBSHARE_PROXY_MODE must be direct or backbone")
+        if self.proxy_sources.strip():
+            from src.proxy.sources.registry import resolve_sources
+
+            resolve_sources(self.proxy_sources)
+        self._require(self.proxy_source_max_response_bytes > 0, "PROXY_SOURCE_MAX_RESPONSE_BYTES must be positive")
+        self._require(self.proxy_source_download_concurrency >= 1, "PROXY_SOURCE_DOWNLOAD_CONCURRENCY must be >= 1")
+        self._require(self.proxy_source_max_records >= 1, "PROXY_SOURCE_MAX_RECORDS must be >= 1")
+        self._require(self.proxy_source_cache_max_age_hours >= 0, "PROXY_SOURCE_CACHE_MAX_AGE_HOURS must be >= 0")
+        self._require(self.proxy_db_refresh_seconds >= 0, "PROXY_DB_REFRESH_SECONDS must be >= 0")
+        self._require(self.proxy_verified_reuse_seconds >= 0, "PROXY_VERIFIED_REUSE_SECONDS must be >= 0")
         self._require(self.proxy_source_refresh_minutes >= 0, "PROXY_SOURCE_REFRESH_MINUTES must be >= 0")
         self._require(self.proxy_source_timeout > 0, "PROXY_SOURCE_TIMEOUT must be > 0")
         self._require(self.proxy_sample_size >= 0, "PROXY_SAMPLE_SIZE must be >= 0 (0 = all)")
@@ -243,6 +271,7 @@ class Settings:
         )
 
     def _validate_stage2(self) -> None:
+        self._require(1 <= self.proxy_user_agent_limit <= 10, "PROXY_USER_AGENT_LIMIT must be between 1 and 10")
         self._require(
             self.proxy_stage2_concurrency >= 1
             and self.proxy_stage2_timeout > 0

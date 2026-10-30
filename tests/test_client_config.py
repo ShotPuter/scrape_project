@@ -4,8 +4,8 @@ import pytest
 
 from config import BASE_DIR, Settings
 from src.client.config import ClientConfig, ProxyConfig, RetryConfig, TimeoutConfig, client_config_from_settings
-from src.client.network import TimeoutPolicy
 from src.client.seprec_client import SeprecClient
+from src.network.budget import TimeoutPolicy
 
 
 def test_settings_from_env_coerces_types_and_resolves_paths(monkeypatch, tmp_path):
@@ -88,3 +88,20 @@ def test_proxy_config_rejects_unbounded_warmup():
         ProxyConfig(warmup_timeout_seconds=0)
     with pytest.raises(ValueError):
         ProxyConfig(db_max_age_hours=-1)
+
+
+def test_proxy_source_selection_and_refresh_settings(monkeypatch):
+    monkeypatch.setenv("PROXY_SOURCES", "monosans,relayglass")
+    monkeypatch.setenv("PROXY_DB_REFRESH_SECONDS", "12.5")
+    monkeypatch.setenv("PROXY_AUTOCOLLECT", "false")
+    settings = Settings.from_env()
+    assert settings.proxy_sources == "monosans,relayglass"
+    assert settings.proxy_db_refresh_seconds == 12.5
+    assert not settings.proxy_autocollect
+    assert SeprecClient.config_from_settings(settings).proxy.db_refresh_seconds == 12.5
+    with pytest.raises(ValueError):
+        Settings(proxy_sources="unknown")
+    with pytest.raises(ValueError):
+        ProxyConfig(db_refresh_seconds=float("nan"))
+    with pytest.raises(ValueError):
+        Settings(proxy_source_download_concurrency=0)

@@ -12,9 +12,10 @@ from pydantic import TypeAdapter, ValidationError
 from config import BASE_DIR, Settings, settings
 from src.client.base_client import HttpClient
 from src.client.config import ClientConfig, client_config_from_settings
-from src.client.errors import HTTPClientError
-from src.client.network import NetworkBudget, RequestMetrics
+from src.client.readiness import is_search_ready_response
 from src.models.publication import CatalogItem, PublicationDetail, PublicationSearchFilter, PublicationSummary
+from src.network.budget import NetworkBudget, RequestMetrics
+from src.network.errors import HTTPClientError
 from src.utils.helpers import SeprecAPIError, SeprecRateLimitError
 from src.utils.logger import setup_logger
 
@@ -51,8 +52,9 @@ class SeprecClient:
         """Build the site-specific client config from application settings."""
         config = client_config_from_settings(
             app_settings or settings,
-            proxy_check_path=CATALOGS_ENDPOINT,
-            proxy_check_payload=CATALOGS_PAYLOAD,
+            proxy_check_path=PUBLICATIONS_SEARCH_ENDPOINT,
+            proxy_check_payload=PublicationSearchFilter(page_size=10, category="1").to_api_payload(),
+            proxy_check_validator=is_search_ready_response,
             project_dir=BASE_DIR,
         )
         if proxy_db_path is None:
@@ -135,13 +137,15 @@ class SeprecClient:
     async def get_publication_detail(self, publication_id: str) -> PublicationDetail:
         """Fetch complete publication content, metadata, and attached documents."""
         endpoint_path = f"publicaciones/{publication_id}"
-        response_payload = await self._request_data("GET", endpoint_path)
+        response_payload = await self._request_data("GET", endpoint_path, endpoint_kind="detail")
         return self._validate_response(DETAIL_ADAPTER, response_payload, endpoint_path)
 
-    async def _request_data(self, method: str, path: str, payload: dict[str, Any] | None = None) -> Any:
+    async def _request_data(
+        self, method: str, path: str, payload: dict[str, Any] | None = None, *, endpoint_kind: str = "api"
+    ) -> Any:
         """Execute HTTP request, unwrap 'datos', and verify business completion flag."""
         try:
-            response_json = await self._client.request(method, path, payload)
+            response_json = await self._client.request(method, path, payload, endpoint_kind=endpoint_kind)
         except HTTPClientError as client_error:
             if client_error.status_code == RATE_LIMIT_STATUS_CODE:
                 raise SeprecRateLimitError(str(client_error), status_code=client_error.status_code) from client_error

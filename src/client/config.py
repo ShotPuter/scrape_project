@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import random
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from src.client.network import TimeoutPolicy
+from src.network.budget import TimeoutPolicy
+from src.proxy.config import ProxyConfig
+from src.proxy.probes import is_success_response
 from src.utils.http import parse_retry_after
 
 MAX_RETRY_DELAY_SECONDS = 60.0
 TRANSPORT_CHOICES = frozenset({"aiohttp", "curl_cffi", "auto"})
-PROXY_MODES = frozenset({"direct", "fallback", "always", "pool"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,57 +55,6 @@ class TimeoutConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class ProxyConfig:
-    file: Path | None = None
-    db_path: Path | None = None
-    mode: str = "pool"
-    sample_size: int = 0
-    check_concurrency: int = 5
-    check_timeout: float = 10
-    min_ready: int = 20
-    replenish_threshold: int = 10
-    failure_cooldown_seconds: float = 120
-    max_failures: int = 3
-    dead_ttl_hours: float = 1
-    db_max_age_hours: float = 24
-    warmup_timeout_seconds: float = 90
-    check_path: str = ""
-    check_payload: Mapping[str, Any] = field(default_factory=dict)
-    warmup: bool = True
-    per_ip_limit: int = 1
-    probe_concurrency: int = 2
-    acquire_timeout: float = 150
-    direct_block_cooldown_seconds: float = 300
-    mix_share: float = 0
-
-    def __post_init__(self) -> None:
-        mode = self.mode.lower()
-        if mode not in PROXY_MODES:
-            raise ValueError("proxy_mode must be 'direct', 'fallback', 'always' or 'pool'")
-        object.__setattr__(self, "mode", mode)
-        if self.direct_block_cooldown_seconds <= 0:
-            raise ValueError("direct_block_cooldown_seconds must be positive")
-        if not 0 <= self.mix_share <= 1:
-            raise ValueError("proxy_mix_share must be between 0 and 1")
-        if self.sample_size < 0 or self.check_concurrency < 1 or self.check_timeout <= 0:
-            raise ValueError("Proxy sample size must be >= 0 (0 = all); check limits must be positive")
-        if self.min_ready < 1 or self.max_failures < 1:
-            raise ValueError("Proxy readiness and failure limits must be positive")
-        if self.replenish_threshold < 0 or self.failure_cooldown_seconds < 0:
-            raise ValueError("Proxy replenish limits must be non-negative")
-        if self.dead_ttl_hours < 0:
-            raise ValueError("Proxy dead TTL must be non-negative")
-        if self.db_max_age_hours < 0:
-            raise ValueError("Proxy database max age must be non-negative")
-        if self.warmup_timeout_seconds <= 0:
-            raise ValueError("Proxy warmup timeout must be positive")
-        if (self.file or self.db_path) and not self.check_path:
-            raise ValueError("Proxy mode requires a readiness endpoint")
-        if self.per_ip_limit < 1 or self.probe_concurrency < 1 or self.acquire_timeout <= 0:
-            raise ValueError("Proxy concurrency limits must be positive")
-
-
-@dataclass(frozen=True, slots=True)
 class ClientConfig:
     base_url: str = ""
     headers: Mapping[str, str] = field(default_factory=dict)
@@ -116,6 +66,7 @@ class ClientConfig:
     cookies_file: Path | None = None
     transport: str = "aiohttp"
     requests_per_second: float = 0
+    rate_limit_pause_seconds: float = 150
 
     def __post_init__(self) -> None:
         base_url = self.base_url.strip().rstrip("/")
@@ -130,10 +81,17 @@ class ClientConfig:
             raise ValueError("connection limit must be >= 1")
         if self.requests_per_second < 0:
             raise ValueError("HTTP_REQUESTS_PER_SECOND must be >= 0")
+        if self.rate_limit_pause_seconds <= 0:
+            raise ValueError("rate_limit_pause_seconds must be positive")
 
 
 def client_config_from_settings(
-    app_settings: Any, *, proxy_check_path: str = "", proxy_check_payload: Mapping[str, Any] | None = None, project_dir: Path
+    app_settings: Any,
+    *,
+    proxy_check_path: str = "",
+    proxy_check_payload: Mapping[str, Any] | None = None,
+    project_dir: Path,
+    proxy_check_validator: Callable[[Any], bool] = is_success_response,
 ) -> ClientConfig:
     """Build a ``ClientConfig`` from application settings and the site readiness probe."""
 
@@ -169,8 +127,11 @@ def client_config_from_settings(
             max_failures=app_settings.proxy_max_failures,
             dead_ttl_hours=app_settings.proxy_dead_ttl_hours,
             db_max_age_hours=app_settings.proxy_db_max_age_hours,
+            db_refresh_seconds=app_settings.proxy_db_refresh_seconds,
+            verified_reuse_seconds=app_settings.proxy_verified_reuse_seconds,
             warmup_timeout_seconds=app_settings.proxy_warmup_timeout_seconds,
             check_path=proxy_check_path,
+            check_validator=proxy_check_validator,
             check_payload=dict(proxy_check_payload or {}),
             warmup=app_settings.proxy_warmup,
             per_ip_limit=app_settings.proxy_per_ip_limit,
@@ -184,4 +145,8 @@ def client_config_from_settings(
         cookies_file=cookie_file,
         transport=app_settings.http_transport,
         requests_per_second=app_settings.http_requests_per_second,
+        rate_limit_pause_seconds=app_settings.rate_limit_pause_seconds,
     )
+
+
+__all__ = ["ClientConfig", "ProxyConfig", "RetryConfig", "TimeoutConfig", "client_config_from_settings"]

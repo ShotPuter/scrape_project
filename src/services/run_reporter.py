@@ -73,10 +73,9 @@ class RunReporter:
             "items_failed": counters.items_failed,
             "http_requests": self.client.requests_made - http_requests_before,
             "http_retries": self.client.retries_made - http_retries_before,
-            "http_metrics": {
-                key: count - baseline_counts.get(key, 0) for key, count in self.client.metrics.counts.items()
-            },
-            "csv_path": str(self.store.path),
+            "http_metrics": {key: count - baseline_counts.get(key, 0) for key, count in self.client.metrics.counts.items()},
+            "csv_path": str(self.store.path) if getattr(self.store, "persistent", True) else None,
+            "storage_mode": "files" if getattr(self.store, "persistent", True) else "discard",
             "storage_stats": storage_stats,
             "error": counters.fatal_error,
         }
