@@ -6,12 +6,14 @@ import asyncio
 import math
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from typing import Protocol
 
 from config import settings
 from src.models.publication import PublicationRecord, PublicationSearchFilter, PublicationSummary
 from src.network.budget import work_context
+from src.utils.atomic import atomic_write_json
 from src.utils.logger import setup_logger
 
 logger = setup_logger("scrape_pipeline")
@@ -43,6 +45,7 @@ class RunCounters:
     consecutive_skipped_pages: int = 0
     scheduled_count: int = 0
     fatal_error: str | None = None
+    total_available: int | None = None
 
 
 @dataclass(frozen=True)
@@ -99,6 +102,7 @@ class ScrapePipeline:
         """
         self._pipeline_start_time = time.monotonic()
         counters = RunCounters()
+        await self._write_progress(counters, "RUNNING")
         queue: asyncio.Queue[PublicationSummary | None] = asyncio.Queue(maxsize=settings.queue_high_watermark)
         scheduled_identifiers: set[str] = set()
 
@@ -107,7 +111,22 @@ class ScrapePipeline:
             for _ in range(self.max_concurrency):
                 task_group.create_task(self._consume_queue(queue, counters))
 
+        await self._write_progress(counters, "FAILED" if counters.fatal_error else "COMPLETED")
         return counters
+
+    async def _write_progress(self, counters: RunCounters, status: str) -> None:
+        payload = {
+            **asdict(counters), "status": status,
+            "run_id": getattr(self.client, "run_id", None),
+            "updated_at": datetime.now(UTC).isoformat(),
+            "category": self.request.category or "ALL",
+            "remaining_discovered": max(0, counters.scheduled_count - counters.items_scraped - counters.items_failed),
+            "http_metrics": dict(getattr(getattr(self.client, "metrics", None), "counts", {})),
+        }
+        try:
+            await asyncio.to_thread(atomic_write_json, settings.log_file.parent / "scraper-status.json", payload)
+        except OSError:
+            logger.exception("Could not persist scraper progress")
 
     async def _produce_pages(
         self, queue: asyncio.Queue[PublicationSummary | None], scheduled_identifiers: set[str], counters: RunCounters
@@ -129,6 +148,8 @@ class ScrapePipeline:
                     end_date=self.request.end_date,
                 )
                 total_count, summaries = await self.client.search_publications(search_filter)
+                counters.total_available = total_count
+                await self._write_progress(counters, "RUNNING")
                 if not summaries:
                     break
                 counters.pages_processed += 1
@@ -206,6 +227,7 @@ class ScrapePipeline:
                     counters.file_bytes += record.file_size_bytes or 0
                 completed_count = counters.items_scraped + counters.items_failed
                 if completed_count % PROGRESS_NOTIFICATION_INTERVAL == 0:
+                    await self._write_progress(counters, "RUNNING")
                     elapsed_minutes = max(0.01, (time.monotonic() - self._pipeline_start_time) / 60.0)
                     rate_per_minute = round(counters.items_scraped / elapsed_minutes, 1)
                     logger.info(

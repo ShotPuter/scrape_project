@@ -81,6 +81,8 @@ class CollectorConfig:
     proxy_sources: str = ""
     webshare_api_token: str = field(default="", repr=False)
     webshare_proxy_mode: str = "direct"
+    webshare_free_fallback_threshold: int = 10
+    proxy_db_max_age_hours: float = 24
     proxy_paid_file: Path = field(default_factory=lambda: Path("data") / "paid-proxies.txt")
     proxy_source_max_response_bytes: int = 32 * 1024 * 1024
     proxy_source_download_concurrency: int = 3

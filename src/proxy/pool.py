@@ -134,12 +134,17 @@ class ProxyPool:
         metrics: RequestMetrics | None = None,
         verified_reuse_seconds: float = 0,
         rate_limit_pause_seconds: float = 150,
+        health_path: Path | None = None,
     ):
         self.proxies = _dedupe_endpoints(proxies)
         self._verified_at = {endpoint.url: endpoint.checked_at for endpoint in self.proxies}
         self.session_factory = session_factory
         self.verified_reuse_seconds = verified_reuse_seconds
         self.rate_limit_pause_seconds = rate_limit_pause_seconds
+        self.health_path = health_path
+        self._health_task: asyncio.Task[None] | None = None
+        self._health_dirty = False
+        self._last_health_write = 0.0
         self._recent_rate_limits: dict[str, float] = {}
         self.sessions: list[ProxySession] = []
         self.session_proxies: dict[ProxySession, str] = {}
@@ -222,6 +227,33 @@ class ProxyPool:
         self.reuse_verified(endpoints)
         self._refresh_pending = True
         self.ensure_capacity()
+        self._publish_health()
+
+    def _publish_health(self) -> None:
+        if self.health_path is None:
+            return
+        self._health_dirty = True
+        if self._health_task is None or self._health_task.done():
+            self._health_task = asyncio.create_task(self._persist_health())
+
+    async def _persist_health(self) -> None:
+        path = self.health_path
+        if path is None:
+            return
+        while self._health_dirty:
+            self._health_dirty = False
+            payload = {
+                "updated_at": datetime.now(UTC).isoformat(),
+                "status": "stopped" if self._closed else "running",
+                "webshare_usable": len(
+                    {self.session_proxies[s] for s in self.sessions if self.session_sources.get(s) == "webshare"}
+                ),
+            }
+            try:
+                await asyncio.to_thread(atomic_write_json, path, payload)
+            except OSError:
+                logger.warning("Could not publish proxy pool health")
+            self._last_health_write = time.monotonic()
 
     def reuse_verified(self, proxies: Iterable[str | ProxyEndpoint]) -> int:
         """Create sessions from recent collector receipts without another network probe."""
@@ -334,6 +366,8 @@ class ProxyPool:
         return self._host_in_flight.get(self._session_host(session), 0)
 
     def _choose_available_session(self, avoid: str | None) -> ProxySession | None:
+        if time.monotonic() - self._last_health_write >= 5:
+            self._publish_health()
         primary = [session for session in self.sessions if self.session_sources.get(session) in {"webshare", "paid"}]
         # Busy private proxies keep their priority; public proxies are a failure reserve.
         available = [session for session in (primary or self.sessions) if self._session_load(session) < self.per_ip_limit]
@@ -549,6 +583,7 @@ class ProxyPool:
         self.session_latency[session] = endpoint.latency_ms
         self.session_sources[session] = endpoint.source
         self._active.add(proxy_url)
+        self._publish_health()
         self._changed.set()
         self._cooldown_until.pop(proxy_url, None)
         if self._dead.pop(proxy_url, None) is not None:
@@ -645,6 +680,7 @@ class ProxyPool:
         """Remove from rotation, but keep leased sessions alive until released."""
 
         self.sessions.remove(session)
+        self._publish_health()
         self.retired.append(session)
         proxy = self.session_proxies.get(session)
         if proxy is not None:
@@ -740,6 +776,11 @@ class ProxyPool:
                 await asyncio.gather(*tasks, return_exceptions=True)
             self._warmup_task = None
             self._replenish_task = None
+
+            self._publish_health()
+            if self._health_task is not None:
+                await asyncio.gather(self._health_task, return_exceptions=True)
+                self._health_task = None
 
             self._flush_dead()
             if self._persist_task is not None:

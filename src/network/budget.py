@@ -104,6 +104,8 @@ class RequestMetrics:
             self.counts[event["error_class"]] += 1
         self.counts["response_bytes"] += event.get("response_bytes", 0)
         self.samples.append(dict(event))
+        if not event.get("ok"):
+            logger.warning("http_error %s", json.dumps(event, sort_keys=True))
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("http_attempt %s", json.dumps(event, sort_keys=True))
 

@@ -22,6 +22,7 @@ from src.network.budget import NetworkBudget, RequestMetrics, TimeoutPolicy, att
 from src.network.errors import HTTPClientError
 from src.network.session_factory import SessionFactory
 from src.network.transport import Response, Transport, transport_for
+from src.proxy.health import pool_health_path
 from src.proxy.pool import (
     ProxyEndpoint,
     ProxyPool,
@@ -233,6 +234,7 @@ class HttpClient:
             metrics=self.metrics,
             verified_reuse_seconds=self.config.proxy.verified_reuse_seconds if self.config.proxy.db_path else 0,
             rate_limit_pause_seconds=self.config.rate_limit_pause_seconds,
+            health_path=pool_health_path(self.config.proxy.db_path) if self.config.proxy.db_path else None,
         )
         if self.config.proxy.warmup and self.config.proxy.db_path is not None:
             reused = pool.reuse_verified(endpoints)
@@ -433,6 +435,14 @@ class HttpClient:
 
         async with self._lease(route) as session:
             transport = transport_for(session)
+            from src.utils.proxy_url import redact_proxy_credentials
+
+            proxy_url = getattr(self._proxy_pool, "session_proxies", {}).get(session)
+            mark("proxy_address", redact_proxy_credentials(proxy_url) if proxy_url else "direct")
+            mark(
+                "proxy_source",
+                getattr(self._proxy_pool, "session_sources", {}).get(session, "unknown") if proxy_url else "direct",
+            )
             event = attempt_context.get() or {}
             use_direct = event.get("route", route.value) == Route.DIRECT.value
             self.metrics.counts["direct_attempts" if use_direct else "proxy_attempts"] += 1
@@ -592,6 +602,8 @@ class HttpClient:
                 "request_id": request_id,
                 "attempt": attempt,
                 "endpoint_kind": kind,
+                "method": method,
+                "path": path.split("?", 1)[0],
                 "publication_id": path_parts[-1] if kind == "detail" else None,
                 "previous_proxy_id": previous_proxy,
             }

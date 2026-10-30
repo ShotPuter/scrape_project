@@ -10,6 +10,11 @@ from src.proxy.repository import ProxyDatabase, VerifiedProxy
 from src.services import proxy_bootstrap
 
 
+@pytest.fixture(autouse=True)
+def disable_local_webshare_token(monkeypatch):
+    monkeypatch.setattr(proxy_bootstrap.settings, "webshare_api_token", "")
+
+
 class FakeProcess:
     pid = 1234
 

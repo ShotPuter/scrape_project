@@ -25,6 +25,7 @@ from pathlib import Path
 from src.network.budget import NetworkBudget
 from src.proxy.checker import Stage1Result, Stage2Result, compatible_transports, verify_stage1, verify_stage2
 from src.proxy.config import CollectorConfig
+from src.proxy.health import read_webshare_health
 from src.proxy.pool import dead_proxy_path
 from src.proxy.probes import TargetProbe
 from src.proxy.repository import ProxyDatabase, VerifiedProxy
@@ -46,12 +47,13 @@ from src.proxy.user_agents import MAX_USER_AGENT_LIMIT, USER_AGENT_RETRY_ERRORS,
 from src.utils.atomic import atomic_write_json
 from src.utils.proxy_url import parse_proxy_url, proxy_host, proxy_url_from_row, redact_proxy_credentials
 
-PROGRESS_EVERY = 25
+PROGRESS_EVERY = 100
 PROVIDER_CHOICES = ("public", "all", *SOURCE_REGISTRY, "free-proxy", "paid", "webshare")
 
 
 def _write_status(text: str) -> None:
-    sys.stdout.write(f"{text}\n")
+    stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S%z")
+    sys.stdout.write(f"{stamp} | {text}\n")
     sys.stdout.flush()
 
 
@@ -237,7 +239,99 @@ async def _load_candidate_sources(
     return catalog
 
 
-async def collect(
+async def _existing_webshare_report(config: CollectorConfig, db_path: Path) -> dict:
+    async with ProxyDatabase(db_path) as database:
+        existing = await database.list_active(max_age_hours=config.proxy_db_max_age_hours or None)
+    count = sum(record.source == "webshare" for record in existing)
+    return {"provider": "webshare", "verified_proxies": count, "verified_combinations": count, "database_replaced": False}
+
+
+async def collect(*, config: CollectorConfig, target: TargetProbe, csv_path: Path, db_path: Path, **kwargs) -> dict:
+    """Finish Webshare verification/publication before considering free sources."""
+    if not config.webshare_api_token.strip():
+        return await _collect(config=config, target=target, csv_path=csv_path, db_path=db_path, **kwargs)
+    requested = kwargs.get("sources")
+    provider = kwargs.get("provider", "public")
+    names = resolve_sources(
+        requested if requested is not None else ((config.proxy_sources if provider == "public" else "") or provider)
+    )
+    reserves = [name for name in names if name != "webshare"]
+    fallback_only = kwargs.pop("_fallback_only", False)
+    if fallback_only:
+        report = await _existing_webshare_report(config, db_path)
+    else:
+        primary_kwargs = {
+            **kwargs, "sources": "webshare", "provider": "webshare", "_preserve_sources": tuple(reserves),
+        }
+        try:
+            report = await _collect(config=config, target=target, csv_path=csv_path, db_path=db_path, **primary_kwargs)
+        except (ValueError, OSError) as exc:
+            _write_status(f"Webshare scan unavailable ({type(exc).__name__}); checking existing pool before fallback")
+            report = await _existing_webshare_report(config, db_path)
+            report["catalog_errors"] = {"webshare": type(exc).__name__}
+        else:
+            if not report["verified_proxies"]:
+                async with ProxyDatabase(db_path) as database:
+                    existing = await database.list_active()
+                    await database.replace_all([record for record in existing if record.source != "webshare"])
+    verified = report["verified_proxies"]
+    live = await asyncio.to_thread(read_webshare_health, db_path)
+    usable = min(verified, live) if live is not None else verified
+    threshold = config.webshare_free_fallback_threshold
+    report.update(
+        webshare_verified_proxies=verified,
+        webshare_usable_proxies=usable,
+        webshare_free_fallback_threshold=threshold,
+        free_sources_enabled=False,
+    )
+    if usable <= threshold and reserves:
+        _write_status(f"Webshare usable={usable} <= {threshold}; starting free proxy collection after Webshare publication")
+        report["free_sources_enabled"] = True
+        if kwargs.get("report_path") is not None:
+            atomic_write_json(kwargs["report_path"], report, indent=2, sort_keys=True)
+        reserve_kwargs = {
+            **kwargs, "sources": ",".join(reserves), "_preserve_sources": ("webshare",),
+            "_verified_target": 2000,
+            "limit": 0, "max_per_source": 0,
+        }
+        try:
+            reserve_report = await _collect(
+                config=replace(config, webshare_api_token=""),
+                target=target,
+                csv_path=csv_path,
+                db_path=db_path,
+                **reserve_kwargs,
+            )
+        except (ValueError, OSError) as exc:
+            reserve_report = dict(report)
+            reserve_report["free_source_error"] = type(exc).__name__
+            _write_status(f"Free proxy collection unavailable ({type(exc).__name__}); preserving Webshare pool")
+        for key in ("webshare_verified_proxies", "webshare_usable_proxies", "webshare_free_fallback_threshold"):
+            reserve_report[key] = report[key]
+        reserve_report["free_sources_enabled"] = True
+        report = reserve_report
+        # The reserve is durable before we spend requests rechecking Webshare.
+        try:
+            refreshed = await _collect(
+                config=config, target=target, csv_path=csv_path, db_path=db_path,
+                **{**kwargs, "sources": "webshare", "provider": "webshare", "_preserve_sources": tuple(reserves)},
+            )
+            report["webshare_recheck"] = refreshed
+            report["webshare_verified_proxies"] = refreshed["verified_proxies"]
+            if not refreshed["verified_proxies"]:
+                async with ProxyDatabase(db_path) as database:
+                    existing = await database.list_active()
+                    await database.replace_all([record for record in existing if record.source != "webshare"])
+        except (ValueError, OSError) as exc:
+            report["webshare_recheck_error"] = type(exc).__name__
+    else:
+        _write_status(f"Webshare usable={usable}; free proxy collection is disabled (threshold={threshold})")
+    if kwargs.get("report_path") is not None:
+        atomic_write_json(kwargs["report_path"], report, indent=2, sort_keys=True)
+    return report
+
+
+async def _collect(
     *,
     config: CollectorConfig,
     target: TargetProbe,
@@ -269,6 +363,8 @@ async def collect(
     report_path: Path | None = None,
     publish_after: int | None = None,
     user_agent_limit: int | None = None,
+    _preserve_sources: tuple[str, ...] = (),
+    _verified_target: int | None = None,
 ) -> dict:
     if user_agent_limit is not None:
         config = replace(config, proxy_user_agent_limit=user_agent_limit)
@@ -292,6 +388,8 @@ async def collect(
     catalog = await _load_candidate_sources(providers, csv_path, source_url, config)
     raw_candidates = catalog.candidates
     if not raw_candidates:
+        if providers == ["webshare"] and not catalog.errors:
+            return {"provider": "webshare", "verified_proxies": 0, "verified_combinations": 0, "database_replaced": False}
         raise ValueError("No proxy candidates found")
 
     max_total = config.proxy_max_candidates if limit is None else limit
@@ -316,6 +414,7 @@ async def collect(
 
     stage1_successes: list[Stage1Success] = []
     stage1_failures: list[Stage1Failure] = []
+    target_reached = asyncio.Event()
     stage2_slots = stage2_concurrency or config.proxy_stage2_concurrency
     queue: asyncio.Queue[Stage1Success | None] = asyncio.Queue(maxsize=stage2_slots * 2)
 
@@ -330,6 +429,7 @@ async def collect(
             timeout=stage1_timeout,
             connect_timeout=stage1_connect_timeout,
             on_success=queue.put,
+            stop_event=target_reached,
         )
         await queue.put(None)
         _write_status(f"Stage 1: passed={len(stage1_successes)}, failed={len(stage1_failures)}")
@@ -350,6 +450,8 @@ async def collect(
             return
         key = (record.url, record.user_agent, record.transport)
         records_by_key[key] = record
+        if _verified_target and len({item.url for item in records_by_key.values()}) >= _verified_target:
+            target_reached.set()
         pending[key] = record
         pending_urls.add(record.url)
         if len(pending_urls) < publish_after and record.source != "webshare":
@@ -384,6 +486,7 @@ async def collect(
             on_check=publish_if_ready,
             min_successes=effective_min_successes,
             min_success_rate=effective_min_rate,
+            stop_event=target_reached,
         )
 
     async with asyncio.TaskGroup() as group:
@@ -399,7 +502,7 @@ async def collect(
             records_by_key[(record.url, record.user_agent, record.transport)] = record
     records = list(records_by_key.values())
 
-    database_replaced = await _persist_verified(records, db_path)
+    database_replaced = await _persist_verified(records, db_path, preserve_sources=_preserve_sources)
 
     report = _build_report(
         provider=provider,
@@ -416,6 +519,9 @@ async def collect(
         database_replaced=database_replaced,
     )
     report = _redact_report(report)
+    if _verified_target:
+        report["free_verified_target"] = _verified_target
+        report["free_target_reached"] = target_reached.is_set()
     if report_path is not None:
         report["report_path"] = str(report_path)
         atomic_write_json(report_path, report, indent=2, sort_keys=True)
@@ -442,6 +548,7 @@ async def _stage1_scan(
     timeout: float | None,  # noqa: ASYNC109 - forwarded to stage 1
     connect_timeout: float | None,
     on_success: Callable[[Stage1Success], Awaitable[None]] | None = None,
+    stop_event: asyncio.Event | None = None,
 ) -> tuple[list[Stage1Success], list[Stage1Failure]]:
     successes: list[Stage1Success] = []
     failures: list[Stage1Failure] = []
@@ -481,6 +588,8 @@ async def _stage1_scan(
     async def run(candidate: ProxyCandidate) -> None:
         nonlocal checked, active
         async with slots:
+            if stop_event is not None and stop_event.is_set():
+                return
             async with lock:
                 active += 1
             try:
@@ -498,11 +607,10 @@ async def _stage1_scan(
                 for success in found:
                     await on_success(success)
 
-    print(
-        f"Starting stage 1: candidates={len(candidates)}, ",
-        f"concurrent_checks={min(concurrency, len(candidates))}, ",
-        f"transports={','.join(transports)}",
-        flush=True,
+    _write_status(
+        f"Starting stage 1: candidates={len(candidates)}, "
+        f"concurrent_checks={min(concurrency, len(candidates))}, "
+        f"transports={','.join(transports)}"
     )
     remaining = iter(candidates)
 
@@ -531,6 +639,7 @@ async def _stage2_scan(
     transports: Sequence[str] = ("aiohttp", "curl_cffi"),
     min_successes: int | None = None,
     min_success_rate: float | None = None,
+    stop_event: asyncio.Event | None = None,
 ) -> list[Stage2Check]:
     checks: list[Stage2Check] = []
     eligible_urls: set[str] = set()
@@ -551,6 +660,8 @@ async def _stage2_scan(
     async def run(success: Stage1Success) -> None:
         nonlocal checked, active
         async with host_locks.setdefault(proxy_host(success.candidate.url), asyncio.Lock()), slots:
+            if stop_event is not None and stop_event.is_set():
+                return
             async with lock:
                 active += 1
             try:
@@ -599,12 +710,11 @@ async def _stage2_scan(
                     verified_label="eligible proxies",
                 )
 
-    print(
-        f"Starting stage 2: proxies={'streaming' if streaming else len(unique_successes)}, ",
-        f"concurrent_checks={concurrency}, ",
-        f"attempts={attempts or config.proxy_stage2_attempts}",
-        f"user_agents<={config.proxy_user_agent_limit}",
-        flush=True,
+    _write_status(
+        f"Starting stage 2: proxies={'streaming' if streaming else len(unique_successes)}, "
+        f"concurrent_checks={concurrency}, "
+        f"attempts={attempts or config.proxy_stage2_attempts}, "
+        f"user_agents<={config.proxy_user_agent_limit}"
     )
     if streaming:
         iterator = aiter(stage1_successes)
@@ -666,12 +776,12 @@ def _record_from_check(check: Stage2Check, min_successes: int, min_success_rate:
     )
 
 
-async def _persist_verified(records: list[VerifiedProxy], db_path: Path) -> bool:
+async def _persist_verified(records: list[VerifiedProxy], db_path: Path, *, preserve_sources: tuple[str, ...] = ()) -> bool:
     if not records:
-        print(f"No verified proxies found; keeping existing database at {db_path} unchanged", flush=True)
+        _write_status(f"No verified proxies found; keeping existing database at {db_path} unchanged")
         return False
     async with ProxyDatabase(db_path) as database:
-        await database.replace_all(records)
+        await database.replace_all(records, preserve_sources=preserve_sources)
     clear_dead_proxies(db_path)
     _write_status(f"Replaced {db_path} with {len(records)} fresh verified combinations")
     return True
@@ -781,4 +891,4 @@ def _report_progress(
 ) -> None:
     if checked % PROGRESS_EVERY and checked != total:
         return
-    print(f"{prefix} {checked}/{total}, {verified_label}={verified}, active_checks={active}", flush=True)
+    _write_status(f"{prefix} {checked}/{total}, {verified_label}={verified}, active_checks={active}")

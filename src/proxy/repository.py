@@ -194,7 +194,7 @@ class ProxyDatabase:
             await conn.rollback()
             raise StorageError(f"Proxy database publication error: {exc}") from exc
 
-    async def replace_all(self, proxies: Sequence[VerifiedProxy]) -> None:
+    async def replace_all(self, proxies: Sequence[VerifiedProxy], *, preserve_sources: Sequence[str] = ()) -> None:
         """Replace the database contents with freshly verified proxies.
 
         Old rows are physically deleted inside the same transaction, so the
@@ -205,7 +205,13 @@ class ProxyDatabase:
         """
         conn = await self._ensure_connection()
         try:
-            await conn.execute("DELETE FROM verified_proxies")
+            if preserve_sources:
+                placeholders = ",".join("?" for _ in preserve_sources)
+                await conn.execute(
+                    f"DELETE FROM verified_proxies WHERE source NOT IN ({placeholders})", tuple(preserve_sources)
+                )
+            else:
+                await conn.execute("DELETE FROM verified_proxies")
             await conn.executemany(UPSERT_VERIFIED_PROXY, [_proxy_values(proxy) for proxy in proxies])
             await conn.commit()
             logger.info("Replaced proxy database with %d verified proxy/transport combinations", len(proxies))

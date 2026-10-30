@@ -26,6 +26,7 @@ x-scraper: &scraper
     PROXY_STARTUP_TIMEOUT_SECONDS: ${PROXY_STARTUP_TIMEOUT_SECONDS:-900}
     WEBSHARE_API_TOKEN: ${WEBSHARE_API_TOKEN:-}
     WEBSHARE_PROXY_MODE: ${WEBSHARE_PROXY_MODE:-direct}
+    WEBSHARE_FREE_FALLBACK_THRESHOLD: ${WEBSHARE_FREE_FALLBACK_THRESHOLD:-10}
   volumes:
     - ${DATA_DIR:-./data}:/app/data
   read_only: true
@@ -47,6 +48,13 @@ x-scraper: &scraper
       max-file: "3"
 
 services:
+  notifications:
+    <<: *scraper
+    profiles: [notify]
+    entrypoint: [python, -m, src.services.notifications]
+    command: [--data-dir, /app/data]
+    restart: unless-stopped
+
   # One-shot jobs: docker compose run --rm scraper [--year YYYY] [--category N]
   scraper:
     <<: *scraper

@@ -113,7 +113,12 @@ async def _run_once(args: argparse.Namespace) -> list[dict[str, Any]]:
         return await _run_scraper(args, None)
 
     db_path = settings.proxy_db_path
-    fresh = await count_fresh_proxies(db_path, max_age_hours=settings.proxy_db_max_age_hours)
+    readiness: dict[str, Any] = (
+        {"preferred_source": "webshare", "fallback_report": settings.proxy_report_path}
+        if settings.webshare_api_token.strip()
+        else {}
+    )
+    fresh = await count_fresh_proxies(db_path, max_age_hours=settings.proxy_db_max_age_hours, **readiness)
     if fresh >= settings.proxy_min_ready:
         logger.info("Using %d fresh verified proxies from %s", fresh, db_path)
         return await _run_scraper(args, db_path)
@@ -133,6 +138,7 @@ async def _run_once(args: argparse.Namespace) -> list[dict[str, Any]]:
             required=1 if settings.webshare_api_token.strip() else settings.proxy_min_ready,
             timeout=settings.proxy_startup_timeout_seconds,
             max_age_hours=settings.proxy_db_max_age_hours,
+            **readiness,
         )
         if not fresh and settings.proxy_mode == "always":
             raise RuntimeError("External proxy collector produced no fresh verified proxies")
@@ -150,6 +156,7 @@ async def _run_once(args: argparse.Namespace) -> list[dict[str, Any]]:
             required=1 if settings.webshare_api_token.strip() else settings.proxy_min_ready,
             timeout=settings.proxy_startup_timeout_seconds,
             max_age_hours=settings.proxy_db_max_age_hours,
+            **readiness,
         )
         if not fresh:
             if settings.proxy_mode == "always":

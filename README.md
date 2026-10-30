@@ -5,8 +5,9 @@ An async Python scraper for Bolivia's Gaceta Electrónica de Comercio. It pulls 
 > **Proxies.** The scraper rotates free public proxies, and that has a cost: they are slow, they die often, and a run can crawl while the pool is being checked or refilled. If you need steady speed, use a paid proxy service. For a small run (one year, one category) `PROXY_MODE=direct` is usually enough and skips proxies entirely.
 
 Set `WEBSHARE_API_TOKEN` in `.env` to use Webshare as the primary proxy provider
-without a manual export. Verified public proxies remain a reserve for private
-proxy failures or provider API outages. See [Webshare setup](docs/server.md#webshare-primary-proxies).
+without a manual export. Webshare is verified and published first. Free-source
+collection starts only when at most 10 usable Webshare proxies remain. See
+[Webshare setup](docs/server.md#webshare-primary-proxies).
 
 ## What it does
 

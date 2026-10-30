@@ -39,17 +39,32 @@ free reserve. The key is an API key, not a proxy-list download token.
 
 The collector retrieves the paginated inventory with username/password
 authentication, validates its proxies against the target, and stores the working
-combinations in the shared SQLite database. One verified Webshare proxy is enough
-to unblock startup. Public proxies are also verified in the background so that
-the reserve is already available when needed.
+combinations in the shared SQLite database before touching any free source.
+One verified Webshare proxy is enough to unblock startup. While more than 10
+Webshare proxies remain usable, no free lists are downloaded or verified.
+`WEBSHARE_FREE_FALLBACK_THRESHOLD=10` controls this inclusive threshold.
+
+The scraper publishes a small `data/proxies.pool-health.json` with the live
+number of usable Webshare URLs, including failures and quarantine. The collector
+checks it every five seconds between scans. Reaching 10 or fewer starts free
+collection without waiting for the scheduled Webshare API refresh. Busy proxies
+still count as usable; transport/User-Agent variants of one URL count once.
+When no fresh live snapshot exists, the latest verified inventory is used.
+If the initial account already has 10 or fewer working proxies, free verification
+starts immediately after Webshare has been verified and published.
 
 Downloads prefer working private proxies. Busy private proxies retain priority;
 they do not cause routine spillover to the public pool. If private proxies fail
 or enter cooldown/quarantine and no private session remains usable, requests use
 the verified public reserve. Fresh provider verification can restore private
 proxies, and downloads prefer them again. Global rate-limit pauses still apply.
-An API error, expired key, or empty Webshare inventory leaves public-source
-collection available. The collector retries the inventory on later scans.
+Free verification preserves the remaining Webshare entries in SQLite. Once
+Webshare recovers above the threshold, later scans disable free collection again.
+An API error preserves known working Webshare entries; free collection starts
+if their usable count is at or below the threshold. An empty inventory on a
+fresh installation also enables free collection. The collector retries the
+inventory on later scans. Free reserve verification itself takes time, so it
+does not guarantee an immediate ready reserve after the threshold is reached.
 
 Use `WEBSHARE_PROXY_MODE=direct` for standard proxy lists. For rotating residential
 plans, set it to `backbone`; connections then use `p.webshare.io:80` with the
@@ -152,3 +167,38 @@ docker compose stop proxy-collector
 
 S3 upload is not implemented in this deployment. It prepares local PDF files
 and metadata for a separate transfer step; no AWS credentials are required.
+
+### Уведомления в Telegram
+
+Создайте бота через @BotFather, откройте с ним личный чат и нажмите Start.
+В локальном `.env` заполните `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHAT_ID`.
+Chat ID можно получить из `message.chat.id` ответа `getUpdates` после сообщения боту.
+Не публикуйте токен и не добавляйте его в git.
+
+Запуск: `docker compose --profile notify up -d --build notifications`.
+При каждом старте сервиса сразу отправляется сообщение «Сервис уведомлений запущен»,
+даже если скрапер ещё не создал отчёт. При сбое доставки повтор через 30 секунд.
+Затем отправляется первый доступный снимок и статистика каждые 30 минут
+во время работы и при изменении статуса (включая завершение).
+Интервал: `NOTIFY_INTERVAL_SECONDS=1800` (минимум 30 секунд).
+Никаких входящих портов, домена или своего HTTPS-сервера не нужно:
+используются только исходящие HTTPS-запросы Telegram Bot API.
+Документация: https://core.telegram.org/bots/api#sendmessage
+
+Сообщение содержит сохранённые файлы, ошибки документов, HTTP 412/429,
+известную очередь, состояние Webshare, ошибки по кодам и топ прокси без паролей.
+HTTP-счётчики относятся к текущему процессу; ошибки по журналам — к сохранённым `scraper.log*`.
+Повторные неудачные попытки считаются отдельно.
+Очередь не включает ещё не просмотренные страницы. Общий остаток заранее неизвестен.
+Время исходного снимка указано в сообщении; аварийное завершение процесса без финального
+снимка само по себе не определяется как завершение.
+Состояние отправки сохраняется в `notification-state.json`, чтобы рестарт сервиса
+не повторял уже отправленное завершение. При недоступности Telegram повтор через 30 секунд.
+
+Предпросмотр без отправки: `python -m src.services.notifications --preview --data-dir data`.
+Для stress-запуска смените `command` сервиса notifications на `[--data-dir, /app/data/stress]`.
+Снимок `scraper-status.json` обновляется при получении страниц, каждые 10 документов и при завершении.
+
+При Webshare <= 10 коллектор собирает бесплатный резерв с целью 2000 уникальных рабочих адресов,
+сохраняет его и повторно проверяет Webshare. Если кандидатов не хватило, `free_target_reached=false`
+в proxy-report.json показывает недобор. Результат повторной проверки — `webshare_recheck`.

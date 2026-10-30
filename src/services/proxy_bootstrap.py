@@ -11,11 +11,13 @@ Every wait is bounded and every spawned collector is stopped deterministically.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+from typing import Any
 
 from config import BASE_DIR, settings
 from src.proxy.repository import ProxyDatabase
@@ -27,11 +29,29 @@ DEFAULT_POLL_INTERVAL_SECONDS = 0.5
 WAIT_REPORT_INTERVAL_SECONDS = 15.0
 
 
-async def count_fresh_proxies(db_path: Path, *, max_age_hours: float, limit: int | None = None) -> int:
+async def count_fresh_proxies(
+    db_path: Path,
+    *,
+    max_age_hours: float,
+    limit: int | None = None,
+    preferred_source: str | None = None,
+    fallback_report: Path | None = None,
+) -> int:
     """Return how many usable records in ``db_path`` are recent enough."""
     max_age = max_age_hours if max_age_hours > 0 else None
     async with ProxyDatabase(db_path) as database:
-        return len(await database.list_active(limit=limit, max_age_hours=max_age))
+        records = await database.list_active(limit=None if preferred_source else limit, max_age_hours=max_age)
+    if preferred_source:
+        preferred = [record for record in records if record.source == preferred_source]
+        if preferred:
+            return min(len(preferred), limit) if limit is not None else len(preferred)
+        try:
+            fallback = json.loads(await asyncio.to_thread(fallback_report.read_text)) if fallback_report else {}
+        except (OSError, ValueError):
+            fallback = {}
+        if not isinstance(fallback, dict) or fallback.get("free_sources_enabled") is not True:
+            return 0
+    return min(len(records), limit) if limit is not None else len(records)
 
 
 async def wait_for_proxies(  # noqa: ASYNC109 - explicit bounded wait
@@ -42,6 +62,8 @@ async def wait_for_proxies(  # noqa: ASYNC109 - explicit bounded wait
     timeout: float,  # noqa: ASYNC109 - bounded wait is the whole point of this helper
     max_age_hours: float,
     poll_interval: float = DEFAULT_POLL_INTERVAL_SECONDS,
+    preferred_source: str | None = None,
+    fallback_report: Path | None = None,
 ) -> int:
     """Wait until ``required`` fresh proxies exist, the collector exits, or time runs out.
 
@@ -53,7 +75,10 @@ async def wait_for_proxies(  # noqa: ASYNC109 - explicit bounded wait
     started = time.monotonic()
     last_report = started
     while True:
-        available = await count_fresh_proxies(db_path, max_age_hours=max_age_hours, limit=required)
+        readiness: dict[str, Any] = (
+            {"preferred_source": preferred_source, "fallback_report": fallback_report} if preferred_source else {}
+        )
+        available = await count_fresh_proxies(db_path, max_age_hours=max_age_hours, limit=required, **readiness)
         if available >= required:
             logger.info("Verified proxy pool ready: %d fresh proxies", available)
             return available
@@ -98,6 +123,7 @@ async def proxy_collector(db_path: Path) -> AsyncIterator[asyncio.subprocess.Pro
         str(db_path),
         "--publish-after",
         str(settings.proxy_min_ready),
+        *(["--watch"] if settings.webshare_api_token.strip() else []),
     )
     logger.info("Started proxy collector (pid %s)", getattr(process, "pid", "unknown"))
     try:

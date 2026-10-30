@@ -88,6 +88,7 @@ class Settings:
     proxy_sources: str = ""
     webshare_api_token: str = field(default="", repr=False)
     webshare_proxy_mode: str = "direct"
+    webshare_free_fallback_threshold: int = 10
     proxy_paid_file: Path = field(default_factory=lambda: BASE_DIR / "data" / "paid-proxies.txt")
     proxy_source_max_response_bytes: int = 32 * 1024 * 1024
     proxy_source_download_concurrency: int = 3
@@ -231,6 +232,7 @@ class Settings:
 
     def _validate_proxy(self) -> None:
         self._require(self.webshare_proxy_mode in {"direct", "backbone"}, "WEBSHARE_PROXY_MODE must be direct or backbone")
+        self._require(self.webshare_free_fallback_threshold >= 0, "WEBSHARE_FREE_FALLBACK_THRESHOLD must be >= 0")
         if self.proxy_sources.strip():
             from src.proxy.sources.registry import resolve_sources
 

@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import logging
+import time
 from collections.abc import Sequence
 from dataclasses import fields
 from pathlib import Path
@@ -14,6 +15,7 @@ from typing import Any
 from config import settings
 from src.proxy.collector import PROVIDER_CHOICES, collect as collect_proxies
 from src.proxy.config import CollectorConfig
+from src.proxy.health import read_webshare_health
 from src.proxy.sources.iplocate import ProxySourceError
 from src.proxy.sources.registry import DEFAULT_SOURCES, SOURCE_REGISTRY, resolve_sources
 from src.proxy.user_agents import MAX_USER_AGENT_LIMIT
@@ -314,9 +316,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 async def run_collection(*, watch: bool, interval: float, **kwargs: Any) -> dict:
     """Run scans sequentially; recover from a failed scan only in watch mode."""
+    fallback_only = False
     while True:
+        report: dict = {}
         try:
-            report = await collect(**kwargs)
+            report = await collect(**kwargs, **({"_fallback_only": True} if fallback_only else {}))
         except Exception:  # noqa: BLE001 - a later scan can recover without clearing the database
             if not watch:
                 raise
@@ -325,7 +329,21 @@ async def run_collection(*, watch: bool, interval: float, **kwargs: Any) -> dict
             if not watch:
                 return report
             print(json.dumps({key: report[key] for key in ("verified_proxies", "database_replaced")}), flush=True)
+        fallback_only = await wait_for_next_scan(interval, kwargs.get("db_path", settings.proxy_db_path), report)
+
+
+async def wait_for_next_scan(interval: float, db_path: Path, report: dict) -> bool:
+    """Wake for a live pool drop without waiting for the five-minute refresh."""
+    if not settings.webshare_api_token.strip() or report.get("free_sources_enabled", True):
         await asyncio.sleep(interval)
+        return False
+    deadline = time.monotonic() + interval
+    while (remaining := deadline - time.monotonic()) > 0:
+        await asyncio.sleep(min(5, remaining))
+        usable = await asyncio.to_thread(read_webshare_health, db_path)
+        if usable is not None and usable <= settings.webshare_free_fallback_threshold:
+            return True
+    return False
 
 
 if __name__ == "__main__":

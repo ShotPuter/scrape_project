@@ -287,7 +287,7 @@ async def test_proxy_credentials_are_not_logged(caplog):
             await client.close()
     assert "private-password" not in caplog.text
     assert "private-user" not in caplog.text
-    assert "proxy.test" not in caplog.text
+    assert "http://***@proxy.test:80" in caplog.text
 
 
 @pytest.mark.asyncio

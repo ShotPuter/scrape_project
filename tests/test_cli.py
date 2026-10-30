@@ -12,6 +12,11 @@ from src.cli import build_parser
 from src.proxy.repository import ProxyDatabase, VerifiedProxy
 
 
+@pytest.fixture(autouse=True)
+def disable_local_webshare_token(monkeypatch):
+    monkeypatch.setattr(cli.settings, "webshare_api_token", "")
+
+
 def test_defaults_run_one_incremental_pass():
     args = build_parser().parse_args([])
 
