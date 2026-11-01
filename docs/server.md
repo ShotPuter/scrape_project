@@ -202,3 +202,49 @@ HTTP-счётчики относятся к текущему процессу; �
 При Webshare <= 10 коллектор собирает бесплатный резерв с целью 2000 уникальных рабочих адресов,
 сохраняет его и повторно проверяет Webshare. Если кандидатов не хватило, `free_target_reached=false`
 в proxy-report.json показывает недобор. Результат повторной проверки — `webshare_recheck`.
+
+### Audit missing IDs and recover text previews
+
+Run these jobs after the production scraper/backfill has stopped. Only one recovery
+writer may use the publication CSV at a time. The audit reads the CSV and fetches
+search pages (100 entries/page); it never downloads detail PDFs. Its SQLite
+checkpoints and reports live in `data/recovery/`. Re-running a failed audit resumes
+at the first uncommitted page. Do not delete the publication CSV or PDFs.
+
+```bash
+docker compose run -d --name seprec-audit -e LOG_FILE=/app/data/recovery/audit.log --entrypoint python scraper -m src.services.recovery audit
+docker logs --tail 20 -f seprec-audit
+```
+
+Once it exits successfully, inspect `data/recovery/report.json`. Compare
+`api_total`, `unique_ids_seen`, `duplicate_rows` and `source_count_gap` by category:
+the API's total is not proof that all those entries represent distinct IDs.
+`missing_ids` contains observed source IDs absent from successful CSV records.
+The search API is mutable, so this is not a frozen inventory or a guarantee that
+unobserved IDs do not exist. A source count gap remains explicitly reported.
+An unexpected empty page before the advertised total aborts the audit instead
+of declaring success. To repeat a completed audit with current data, use
+`audit --restart-audit` under a new container name; it retains prior recovery files.
+
+Recovery requests only those observed IDs still absent from the CSV:
+
+```bash
+docker compose run -d --name seprec-recover -e LOG_FILE=/app/data/recovery/recover.log --entrypoint python scraper -m src.services.recovery recover
+docker logs --tail 20 -f seprec-recover
+```
+
+Valid original PDFs or full text from successful detail responses are saved through
+the normal storage/index pipeline. For HTTP 412 or a successful detail with no
+valid original/full text, the tool saves the available search card as
+`data/recovery/text-previews/ID.json` and `ID.txt`. These contain metadata and
+`resumen`, explicitly labelled `search_summary_only`, `original_recovered=false`,
+`full_text_verified=false`. They do not enter the publication CSV and do not count
+as downloaded original documents. A search summary may describe a legal deed or
+financial report without containing the document's text. Transient errors such as
+429/503 stay failed; they are not labelled as confirmed file-unavailable previews.
+No original or full text is invented from the title/preview.
+
+The audit uses a periodically refreshed copy of the proxy database in `/tmp` so
+its pool health and dead-proxy files do not overwrite the active scraper's state.
+The live verified proxy database, production CSV and PDF directory are not changed
+by the audit. Recovery changes the CSV/PDF directory only for newly recovered PDFs.
