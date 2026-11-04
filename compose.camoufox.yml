@@ -6,15 +6,18 @@ services:
       dockerfile: Dockerfile.camoufox
     init: true
     restart: "no"
-    shm_size: 1gb
-    mem_limit: 4g
-    cpus: 2
-    pids_limit: 512
+    shm_size: ${PEP_SHM_SIZE:-2gb}
+    mem_limit: ${PEP_MEMORY_LIMIT:-8g}
+    cpus: ${PEP_CPUS:-4}
+    pids_limit: 1024
     stop_signal: SIGINT
     stop_grace_period: 1m
     environment:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      BRIGHTDATA_PROXY_SERVER: ${BRIGHTDATA_PROXY_SERVER:-http://brd.superproxy.io:44445}
+      BRIGHTDATA_PROXY_USERNAME: ${BRIGHTDATA_PROXY_USERNAME:-}
+      BRIGHTDATA_PROXY_PASSWORD: ${BRIGHTDATA_PROXY_PASSWORD:-}
     volumes:
       - type: bind
         source: ${PEP_INPUT:-./docs/DECLARACIONES_PEP.xlsx}
@@ -33,6 +36,10 @@ services:
       - "${PEP_TIMEOUT:-60}"
       - --max-minutes
       - "${PEP_MAX_MINUTES:-120}"
+      - --workers
+      - "${PEP_WORKERS:-4}"
+      - --log-interval
+      - "${PEP_LOG_INTERVAL:-30}"
     logging:
       driver: json-file
       options:

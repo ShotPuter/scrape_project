@@ -7,14 +7,14 @@ import asyncio
 import json
 import math
 import os
-from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import aiohttp
 
-from scripts.pep_camoufox_batch import run
+from scripts.pep_camoufox_logging import report_totals as totals
+from scripts.pep_camoufox_parallel import BrightDataProxy, run_parallel
 from src.services.notifications import send_telegram
 from src.sites.pep.source import RESULT_PATH, safe_url
 from src.sites.pep.workbook import LINK_COLUMN, read_rows
@@ -47,37 +47,20 @@ def collect_sample(workbook: Path, limit: int, offset: int) -> list[dict]:
     return sample
 
 
-def totals(report: dict) -> dict:
-    jobs = report["jobs"]
-    counts = Counter(job["status"] for job in jobs)
-    documents = [doc for job in jobs for doc in job["documents"]]
-    downloaded = sum(doc["status"] == "downloaded" for doc in documents)
-    empty = sum(job["status"] == "completed" and not job["documents"] for job in jobs)
-    return {
-        "total": len(jobs),
-        "processed": sum(counts.get(s, 0) for s in ("completed", "partial", "failed", "interrupted")),
-        "completed": counts.get("completed", 0) - empty,
-        "empty": empty,
-        "partial": counts.get("partial", 0),
-        "failed": counts.get("failed", 0) + counts.get("interrupted", 0),
-        "pending": counts.get("pending", 0),
-        "downloaded": downloaded,
-        "not_downloaded": len(documents) - downloaded,
-        "pdf": report.get("pdf_count", 0),
-    }
-
-
 class ProgressReporter:
     def __init__(self, session, output: Path, token: str = "", chat_id: str = ""):
         self.session, self.output, self.token, self.chat_id = session, output, token, chat_id
         self.last_count = 0
+        self.send_lock = asyncio.Lock()
 
     async def __call__(self, report: dict, *, final: bool) -> None:
         stats = totals(report)
         processed = stats["processed"]
-        if not final and (processed in (self.last_count, 0) or processed % 10):
+        if not final and (processed == 0 or processed // 10 <= self.last_count // 10):
             return
         self.last_count = processed
+        minutes = report.get("seconds", 0) / 60
+        speed = stats["downloaded"] / minutes if minutes else 0
         text = (
             f"PEP Camoufox {'— итог' if final else '— прогресс'}\n"
             f"Запуск: {self.output.name}\n"
@@ -87,16 +70,31 @@ class ProgressReporter:
             f"Частично: {stats['partial']}; ошибки: {stats['failed']}; ожидают: {stats['pending']}\n"
             f"Деклараций скачано: {stats['downloaded']}; не скачано из найденных: {stats['not_downloaded']}\n"
             f"PDF сохранено: {stats['pdf']}\n"
+            f"Браузеров: {report.get('worker_count', 1)}; прошло: {minutes:.1f} мин; темп: {speed:.1f} деклараций/мин\n"
+            f"Разных прокси IP при проверке: {len(report.get('proxy_egress_ips', []))}\n"
             f"Статус: {report['status']}; причина остановки: {report.get('stop_reason') or 'нет'}"
         )
         print(text, flush=True)
         with (self.output / "progress.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(
-                json.dumps({"at": datetime.now(UTC).isoformat(), "final": final, **stats}, ensure_ascii=False) + "\n"
+                json.dumps(
+                    {
+                        "at": datetime.now(UTC).isoformat(),
+                        "final": final,
+                        **stats,
+                        "elapsed_seconds": report.get("seconds", 0),
+                        "declarations_per_minute": round(speed, 2),
+                        "links_per_minute": round(processed / minutes, 2) if minutes else 0,
+                        "worker_count": report.get("worker_count", 1),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
             )
         if self.token:
             try:
-                await send_telegram(self.session, self.token, self.chat_id, text)
+                async with self.send_lock:
+                    await send_telegram(self.session, self.token, self.chat_id, text)
             except RuntimeError:
                 # A notification failure must not discard browser results or expose credentials.
                 print("Telegram notification failed; statistics are saved locally", flush=True)
@@ -110,14 +108,23 @@ async def execute(args, sample: list[dict]) -> dict:
     if not token:
         print("Telegram is not configured; reports will be written to logs and progress.jsonl", flush=True)
     output = args.output / datetime.now(UTC).strftime("run-%Y%m%dT%H%M%S%fZ")
+    username = os.getenv("BRIGHTDATA_PROXY_USERNAME", "").strip()
+    password = os.getenv("BRIGHTDATA_PROXY_PASSWORD", "")
+    proxy = None
+    if username or password:
+        proxy = BrightDataProxy(os.getenv("BRIGHTDATA_PROXY_SERVER", "http://brd.superproxy.io:44445"), username, password)
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-        return await run(
+        return await run_parallel(
             sample,
             output,
-            args.timeout,
+            workers=args.workers,
+            request_seconds=args.timeout,
             ca_bundle=args.ca_bundle,
             max_seconds=args.max_minutes * 60,
-            on_progress=ProgressReporter(session, output, token, chat_id),
+            proxy_ca=args.proxy_ca,
+            proxy=proxy,
+            notify=ProgressReporter(session, output, token, chat_id),
+            log_interval=args.log_interval,
         )
 
 
@@ -129,9 +136,16 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=Path("/app/data"))
     parser.add_argument("--ca-bundle", type=Path, default=Path("/opt/pep-ca-bundle.pem"))
     parser.add_argument("--timeout", type=float, default=60)
+    parser.add_argument("--workers", type=int, default=1, help="1 to 4 independent browsers")
+    parser.add_argument("--proxy-ca", type=Path, default=Path("/opt/brightdata-proxy-ca.crt"))
     parser.add_argument("--max-minutes", type=float, default=120)
+    parser.add_argument("--log-interval", type=float, default=30, help="Heartbeat interval in seconds (5..300)")
     parser.add_argument("--preview", action="store_true", help="Read Excel only; no browser or Telegram requests")
     args = parser.parse_args()
+    if not 1 <= args.workers <= 4:
+        parser.error("workers must be between 1 and 4")
+    if not math.isfinite(args.log_interval) or not 5 <= args.log_interval <= 300:
+        parser.error("log-interval must be finite and between 5 and 300 seconds")
     if args.limit < 0 or args.offset < 0:
         parser.error("limit and offset must be nonnegative")
     if not math.isfinite(args.timeout) or not 5 <= args.timeout <= 120:

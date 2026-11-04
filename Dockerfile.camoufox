@@ -4,13 +4,18 @@ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 XDG_CACHE_HOME=/opt/camoufox-cache
 WORKDIR /app
 COPY docker/camoufox-requirements.txt /tmp/requirements.txt
-RUN --mount=type=cache,target=/root/.cache/pip pip install --timeout 120 --retries 5 -r /tmp/requirements.txt \
+RUN --mount=type=cache,target=/root/.cache/pip pip install --timeout 120 --retries 5 -r /tmp/requirements.txt
+# Some server networks block outbound HTTP/80; Debian supports HTTPS/443.
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    && printf '%s\n' 'Acquire::Retries "5";' 'Acquire::https::Timeout "60";' \
+       'APT::Update::Error-Mode "any";' > /etc/apt/apt.conf.d/80-network-retries \
     && python -m playwright install-deps firefox \
     && apt-get update && apt-get install -y --no-install-recommends \
        libnss3-tools openssl ca-certificates util-linux xauth \
        libgl1-mesa-dri libegl1 libgbm1 libdbus-glib-1-2 fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 COPY docker/pep-sectigo-intermediate.pem /opt/pep-intermediate.pem
+COPY docker/brightdata-proxy-ca.crt /opt/brightdata-proxy-ca.crt
 RUN openssl verify -CAfile /etc/ssl/certs/ca-certificates.crt /opt/pep-intermediate.pem \
     && cat /etc/ssl/certs/ca-certificates.crt /opt/pep-intermediate.pem > /opt/pep-ca-bundle.pem \
     && groupadd --gid 1000 scraper \
@@ -23,7 +28,7 @@ USER scraper
 RUN python -m camoufox fetch
 COPY config.py ./
 COPY src ./src
-COPY scripts/pep_camoufox_pilot.py scripts/pep_camoufox_batch.py scripts/pep_camoufox_excel.py ./scripts/
+COPY scripts/pep_camoufox_pilot.py scripts/pep_camoufox_batch.py scripts/pep_camoufox_parallel.py scripts/pep_camoufox_excel.py scripts/pep_camoufox_logging.py ./scripts/
 STOPSIGNAL SIGINT
 ENTRYPOINT ["python", "-u", "-m", "scripts.pep_camoufox_excel"]
 CMD ["/input/DECLARACIONES_PEP.xlsx", "--limit", "100"]

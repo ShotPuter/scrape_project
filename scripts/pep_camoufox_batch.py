@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import ipaddress
 import json
 import time
 from collections import Counter
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -15,10 +17,23 @@ from urllib.parse import urlsplit
 from camoufox.async_api import AsyncCamoufox
 from playwright.async_api import Error as BrowserError, TimeoutError as BrowserTimeout
 
-from scripts.pep_camoufox_pilot import CA_BUNDLE, DEFAULT_SAMPLE, ROOT, install_intermediate
+from scripts.pep_camoufox_logging import EventLog
+from scripts.pep_camoufox_pilot import CA_BUNDLE, DEFAULT_SAMPLE, ROOT, install_intermediate, install_proxy_ca
 from src.sites.pep.documents import MAX_PDF_BYTES, inspect_saved, save_payload
 from src.sites.pep.source import DOWNLOAD_PATH, LEGACY_PATH, RESULT_PATH, parse_results, safe_url
 from src.utils.atomic import atomic_write_json
+
+
+@asynccontextmanager
+async def browser_context(options: dict, launch_lock: asyncio.Lock | None = None):
+    """Serialize native fingerprint initialization, then keep browsers running concurrently."""
+    async with AsyncExitStack() as stack:
+        if launch_lock is None:
+            context = await stack.enter_async_context(AsyncCamoufox(**options))
+        else:
+            async with launch_lock:
+                context = await stack.enter_async_context(AsyncCamoufox(**options))
+        yield context
 
 
 async def download_once(page, element, endpoint: str, timeout_ms: int):
@@ -59,6 +74,10 @@ async def run(
     ca_bundle: Path = CA_BUNDLE,
     max_seconds: float = 900,
     on_progress=None,
+    proxy: dict | None = None,
+    proxy_ca: Path | None = None,
+    launch_lock: asyncio.Lock | None = None,
+    on_state=None,
 ) -> dict:
     started = time.monotonic()
     await asyncio.to_thread(output.mkdir, parents=True, mode=0o700)
@@ -69,10 +88,20 @@ async def run(
         "sample_sha256": hashlib.sha256(json.dumps(sample, sort_keys=True).encode()).hexdigest(),
         "single_browser": True,
         "tls_verification": True,
-        "proxy": False,
+        "proxy": bool(proxy),
         "jobs": [{**row, "status": "pending", "documents": []} for row in sample],
     }
     atomic_write_json(output / "sample.json", sample)
+    log = EventLog(output, secrets=tuple(proxy.values()) if proxy else ())
+
+    def redact(value) -> str:
+        message = str(value)
+        for key in ("password", "username"):
+            if proxy and proxy.get(key):
+                message = message.replace(proxy[key], "[redacted]")
+        if proxy and proxy.get("username"):
+            message = message.replace(proxy["username"].split("-session-", 1)[0], "[redacted]")
+        return message
 
     def checkpoint():
         report["seconds"] = round(time.monotonic() - started, 2)
@@ -80,24 +109,58 @@ async def run(
         report["pdf_count"] = len(list((output / "pdf").glob("*.pdf")))
         report["archive_count"] = len(list((output / "archives").glob("*.zip")))
         atomic_write_json(output / "report.json", report)
+        if on_state:
+            on_state(report)
+
+    def activity(stage, *, job=None, document=None):
+        report["activity"] = {
+            "stage": stage,
+            "job": job,
+            "document": document,
+            "started_seconds": round(time.monotonic() - started, 2),
+        }
+        checkpoint()
+        log.emit("activity", **report["activity"])
 
     checkpoint()
-    print(f"OUTPUT {output}", flush=True)
+    log.emit("worker_started", output=str(output), links=len(sample), proxy=bool(proxy))
     try:
+        activity("certificates")
         await asyncio.to_thread(install_intermediate, output / "profile", ca_bundle)
+        if proxy:
+            if proxy_ca is None:
+                raise ValueError("Bright Data proxy CA is required")
+            await asyncio.to_thread(install_proxy_ca, output / "profile", proxy_ca)
+        activity("browser_start")
         async with (
             asyncio.timeout(max_seconds),
-            AsyncCamoufox(
-                headless="virtual",
-                os="linux",
-                locale="es-CO",
-                persistent_context=True,
-                user_data_dir=str(output / "profile"),
-                accept_downloads=True,
-                ignore_https_errors=False,
+            browser_context(
+                {
+                    "headless": "virtual",
+                    "os": "linux",
+                    "locale": "es-CO",
+                    "persistent_context": True,
+                    "user_data_dir": str(output / "profile"),
+                    "accept_downloads": True,
+                    "ignore_https_errors": False,
+                    "proxy": proxy,
+                },
+                launch_lock,
             ) as context,
         ):
-            page = context.pages[0] if context.pages else await context.new_page()
+            page = await context.new_page()
+            if proxy:
+                activity("proxy_preflight")
+                # Check the route in this browser, without sending proxy credentials to a separate client.
+                response = await page.goto(
+                    "https://api.ipify.org", wait_until="domcontentloaded", timeout=int(request_seconds * 1000)
+                )
+                if not response or response.status != 200:
+                    raise ValueError("Proxy browser preflight failed")
+                address = (await page.locator("body").inner_text()).strip()
+                report["proxy_egress_ip"] = str(ipaddress.ip_address(address))
+                checkpoint()
+                log.emit("proxy_ready", egress_ip=report["proxy_egress_ip"])
             active = {}
 
             def on_request(request):
@@ -110,7 +173,7 @@ async def run(
 
             def on_error(error):
                 if active:
-                    active.setdefault("javascript_errors", []).append(str(error).splitlines()[0][:300])
+                    active.setdefault("javascript_errors", []).append(redact(error).splitlines()[0][:300])
 
             page.on("request", on_request)
             page.on("response", on_response)
@@ -119,6 +182,8 @@ async def run(
                 if report.get("stop_reason"):
                     break
                 job["status"] = "running"
+                link_started = time.monotonic()
+                job["started_at"] = datetime.now(UTC).isoformat()
                 checkpoint()
                 seen_pages, seen_docs = set(), set()
                 next_url = job["url"]
@@ -127,6 +192,7 @@ async def run(
                         if next_url in seen_pages or len(seen_pages) >= 25:
                             raise ValueError("Pagination cycle or page limit")
                         seen_pages.add(next_url)
+                        activity("navigation", job=job["n"])
                         await asyncio.sleep(3)
                         for navigation_attempt in range(2):
                             try:
@@ -141,6 +207,7 @@ async def run(
                                 await asyncio.sleep(3)
                         if not landing or landing.status != 200:
                             raise ValueError(f"Landing HTTP {landing.status if landing else 'missing'}")
+                        activity("discovery", job=job["n"])
                         await page.locator("table.table tbody").wait_for(
                             state="attached", timeout=int(request_seconds * 1000)
                         )
@@ -156,9 +223,11 @@ async def run(
                                 continue
                             seen_docs.add(doc_id)
                             doc.update(status="running", attempts=0)
+                            document_started = time.monotonic()
                             active = doc
                             checkpoint()
                             try:
+                                activity("document_download", job=job["n"], document=doc_id)
                                 existing = await asyncio.to_thread(inspect_saved, output, doc_id)
                                 if existing:
                                     doc.update(existing, reused=True)
@@ -207,6 +276,7 @@ async def run(
                                 raw = output / "downloads" / f"{doc_id}.bin"
                                 await asyncio.to_thread(raw.parent.mkdir, parents=True, exist_ok=True)
                                 await download.save_as(str(raw))
+                                activity("document_validation", job=job["n"], document=doc_id)
                                 if raw.stat().st_size > MAX_PDF_BYTES:
                                     raise ValueError("Download exceeds size limit")
                                 metadata = await asyncio.to_thread(save_payload, raw.read_bytes(), output, doc_id)
@@ -224,12 +294,24 @@ async def run(
                                 next_url = None
                                 break
                             except Exception as exc:
-                                doc.update(status="failed", error={"type": type(exc).__name__, "message": str(exc)[:800]})
+                                doc.update(status="failed", error={"type": type(exc).__name__, "message": redact(exc)[:800]})
                                 report["stop_reason"] = "document_error"
                                 break
                             finally:
+                                if doc["status"] == "running":
+                                    doc["status"] = "interrupted"
+                                doc["seconds"] = round(time.monotonic() - document_started, 2)
                                 checkpoint()
-                                print(json.dumps({"job": job["n"], "document": doc_id, "status": doc["status"]}), flush=True)
+                                log.summary(
+                                    "document_finished",
+                                    report,
+                                    job=job["n"],
+                                    document=doc_id,
+                                    document_status=doc["status"],
+                                    document_seconds=doc["seconds"],
+                                    http_status=doc.get("http_status", doc.get("observed_http_status")),
+                                    error=doc.get("error"),
+                                )
                                 active = {}
                     job["status"] = (
                         "completed"
@@ -237,27 +319,36 @@ async def run(
                         else "partial"
                     )
                 except Exception as exc:
-                    job.update(status="failed", error={"type": type(exc).__name__, "message": str(exc)[:800]})
+                    job.update(status="failed", error={"type": type(exc).__name__, "message": redact(exc)[:800]})
                     try:
-                        job["page_title"] = await page.title()
+                        job["page_title"] = redact(await page.title())
                         body = await page.locator("body").inner_text(timeout=5000)
-                        job["page_text_excerpt"] = body[:1500]
+                        job["page_text_excerpt"] = redact(body)[:1500]
                         await page.screenshot(path=str(output / f"job-{job['n']}-error.png"))
                         if "Recaptcha did not pass validation" in body:
                             report["stop_reason"] = "recaptcha_notice"
                     except Exception:
                         pass
-                checkpoint()
-                print(json.dumps({"job": job["n"], "status": job["status"], "pdf_count": report["pdf_count"]}), flush=True)
+                job["seconds"] = round(time.monotonic() - link_started, 2)
+                activity("between_links", job=job["n"])
+                log.summary(
+                    "link_finished",
+                    report,
+                    job=job["n"],
+                    link_status=job["status"],
+                    link_seconds=job["seconds"],
+                    error=job.get("error"),
+                )
                 if on_progress:
                     await on_progress(report, final=False)
+            activity("browser_shutdown")
         report["status"] = "stopped" if report.get("stop_reason") else "finished"
     except TimeoutError:
         report.update(status="stopped", stop_reason="time_budget")
     except BaseException as exc:
         report.update(
             status="interrupted" if isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError)) else "error",
-            error={"type": type(exc).__name__, "message": str(exc)[:800]},
+            error={"type": type(exc).__name__, "message": redact(exc)[:800]},
         )
         if isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError)):
             raise
@@ -265,10 +356,13 @@ async def run(
         for job in report["jobs"]:
             if job["status"] == "running":
                 job["status"] = "interrupted"
+                job["seconds"] = round(time.monotonic() - link_started, 2)
             for doc in job["documents"]:
                 if doc["status"] == "running":
                     doc["status"] = "interrupted"
-        checkpoint()
+        activity(report["status"])
+        log.summary("worker_finished", report, error=report.get("error"))
+        log.close()
         if on_progress:
             await on_progress(report, final=True)
     return report

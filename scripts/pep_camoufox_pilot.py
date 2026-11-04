@@ -26,6 +26,24 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SAMPLE = ROOT / "data/pep-firefox-10-20261103T132909Z/sample.json"
 CA_BUNDLE = ROOT / "data/pep/ca-bundle.pem"
 INTERMEDIATE_SHA256 = "72A34AC2B424AED3F6B0B04755B88CC027DCCC806FDDB22B4CD7C47773973EC0"
+BRIGHTDATA_CA_SHA256 = "DB8548F8A5B1166536920CCD0473840F7FDBAF165DEDF907B7B52361ABC87B60"
+
+
+def install_proxy_ca(profile: Path, certificate: Path) -> None:
+    """Trust the pinned official Bright Data 44445 CA in this owned profile only."""
+    pem = certificate.read_text(encoding="ascii")
+    digest = hashlib.sha256(ssl.PEM_cert_to_DER_cert(pem)).hexdigest().upper()
+    if digest != BRIGHTDATA_CA_SHA256:
+        raise ValueError("Bright Data CA fingerprint mismatch")
+    subprocess.run(
+        ["openssl", "verify", "-CAfile", str(certificate), str(certificate)], check=True, capture_output=True, timeout=10
+    )
+    subprocess.run(
+        ["certutil", "-A", "-d", f"sql:{profile}", "-n", "Bright Data 44445 CA", "-t", "C,,", "-i", str(certificate)],
+        check=True,
+        capture_output=True,
+        timeout=10,
+    )
 
 
 def install_intermediate(profile: Path, ca_bundle: Path = CA_BUNDLE) -> None:
