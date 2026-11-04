@@ -5,22 +5,59 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import ipaddress
 import json
 import math
 import secrets
 import time
 from collections import Counter
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
-from scripts.pep_camoufox_batch import run
+from scripts.pep_camoufox_batch import browser_context, run
 from scripts.pep_camoufox_logging import EventLog, report_totals
+from scripts.pep_camoufox_pilot import install_intermediate, install_proxy_ca
 from src.utils.atomic import atomic_write_json
 
 
+class FixedProxyPool:
+    """Assign one provider proxy per browser without rotating on failures."""
+
+    def __init__(self, proxies: list[dict]):
+        self._proxies = [dict(proxy) for proxy in proxies]
+
+    def for_worker(self, number: int) -> dict:
+        if not 1 <= number <= len(self._proxies):
+            raise ValueError("No assigned proxy for this browser")
+        return dict(self._proxies[number - 1])
+
+
+async def webshare_pool(token: str, workers: int) -> FixedProxyPool:
+    from src.proxy.sources.webshare import load_webshare_candidates
+
+    candidates = await load_webshare_candidates(token, mode="direct")
+    proxies, addresses = [], set()
+    for candidate in candidates:
+        parsed = urlsplit(candidate.url)
+        if parsed.hostname in addresses:
+            continue
+        addresses.add(parsed.hostname)
+        host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+        proxies.append(
+            {
+                "server": f"http://{host}:{parsed.port}",
+                "username": unquote(parsed.username or ""),
+                "password": unquote(parsed.password or ""),
+            }
+        )
+        if len(proxies) == workers:
+            return FixedProxyPool(proxies)
+    raise ValueError(f"Webshare supplied only {len(proxies)} distinct valid proxy addresses; requested {workers}")
+
+
 def split_sample(sample: list[dict], workers: int) -> list[list[dict]]:
-    if not 1 <= workers <= 4:
-        raise ValueError("workers must be between 1 and 4")
+    if not 1 <= workers <= 100:
+        raise ValueError("workers must be between 1 and 100")
     return [sample[index::workers] for index in range(min(workers, len(sample)))]
 
 
@@ -54,14 +91,18 @@ class BrightDataProxy:
 
 
 class AggregateReport:
-    def __init__(self, sample: list[dict], groups: list[list[dict]], output: Path, notify):
+    def __init__(self, sample: list[dict], groups: list[list[dict]], output: Path, notify, *, dynamic=False, tabs=1):
         self.output, self.notify, self.started = output, notify, time.monotonic()
         self.lock = asyncio.Lock()
         self.log = EventLog(output)
         self.worker_updated = {}
         self.sample = sample
+        self.dynamic, self.tabs = dynamic, tabs
         self.workers = {
-            index: {"status": "pending", "jobs": [{**row, "status": "pending", "documents": []} for row in group]}
+            index: {
+                "status": "pending",
+                "jobs": [] if dynamic else [{**row, "status": "pending", "documents": []} for row in group],
+            }
             for index, group in enumerate(groups, 1)
         }
 
@@ -78,6 +119,10 @@ class AggregateReport:
             )
             elapsed = worker.get("seconds", 0) + idle_seconds
             stats = report_totals(worker)
+            tab_snapshots = copy.deepcopy(worker.get("tabs", []))
+            for tab in tab_snapshots:
+                if tab["status"] == "running":
+                    tab["activity_seconds"] = round(tab.get("activity_seconds", 0) + idle_seconds, 2)
             for job in copy.deepcopy(worker["jobs"]):
                 job["worker"] = index
                 for doc in job["documents"]:
@@ -94,7 +139,10 @@ class AggregateReport:
                     "links": len(worker["jobs"]),
                     "pdf_count": worker.get("pdf_count", 0),
                     "stop_reason": worker.get("stop_reason"),
+                    "error": worker.get("error"),
+                    "failure_stage": worker.get("failure_stage"),
                     "proxy_egress_ip": worker.get("proxy_egress_ip"),
+                    "tabs": tab_snapshots,
                     "activity": worker.get("activity", {"stage": "pending"}),
                     "activity_seconds": round(max(0, elapsed - worker.get("activity", {}).get("started_seconds", 0)), 2),
                     "elapsed_seconds": round(elapsed, 2),
@@ -105,6 +153,9 @@ class AggregateReport:
             )
             if worker.get("stop_reason") or worker["status"] == "error":
                 reasons.append(f"{folder}:{worker.get('stop_reason', 'error')}")
+        if self.dynamic:
+            assigned = {job["n"] for job in jobs}
+            jobs.extend({**row, "status": "pending", "documents": []} for row in self.sample if row["n"] not in assigned)
         addresses = sorted({worker["proxy_egress_ip"] for worker in workers if worker.get("proxy_egress_ip")})
         return {
             "engine": "camoufox",
@@ -112,6 +163,9 @@ class AggregateReport:
             "jobs": sorted(jobs, key=lambda job: job["n"]),
             "workers": workers,
             "worker_count": len(workers),
+            "tabs_per_browser": self.tabs,
+            "tab_count": len(workers) * self.tabs,
+            "queue_remaining": sum(job["status"] == "pending" for job in jobs),
             "proxy_egress_ips": addresses,
             "proxy_observed_browsers": sum(bool(worker.get("proxy_egress_ip")) for worker in workers),
             "seconds": round(time.monotonic() - self.started, 2),
@@ -143,6 +197,26 @@ class AggregateReport:
                 statuses = {worker["status"] for worker in self.workers.values()}
                 status = "error" if "error" in statuses else "stopped" if "stopped" in statuses else "finished"
             combined = self.snapshot(status)
+            if status == "finished" and combined["queue_remaining"]:
+                combined["status"] = "stopped"
+                combined["stop_reason"] = "queue_unprocessed"
+            incomplete = [
+                {
+                    "job": job["n"],
+                    "worker": job.get("worker"),
+                    "tab": job.get("tab"),
+                    "document": doc.get("id"),
+                    "status": doc["status"],
+                    "http_status": doc.get("http_status", doc.get("observed_http_status")),
+                    "error": doc.get("error"),
+                    "recaptcha_notice": doc.get("recaptcha_notice", False),
+                }
+                for job in combined["jobs"]
+                for doc in job["documents"]
+                if doc["status"] != "downloaded"
+            ]
+            combined["incomplete_document_counts"] = dict(Counter(doc["status"] for doc in incomplete))
+            atomic_write_json(self.output / "incomplete-documents.json", incomplete)
             atomic_write_json(self.output / "report.json", combined)
             self.log.summary("run_finished", combined, workers=combined["workers"])
             self.log.close()
@@ -157,20 +231,33 @@ async def run_parallel(
     workers: int,
     request_seconds: float,
     ca_bundle: Path,
-    proxy_ca: Path,
+    proxy_ca: Path | None,
     max_seconds: float,
-    proxy: BrightDataProxy | None,
+    proxy: BrightDataProxy | FixedProxyPool | None,
     notify,
     log_interval: float = 30,
+    tabs: int = 1,
 ) -> dict:
     if not math.isfinite(log_interval) or log_interval <= 0:
         raise ValueError("log_interval must be finite and positive")
     if workers > 1 and proxy is None:
-        raise ValueError("Multiple browsers require Bright Data credentials; use --workers 1 for a direct connection")
+        raise ValueError("Multiple browsers require proxy credentials; use --workers 1 for a direct connection")
+    if not 1 <= tabs <= 10:
+        raise ValueError("tabs must be between 1 and 10")
     groups = split_sample(sample, workers)
+    queue = asyncio.Queue()
+    for row in sample:
+        queue.put_nowait(row)
+
+    def next_job():
+        try:
+            return queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return None
+
     await asyncio.to_thread(output.mkdir, parents=True, exist_ok=False, mode=0o700)
     atomic_write_json(output / "sample.json", sample)
-    aggregate = AggregateReport(sample, groups, output, notify)
+    aggregate = AggregateReport(sample, groups, output, notify, dynamic=True, tabs=tabs)
     launch_lock = asyncio.Lock()
     atomic_write_json(output / "report.json", aggregate.snapshot())
     aggregate.log.summary("run_started", aggregate.snapshot(), worker_count=len(groups), log_interval=log_interval)
@@ -185,24 +272,150 @@ async def run_parallel(
                 await aggregate.heartbeat()
 
     async def worker(index, group):
-        async def progress(report, *, final):
-            await aggregate.update(index, report)
-
         nonlocal finished_workers
-        try:
+        folder = output / f"worker-{index}"
+        assigned_proxy = proxy.for_worker(index) if proxy else None
+        state = {"status": "running", "jobs": [], "tabs": [], "pdf_count": 0, "archive_count": 0}
+        tab_states = {}
+        tab_updated = {}
+        browser_started = time.monotonic()
+        stop_browser = asyncio.Event()
+
+        def activity(stage):
+            state["activity"] = {"stage": stage, "started_seconds": time.monotonic() - browser_started}
+            combine()
+
+        def combine():
+            state["seconds"] = round(time.monotonic() - browser_started, 2)
+            state["jobs"], state["tabs"] = [], []
+            state["pdf_count"] = state["archive_count"] = 0
+            for number, tab in sorted(tab_states.items()):
+                stats = report_totals(tab)
+                state["tabs"].append(
+                    {
+                        "tab": number,
+                        "status": tab["status"],
+                        "activity": tab.get("activity"),
+                        "activity_seconds": round(
+                            max(
+                                0,
+                                tab.get("seconds", 0)
+                                + (time.monotonic() - tab_updated[number] if tab["status"] == "running" else 0)
+                                - tab.get("activity", {}).get("started_seconds", 0),
+                            ),
+                            2,
+                        ),
+                        "stop_reason": tab.get("stop_reason"),
+                        **stats,
+                    }
+                )
+                state["pdf_count"] += tab.get("pdf_count", 0)
+                state["archive_count"] += tab.get("archive_count", 0)
+                for job in copy.deepcopy(tab["jobs"]):
+                    job["tab"] = number
+                    for doc in job["documents"]:
+                        for key in ("local_path", "archive_path"):
+                            if doc.get(key):
+                                doc[key] = f"tab-{number}/{doc[key]}"
+                        for item in doc.get("files", []):
+                            item["local_path"] = f"tab-{number}/{item['local_path']}"
+                    state["jobs"].append(job)
+            aggregate.observe(index, state)
+
+        async def tab_worker(number, context):
+            def observe(report):
+                tab_states[number] = copy.deepcopy(report)
+                tab_updated[number] = time.monotonic()
+                combine()
+
+            async def progress(report, *, final):
+                observe(report)
+                await aggregate.update(index, state)
+
             await run(
-                group,
-                output / f"worker-{index}",
+                [],
+                folder / f"tab-{number}",
                 request_seconds,
                 ca_bundle=ca_bundle,
                 max_seconds=max_seconds,
                 on_progress=progress,
-                on_state=lambda state: aggregate.observe(index, state),
-                proxy=proxy.for_worker(index) if proxy else None,
+                on_state=observe,
+                proxy=assigned_proxy,
                 proxy_ca=proxy_ca if proxy else None,
-                launch_lock=launch_lock,
+                context_override=context,
+                next_job=next_job,
+                stop_event=stop_browser,
+                egress_ip=state.get("proxy_egress_ip"),
             )
+
+        try:
+            folder.mkdir(mode=0o700)
+            async with asyncio.timeout(max_seconds):
+                activity("certificates")
+                await asyncio.to_thread(install_intermediate, folder / "profile", ca_bundle)
+                if (
+                    assigned_proxy
+                    and urlsplit(assigned_proxy["server"]).hostname == "brd.superproxy.io"
+                    and proxy_ca is None
+                ):
+                    raise ValueError("Bright Data proxy CA is required")
+                if assigned_proxy and proxy_ca is not None:
+                    await asyncio.to_thread(install_proxy_ca, folder / "profile", proxy_ca)
+                activity("browser_start")
+                async with browser_context(
+                    {
+                        "headless": "virtual",
+                        "os": "linux",
+                        "locale": "es-CO",
+                        "persistent_context": True,
+                        "user_data_dir": str(folder / "profile"),
+                        "accept_downloads": True,
+                        "ignore_https_errors": False,
+                        "proxy": assigned_proxy,
+                    },
+                    launch_lock,
+                ) as context:
+                    if assigned_proxy:
+                        activity("proxy_preflight")
+                        page = await context.new_page()
+                        response = await page.goto(
+                            "https://api.ipify.org", wait_until="domcontentloaded", timeout=int(request_seconds * 1000)
+                        )
+                        if response is None or response.status != 200:
+                            raise ValueError("Proxy browser preflight failed")
+                        address = (await page.locator("body").inner_text()).strip()
+                        state["proxy_egress_ip"] = str(ipaddress.ip_address(address))
+                        await page.close()
+                        aggregate.log.emit("proxy_ready", worker=index, egress_ip=state["proxy_egress_ip"])
+                    activity("tabs_running")
+                    async with asyncio.TaskGroup() as tab_tasks:
+                        for number in range(1, tabs + 1):
+                            tab_tasks.create_task(tab_worker(number, context))
+                statuses = {tab["status"] for tab in tab_states.values()}
+                state["status"] = "error" if "error" in statuses else "stopped" if stop_browser.is_set() else "finished"
+                reasons = {tab["stop_reason"] for tab in tab_states.values() if tab.get("stop_reason")}
+                state["stop_reason"] = "; ".join(sorted(reasons)) or None
+        except TimeoutError:
+            state.update(status="stopped", stop_reason="time_budget")
+        except BaseException as exc:
+            message = str(exc)
+            for value in sorted((assigned_proxy or {}).values(), key=len, reverse=True):
+                if value:
+                    message = message.replace(value, "[redacted]")
+            message = aggregate.log.clean(message)
+            state.update(
+                status="error",
+                stop_reason=f"browser_error:{type(exc).__name__}",
+                failure_stage=state.get("activity", {}).get("stage"),
+                error={"type": type(exc).__name__, "message": message[:800]},
+            )
+            if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt)):
+                state["status"] = "interrupted"
+                raise
         finally:
+            activity(state["status"])
+            atomic_write_json(folder / "report.json", state)
+            await aggregate.update(index, state)
             finished_workers += 1
             if finished_workers == len(groups):
                 stop_heartbeat.set()

@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 import aiohttp
 
 from scripts.pep_camoufox_logging import report_totals as totals
-from scripts.pep_camoufox_parallel import BrightDataProxy, run_parallel
+from scripts.pep_camoufox_parallel import BrightDataProxy, run_parallel, webshare_pool
 from src.services.notifications import send_telegram
 from src.sites.pep.source import RESULT_PATH, safe_url
 from src.sites.pep.workbook import LINK_COLUMN, read_rows
@@ -71,6 +71,7 @@ class ProgressReporter:
             f"Деклараций скачано: {stats['downloaded']}; не скачано из найденных: {stats['not_downloaded']}\n"
             f"PDF сохранено: {stats['pdf']}\n"
             f"Браузеров: {report.get('worker_count', 1)}; прошло: {minutes:.1f} мин; темп: {speed:.1f} деклараций/мин\n"
+            f"Вкладок: {report.get('tab_count', 1)}; активных ссылок: {stats['running']}; в очереди: {stats['pending']}\n"
             f"Разных прокси IP при проверке: {len(report.get('proxy_egress_ips', []))}\n"
             f"Статус: {report['status']}; причина остановки: {report.get('stop_reason') or 'нет'}"
         )
@@ -86,6 +87,8 @@ class ProgressReporter:
                         "declarations_per_minute": round(speed, 2),
                         "links_per_minute": round(processed / minutes, 2) if minutes else 0,
                         "worker_count": report.get("worker_count", 1),
+                        "tab_count": report.get("tab_count", 1),
+                        "proxy_egress_ips": report.get("proxy_egress_ips", []),
                     },
                     ensure_ascii=False,
                 )
@@ -110,9 +113,23 @@ async def execute(args, sample: list[dict]) -> dict:
     output = args.output / datetime.now(UTC).strftime("run-%Y%m%dT%H%M%S%fZ")
     username = os.getenv("BRIGHTDATA_PROXY_USERNAME", "").strip()
     password = os.getenv("BRIGHTDATA_PROXY_PASSWORD", "")
+    provider = os.getenv("PEP_PROXY_PROVIDER", "auto").strip().lower()
+    if provider == "auto":
+        provider = (
+            "webshare" if os.getenv("WEBSHARE_API_TOKEN", "").strip() else "brightdata" if username or password else "direct"
+        )
     proxy = None
-    if username or password:
+    proxy_ca = None
+    if provider == "webshare":
+        proxy = await webshare_pool(os.getenv("WEBSHARE_API_TOKEN", ""), min(args.workers, len(sample)))
+    elif provider == "brightdata":
         proxy = BrightDataProxy(os.getenv("BRIGHTDATA_PROXY_SERVER", "http://brd.superproxy.io:44445"), username, password)
+        proxy_ca = args.proxy_ca
+    elif provider != "direct":
+        raise ValueError("PEP_PROXY_PROVIDER must be webshare, brightdata, direct or auto")
+    print(
+        f"Proxy provider: {provider}; browsers: {min(args.workers, len(sample))}; tabs per browser: {args.tabs}", flush=True
+    )
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
         return await run_parallel(
             sample,
@@ -121,10 +138,11 @@ async def execute(args, sample: list[dict]) -> dict:
             request_seconds=args.timeout,
             ca_bundle=args.ca_bundle,
             max_seconds=args.max_minutes * 60,
-            proxy_ca=args.proxy_ca,
+            proxy_ca=proxy_ca,
             proxy=proxy,
             notify=ProgressReporter(session, output, token, chat_id),
             log_interval=args.log_interval,
+            tabs=args.tabs,
         )
 
 
@@ -136,14 +154,17 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=Path("/app/data"))
     parser.add_argument("--ca-bundle", type=Path, default=Path("/opt/pep-ca-bundle.pem"))
     parser.add_argument("--timeout", type=float, default=60)
-    parser.add_argument("--workers", type=int, default=1, help="1 to 4 independent browsers")
+    parser.add_argument("--workers", type=int, default=20, help="1 to 100 independent browsers")
+    parser.add_argument("--tabs", type=int, default=3, help="Concurrent tabs per browser (1..10)")
     parser.add_argument("--proxy-ca", type=Path, default=Path("/opt/brightdata-proxy-ca.crt"))
     parser.add_argument("--max-minutes", type=float, default=120)
     parser.add_argument("--log-interval", type=float, default=30, help="Heartbeat interval in seconds (5..300)")
     parser.add_argument("--preview", action="store_true", help="Read Excel only; no browser or Telegram requests")
     args = parser.parse_args()
-    if not 1 <= args.workers <= 4:
-        parser.error("workers must be between 1 and 4")
+    if not 1 <= args.workers <= 100:
+        parser.error("workers must be between 1 and 100")
+    if not 1 <= args.tabs <= 10:
+        parser.error("tabs must be between 1 and 10")
     if not math.isfinite(args.log_interval) or not 5 <= args.log_interval <= 300:
         parser.error("log-interval must be finite and between 5 and 300 seconds")
     if args.limit < 0 or args.offset < 0:
@@ -157,7 +178,7 @@ def main() -> int:
     if args.preview:
         return 0
     report = asyncio.run(execute(args, sample))
-    return 0 if all(job["status"] == "completed" for job in report["jobs"]) else 1
+    return 0 if report["status"] == "finished" and all(job["status"] == "completed" for job in report["jobs"]) else 1
 
 
 if __name__ == "__main__":

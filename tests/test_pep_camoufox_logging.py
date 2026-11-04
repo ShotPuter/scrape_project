@@ -63,12 +63,21 @@ def test_rotated_logs_and_stdout_hide_secrets(tmp_path, capsys):
 
 @pytest.mark.asyncio
 async def test_heartbeat_records_active_download_without_completed_links(monkeypatch, tmp_path):
-    async def fake_run(group, output, request_seconds, *, on_state, on_progress, **kwargs):
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def browser(*args):
+        yield object()
+
+    monkeypatch.setattr(parallel, "browser_context", browser)
+    monkeypatch.setattr(parallel, "install_intermediate", lambda *args: None)
+
+    async def fake_run(group, output, request_seconds, *, on_state, on_progress, next_job, **kwargs):
         report = {
             "status": "running",
             "seconds": 0,
             "activity": {"stage": "document_download", "job": 1, "document": "123", "started_seconds": 0},
-            "jobs": [{**group[0], "status": "running", "documents": [{"status": "running"}]}],
+            "jobs": [{**next_job(), "status": "running", "documents": [{"status": "running"}]}],
         }
         on_state(report)
         await asyncio.sleep(0.07)
@@ -100,8 +109,8 @@ async def test_heartbeat_records_active_download_without_completed_links(monkeyp
     assert heartbeats
     assert heartbeats[0]["processed"] == 0
     assert heartbeats[0]["running"] == 1
-    assert heartbeats[0]["workers"][0]["activity"]["stage"] == "document_download"
-    assert heartbeats[0]["workers"][0]["activity_seconds"] > 0
+    assert heartbeats[0]["workers"][0]["tabs"][0]["activity"]["stage"] == "document_download"
+    assert heartbeats[0]["workers"][0]["tabs"][0]["activity_seconds"] > 0
     assert events[-1]["event"] == "run_finished"
     assert events[-1]["processed"] == events[-1]["downloaded"] == 1
     assert set(asyncio.all_tasks()) <= before

@@ -93,3 +93,40 @@ def test_empty_results_do_not_count_as_downloads():
     assert stats["processed"] == 1
     assert stats["completed"] == stats["downloaded"] == 0
     assert stats["empty"] == 1
+
+
+@pytest.mark.asyncio
+async def test_webshare_configuration_never_imports_brightdata_ca(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    assigned = object()
+    monkeypatch.setenv("PEP_PROXY_PROVIDER", "webshare")
+    monkeypatch.setenv("WEBSHARE_API_TOKEN", "test-api-key")
+    monkeypatch.setenv("BRIGHTDATA_PROXY_USERNAME", "unused-zone")
+    monkeypatch.setenv("BRIGHTDATA_PROXY_PASSWORD", "unused-password")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "")
+
+    async def pool(token, workers):
+        assert token == "test-api-key" and workers == 20
+        return assigned
+
+    async def run(sample, output, **kwargs):
+        assert kwargs["proxy"] is assigned
+        assert kwargs["proxy_ca"] is None
+        assert kwargs["workers"] == 20 and kwargs["tabs"] == 3
+        return {"status": "finished"}
+
+    monkeypatch.setattr(server, "webshare_pool", pool)
+    monkeypatch.setattr(server, "run_parallel", run)
+    args = SimpleNamespace(
+        output=tmp_path,
+        workers=20,
+        tabs=3,
+        timeout=60,
+        max_minutes=120,
+        ca_bundle=tmp_path / "ca",
+        proxy_ca=tmp_path / "brd",
+        log_interval=30,
+    )
+    assert await server.execute(args, [{}] * 100) == {"status": "finished"}

@@ -9,7 +9,7 @@ import ipaddress
 import json
 import time
 from collections import Counter
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -22,6 +22,12 @@ from scripts.pep_camoufox_pilot import CA_BUNDLE, DEFAULT_SAMPLE, ROOT, install_
 from src.sites.pep.documents import MAX_PDF_BYTES, inspect_saved, save_payload
 from src.sites.pep.source import DOWNLOAD_PATH, LEGACY_PATH, RESULT_PATH, parse_results, safe_url
 from src.utils.atomic import atomic_write_json
+
+
+@asynccontextmanager
+async def borrowed_context(context):
+    """The browser owner closes the context after all its tabs finish."""
+    yield context
 
 
 @asynccontextmanager
@@ -78,8 +84,14 @@ async def run(
     proxy_ca: Path | None = None,
     launch_lock: asyncio.Lock | None = None,
     on_state=None,
+    context_override=None,
+    next_job=None,
+    stop_event: asyncio.Event | None = None,
+    egress_ip: str | None = None,
 ) -> dict:
     started = time.monotonic()
+    stop_event = stop_event or asyncio.Event()
+    page = None
     await asyncio.to_thread(output.mkdir, parents=True, mode=0o700)
     report = {
         "engine": "camoufox",
@@ -89,6 +101,7 @@ async def run(
         "single_browser": True,
         "tls_verification": True,
         "proxy": bool(proxy),
+        "proxy_egress_ip": egress_ip,
         "jobs": [{**row, "status": "pending", "documents": []} for row in sample],
     }
     atomic_write_json(output / "sample.json", sample)
@@ -109,6 +122,8 @@ async def run(
         report["pdf_count"] = len(list((output / "pdf").glob("*.pdf")))
         report["archive_count"] = len(list((output / "archives").glob("*.zip")))
         atomic_write_json(output / "report.json", report)
+        if report.get("stop_reason"):
+            stop_event.set()
         if on_state:
             on_state(report)
 
@@ -125,31 +140,37 @@ async def run(
     checkpoint()
     log.emit("worker_started", output=str(output), links=len(sample), proxy=bool(proxy))
     try:
-        activity("certificates")
-        await asyncio.to_thread(install_intermediate, output / "profile", ca_bundle)
-        if proxy:
-            if proxy_ca is None:
-                raise ValueError("Bright Data proxy CA is required")
-            await asyncio.to_thread(install_proxy_ca, output / "profile", proxy_ca)
+        if context_override is None:
+            activity("certificates")
+            await asyncio.to_thread(install_intermediate, output / "profile", ca_bundle)
+            if proxy:
+                if proxy_ca is None and urlsplit(proxy["server"]).hostname == "brd.superproxy.io":
+                    raise ValueError("Bright Data proxy CA is required")
+                if proxy_ca is not None:
+                    await asyncio.to_thread(install_proxy_ca, output / "profile", proxy_ca)
         activity("browser_start")
         async with (
             asyncio.timeout(max_seconds),
-            browser_context(
-                {
-                    "headless": "virtual",
-                    "os": "linux",
-                    "locale": "es-CO",
-                    "persistent_context": True,
-                    "user_data_dir": str(output / "profile"),
-                    "accept_downloads": True,
-                    "ignore_https_errors": False,
-                    "proxy": proxy,
-                },
-                launch_lock,
+            (
+                borrowed_context(context_override)
+                if context_override is not None
+                else browser_context(
+                    {
+                        "headless": "virtual",
+                        "os": "linux",
+                        "locale": "es-CO",
+                        "persistent_context": True,
+                        "user_data_dir": str(output / "profile"),
+                        "accept_downloads": True,
+                        "ignore_https_errors": False,
+                        "proxy": proxy,
+                    },
+                    launch_lock,
+                )
             ) as context,
         ):
             page = await context.new_page()
-            if proxy:
+            if proxy and context_override is None:
                 activity("proxy_preflight")
                 # Check the route in this browser, without sending proxy credentials to a separate client.
                 response = await page.goto(
@@ -178,17 +199,23 @@ async def run(
             page.on("request", on_request)
             page.on("response", on_response)
             page.on("pageerror", on_error)
-            for job in report["jobs"]:
-                if report.get("stop_reason"):
+            static_jobs = iter(report["jobs"])
+            while not stop_event.is_set():
+                job = next_job() if next_job is not None else next(static_jobs, None)
+                if job is None:
                     break
+                if next_job is not None:
+                    job = {**job, "status": "pending", "documents": []}
+                    report["jobs"].append(job)
                 job["status"] = "running"
                 link_started = time.monotonic()
                 job["started_at"] = datetime.now(UTC).isoformat()
+                job["started_seconds"] = round(link_started - started, 2)
                 checkpoint()
                 seen_pages, seen_docs = set(), set()
                 next_url = job["url"]
                 try:
-                    while next_url and not report.get("stop_reason"):
+                    while next_url and not stop_event.is_set():
                         if next_url in seen_pages or len(seen_pages) >= 25:
                             raise ValueError("Pagination cycle or page limit")
                         seen_pages.add(next_url)
@@ -218,6 +245,8 @@ async def run(
                         job["documents"].extend(documents)
                         checkpoint()
                         for doc in documents:
+                            if stop_event.is_set():
+                                break
                             doc_id = str(doc["id"])
                             if doc_id in seen_docs:
                                 continue
@@ -315,7 +344,9 @@ async def run(
                                 active = {}
                     job["status"] = (
                         "completed"
-                        if not report.get("stop_reason") and all(doc["status"] == "downloaded" for doc in job["documents"])
+                        if not stop_event.is_set()
+                        and not report.get("stop_reason")
+                        and all(doc["status"] == "downloaded" for doc in job["documents"])
                         else "partial"
                     )
                 except Exception as exc:
@@ -342,6 +373,8 @@ async def run(
                 if on_progress:
                     await on_progress(report, final=False)
             activity("browser_shutdown")
+        if stop_event.is_set() and not report.get("stop_reason"):
+            report["stop_reason"] = "browser_peer_stopped"
         report["status"] = "stopped" if report.get("stop_reason") else "finished"
     except TimeoutError:
         report.update(status="stopped", stop_reason="time_budget")
@@ -353,10 +386,13 @@ async def run(
         if isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError)):
             raise
     finally:
+        if page is not None:
+            with suppress(Exception):
+                await page.close()
         for job in report["jobs"]:
             if job["status"] == "running":
                 job["status"] = "interrupted"
-                job["seconds"] = round(time.monotonic() - link_started, 2)
+                job["seconds"] = round(time.monotonic() - started - job.get("started_seconds", 0), 2)
             for doc in job["documents"]:
                 if doc["status"] == "running":
                     doc["status"] = "interrupted"

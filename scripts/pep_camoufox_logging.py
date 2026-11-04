@@ -42,7 +42,12 @@ class EventLog:
                 *secrets,
                 *(
                     os.getenv(key, "")
-                    for key in ("BRIGHTDATA_PROXY_PASSWORD", "BRIGHTDATA_PROXY_USERNAME", "TELEGRAM_BOT_TOKEN")
+                    for key in (
+                        "BRIGHTDATA_PROXY_PASSWORD",
+                        "BRIGHTDATA_PROXY_USERNAME",
+                        "WEBSHARE_API_TOKEN",
+                        "TELEGRAM_BOT_TOKEN",
+                    )
                 ),
             )
             if value
