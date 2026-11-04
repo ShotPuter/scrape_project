@@ -1,10 +1,11 @@
-"""Small local test: two independent Camoufox browsers on Webshare proxies."""
+"""Bounded local test: one to four Camoufox browsers on Webshare proxies."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
+import math
 import os
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,16 +34,24 @@ async def execute(args):
                 "password": unquote(parsed.password or ""),
             }
         )
-        if len(proxies) == 2:
+        if len(proxies) == args.workers:
             break
-    if len(proxies) != 2:
-        raise ValueError("Webshare must supply at least two valid proxies with distinct addresses")
+    if len(proxies) != args.workers:
+        raise ValueError(f"Webshare must supply {args.workers} valid proxies with distinct addresses")
     sample = json.loads(args.sample.read_text())[: args.links]
-    if len(sample) < 2:
-        raise ValueError("The sample must contain at least two links")
+    if len(sample) < args.workers:
+        raise ValueError("The sample must contain at least one link per browser")
     output = ROOT / "data" / ("pep-webshare-" + datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ"))
     print(
-        json.dumps({"inventory_count": len(candidates), "browsers": 2, "links": len(sample), "output": str(output)}),
+        json.dumps(
+            {
+                "inventory_count": len(candidates),
+                "browsers": args.workers,
+                "tabs": args.tabs,
+                "links": len(sample),
+                "output": str(output),
+            }
+        ),
         flush=True,
     )
 
@@ -59,10 +68,12 @@ async def execute(args):
                 flush=True,
             )
 
-    await run_parallel(
+    return await run_parallel(
         sample,
         output,
-        workers=2,
+        workers=args.workers,
+        tabs=args.tabs,
+        tab_restarts=args.tab_restarts,
         request_seconds=60,
         ca_bundle=CA_BUNDLE,
         proxy_ca=None,
@@ -77,12 +88,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sample", type=Path, default=DEFAULT_SAMPLE)
     parser.add_argument("--links", type=int, default=2)
+    parser.add_argument("--workers", type=int, default=2, choices=range(1, 5))
+    parser.add_argument("--tabs", type=int, default=1, choices=range(1, 4))
+    parser.add_argument("--tab-restarts", type=int, default=0, choices=range(0, 4))
     parser.add_argument("--max-seconds", type=float, default=480)
     args = parser.parse_args()
-    if args.links < 2 or args.max_seconds <= 0:
-        parser.error("Use at least two links and a positive runtime limit")
-    asyncio.run(execute(args))
+    if args.links < args.workers or not math.isfinite(args.max_seconds) or args.max_seconds <= 0:
+        parser.error("Use at least one link per browser and a finite positive runtime limit")
+    report = asyncio.run(execute(args))
+    return 0 if report["status"] == "finished" and all(job["status"] == "completed" for job in report["jobs"]) else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
