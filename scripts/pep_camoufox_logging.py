@@ -8,9 +8,32 @@ import os
 import re
 import sys
 from collections import Counter
+from contextlib import suppress
 from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+
+def resource_snapshot(cgroup: Path = Path("/sys/fs/cgroup"), shm: Path = Path("/dev/shm")) -> dict:
+    """Read container counters when available; absence is not a run failure."""
+    result = {}
+    for filename in ("memory.current", "memory.max", "memory.peak", "pids.current", "pids.max"):
+        try:
+            value = (cgroup / filename).read_text().strip()
+            result[filename] = int(value) if value.isdigit() else value
+        except OSError:
+            pass
+    with suppress(OSError, ValueError):
+        result["memory.events"] = {
+            key: int(value) for key, value in (line.split() for line in (cgroup / "memory.events").read_text().splitlines())
+        }
+    try:
+        stats = os.statvfs(shm)
+        result["shm_total_bytes"] = stats.f_blocks * stats.f_frsize
+        result["shm_available_bytes"] = stats.f_bavail * stats.f_frsize
+    except OSError:
+        pass
+    return result
 
 
 def report_totals(report: dict) -> dict:

@@ -92,6 +92,8 @@ async def run(
     started = time.monotonic()
     stop_event = stop_event or asyncio.Event()
     page = None
+    closing_page = False
+    consecutive_failures = 0
     await asyncio.to_thread(output.mkdir, parents=True, mode=0o700)
     report = {
         "engine": "camoufox",
@@ -122,7 +124,8 @@ async def run(
         report["pdf_count"] = len(list((output / "pdf").glob("*.pdf")))
         report["archive_count"] = len(list((output / "archives").glob("*.zip")))
         atomic_write_json(output / "report.json", report)
-        if report.get("stop_reason"):
+        reason = report.get("stop_reason", "") or ""
+        if reason == "recaptcha_notice" or reason.startswith("download_http_") or reason == "time_budget":
             stop_event.set()
         if on_state:
             on_state(report)
@@ -136,6 +139,26 @@ async def run(
         }
         checkpoint()
         log.emit("activity", **report["activity"])
+
+    def target_failure(error):
+        message = str(error).lower()
+        return type(error).__name__ == "TargetClosedError" or any(
+            part in message for part in ("target crashed", "target page, context or browser has been closed")
+        )
+
+    def stop_target(error):
+        if not report.get("stop_reason"):
+            report["stop_reason"] = "page_crashed" if "target crashed" in str(error).lower() else "page_closed"
+        log.emit("target_unavailable", reason=report["stop_reason"], error=redact(error)[:800])
+        checkpoint()
+
+    def page_event(kind):
+        event = {"kind": kind, "seconds": round(time.monotonic() - started, 2), "expected": closing_page}
+        report.setdefault("page_events", []).append(event)
+        if not closing_page:
+            report["stop_reason"] = "page_crashed" if kind == "crash" else report.get("stop_reason") or "page_closed"
+        log.emit("page_lifecycle", **event, activity=report.get("activity"))
+        checkpoint()
 
     checkpoint()
     log.emit("worker_started", output=str(output), links=len(sample), proxy=bool(proxy))
@@ -199,8 +222,13 @@ async def run(
             page.on("request", on_request)
             page.on("response", on_response)
             page.on("pageerror", on_error)
+            page.on("crash", lambda *_: page_event("crash"))
+            page.on("close", lambda *_: page_event("close"))
             static_jobs = iter(report["jobs"])
-            while not stop_event.is_set():
+            while not stop_event.is_set() and not report.get("stop_reason"):
+                if getattr(page, "is_closed", lambda: False)():
+                    stop_target(RuntimeError("Target page, context or browser has been closed"))
+                    break
                 job = next_job() if next_job is not None else next(static_jobs, None)
                 if job is None:
                     break
@@ -215,7 +243,7 @@ async def run(
                 seen_pages, seen_docs = set(), set()
                 next_url = job["url"]
                 try:
-                    while next_url and not stop_event.is_set():
+                    while next_url and not stop_event.is_set() and not report.get("stop_reason"):
                         if next_url in seen_pages or len(seen_pages) >= 25:
                             raise ValueError("Pagination cycle or page limit")
                         seen_pages.add(next_url)
@@ -245,7 +273,7 @@ async def run(
                         job["documents"].extend(documents)
                         checkpoint()
                         for doc in documents:
-                            if stop_event.is_set():
+                            if stop_event.is_set() or report.get("stop_reason"):
                                 break
                             doc_id = str(doc["id"])
                             if doc_id in seen_docs:
@@ -312,19 +340,31 @@ async def run(
                                 if not await asyncio.to_thread(inspect_saved, output, doc_id):
                                     raise ValueError("Saved PDF validation failed")
                                 doc.update(metadata, http_status=200)
-                            except (TimeoutError, BrowserTimeout):
+                            except (TimeoutError, BrowserTimeout) as exc:
                                 doc.update(
                                     status="timeout",
-                                    recaptcha_notice=("Recaptcha did not pass validation" in await page.content()),
+                                    recaptcha_notice=False,
+                                    error={"type": type(exc).__name__, "message": redact(exc)[:800]},
                                 )
-                                await page.screenshot(path=str(output / f"timeout-{doc_id}.png"))
+                                try:
+                                    doc["recaptcha_notice"] = "Recaptcha did not pass validation" in await page.content()
+                                    await page.screenshot(path=str(output / f"timeout-{doc_id}.png"))
+                                except Exception as diagnostic_error:
+                                    doc["diagnostic_error"] = {
+                                        "type": type(diagnostic_error).__name__,
+                                        "message": redact(diagnostic_error)[:800],
+                                    }
+                                    if target_failure(diagnostic_error):
+                                        stop_target(diagnostic_error)
                                 if doc["recaptcha_notice"]:
                                     report["stop_reason"] = "recaptcha_notice"
                                 next_url = None
                                 break
                             except Exception as exc:
                                 doc.update(status="failed", error={"type": type(exc).__name__, "message": redact(exc)[:800]})
-                                report["stop_reason"] = "document_error"
+                                if target_failure(exc):
+                                    stop_target(exc)
+                                next_url = None
                                 break
                             finally:
                                 if doc["status"] == "running":
@@ -344,13 +384,15 @@ async def run(
                                 active = {}
                     job["status"] = (
                         "completed"
-                        if not stop_event.is_set()
+                        if not next_url
                         and not report.get("stop_reason")
                         and all(doc["status"] == "downloaded" for doc in job["documents"])
                         else "partial"
                     )
                 except Exception as exc:
                     job.update(status="failed", error={"type": type(exc).__name__, "message": redact(exc)[:800]})
+                    if target_failure(exc):
+                        stop_target(exc)
                     try:
                         job["page_title"] = redact(await page.title())
                         body = await page.locator("body").inner_text(timeout=5000)
@@ -360,6 +402,9 @@ async def run(
                             report["stop_reason"] = "recaptcha_notice"
                     except Exception:
                         pass
+                consecutive_failures = consecutive_failures + 1 if job["status"] == "failed" else 0
+                if consecutive_failures >= 3 and not report.get("stop_reason"):
+                    report["stop_reason"] = "consecutive_navigation_errors"
                 job["seconds"] = round(time.monotonic() - link_started, 2)
                 activity("between_links", job=job["n"])
                 log.summary(
@@ -373,6 +418,7 @@ async def run(
                 if on_progress:
                     await on_progress(report, final=False)
             activity("browser_shutdown")
+            closing_page = True
         if stop_event.is_set() and not report.get("stop_reason"):
             report["stop_reason"] = "browser_peer_stopped"
         report["status"] = "stopped" if report.get("stop_reason") else "finished"
@@ -383,9 +429,12 @@ async def run(
             status="interrupted" if isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError)) else "error",
             error={"type": type(exc).__name__, "message": redact(exc)[:800]},
         )
+        if target_failure(exc):
+            stop_target(exc)
         if isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError)):
             raise
     finally:
+        closing_page = True
         if page is not None:
             with suppress(Exception):
                 await page.close()

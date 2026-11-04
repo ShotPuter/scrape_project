@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from scripts.pep_camoufox_batch import browser_context, run
-from scripts.pep_camoufox_logging import EventLog, report_totals
+from scripts.pep_camoufox_logging import EventLog, report_totals, resource_snapshot
 from scripts.pep_camoufox_pilot import install_intermediate, install_proxy_ca
 from src.utils.atomic import atomic_write_json
 
@@ -98,6 +98,7 @@ class AggregateReport:
         self.worker_updated = {}
         self.sample = sample
         self.dynamic, self.tabs = dynamic, tabs
+        self.initial_resources = resource_snapshot()
         self.workers = {
             index: {
                 "status": "pending",
@@ -152,11 +153,16 @@ class AggregateReport:
                 }
             )
             if worker.get("stop_reason") or worker["status"] == "error":
-                reasons.append(f"{folder}:{worker.get('stop_reason', 'error')}")
+                reasons.append(f"{folder}:{worker.get('stop_reason') or 'error'}")
         if self.dynamic:
             assigned = {job["n"] for job in jobs}
             jobs.extend({**row, "status": "pending", "documents": []} for row in self.sample if row["n"] not in assigned)
         addresses = sorted({worker["proxy_egress_ip"] for worker in workers if worker.get("proxy_egress_ip")})
+        resources = resource_snapshot()
+        initial_events = self.initial_resources.get("memory.events", {})
+        resources["memory_events_since_start"] = {
+            key: max(0, value - initial_events.get(key, 0)) for key, value in resources.get("memory.events", {}).items()
+        }
         return {
             "engine": "camoufox",
             "status": status,
@@ -166,6 +172,7 @@ class AggregateReport:
             "tabs_per_browser": self.tabs,
             "tab_count": len(workers) * self.tabs,
             "queue_remaining": sum(job["status"] == "pending" for job in jobs),
+            "resources": resources,
             "proxy_egress_ips": addresses,
             "proxy_observed_browsers": sum(bool(worker.get("proxy_egress_ip")) for worker in workers),
             "seconds": round(time.monotonic() - self.started, 2),
@@ -189,7 +196,9 @@ class AggregateReport:
         async with self.lock:
             combined = self.snapshot()
             atomic_write_json(self.output / "report.json", combined)
-            self.log.summary("heartbeat", combined, interval=True, workers=combined["workers"])
+            self.log.summary(
+                "heartbeat", combined, interval=True, workers=combined["workers"], resources=combined["resources"]
+            )
 
     async def finish(self, status: str | None = None) -> dict:
         async with self.lock:
@@ -218,7 +227,7 @@ class AggregateReport:
             combined["incomplete_document_counts"] = dict(Counter(doc["status"] for doc in incomplete))
             atomic_write_json(self.output / "incomplete-documents.json", incomplete)
             atomic_write_json(self.output / "report.json", combined)
-            self.log.summary("run_finished", combined, workers=combined["workers"])
+            self.log.summary("run_finished", combined, workers=combined["workers"], resources=combined["resources"])
             self.log.close()
         await self.notify(combined, final=True)
         return combined
@@ -263,6 +272,23 @@ async def run_parallel(
     aggregate.log.summary("run_started", aggregate.snapshot(), worker_count=len(groups), log_interval=log_interval)
     stop_heartbeat = asyncio.Event()
     finished_workers = 0
+    startup_gate = asyncio.Event()
+    startup_finished, ready_workers = set(), set()
+
+    def startup_done(index, *, ready=False):
+        if index in startup_finished:
+            return
+        startup_finished.add(index)
+        if ready:
+            ready_workers.add(index)
+        aggregate.log.emit(
+            "browser_startup", worker=index, ready=ready, resolved=len(startup_finished), expected=len(groups)
+        )
+        if len(startup_finished) == len(groups):
+            aggregate.log.emit(
+                "queue_released", ready_browsers=len(ready_workers), failed_browsers=len(groups) - len(ready_workers)
+            )
+            startup_gate.set()
 
     async def heartbeat():
         while not stop_heartbeat.is_set():
@@ -280,6 +306,7 @@ async def run_parallel(
         tab_updated = {}
         browser_started = time.monotonic()
         stop_browser = asyncio.Event()
+        context_closing = False
 
         def activity(stage):
             state["activity"] = {"stage": stage, "started_seconds": time.monotonic() - browser_started}
@@ -375,6 +402,18 @@ async def run_parallel(
                     },
                     launch_lock,
                 ) as context:
+
+                    def context_closed(*_):
+                        if not context_closing:
+                            stop_browser.set()
+                            ready_workers.discard(index)
+                        state["context_closed"] = True
+                        aggregate.log.emit(
+                            "browser_context_closed", worker=index, expected=context_closing, activity=state.get("activity")
+                        )
+
+                    if hasattr(context, "on"):
+                        context.on("close", context_closed)
                     if assigned_proxy:
                         activity("proxy_preflight")
                         page = await context.new_page()
@@ -387,12 +426,16 @@ async def run_parallel(
                         state["proxy_egress_ip"] = str(ipaddress.ip_address(address))
                         await page.close()
                         aggregate.log.emit("proxy_ready", worker=index, egress_ip=state["proxy_egress_ip"])
+                    activity("waiting_for_browsers")
+                    startup_done(index, ready=True)
+                    await startup_gate.wait()
                     activity("tabs_running")
                     async with asyncio.TaskGroup() as tab_tasks:
                         for number in range(1, tabs + 1):
                             tab_tasks.create_task(tab_worker(number, context))
+                    context_closing = True
                 statuses = {tab["status"] for tab in tab_states.values()}
-                state["status"] = "error" if "error" in statuses else "stopped" if stop_browser.is_set() else "finished"
+                state["status"] = "error" if "error" in statuses else "stopped" if "stopped" in statuses else "finished"
                 reasons = {tab["stop_reason"] for tab in tab_states.values() if tab.get("stop_reason")}
                 state["stop_reason"] = "; ".join(sorted(reasons)) or None
         except TimeoutError:
@@ -413,6 +456,7 @@ async def run_parallel(
                 state["status"] = "interrupted"
                 raise
         finally:
+            startup_done(index)
             activity(state["status"])
             atomic_write_json(folder / "report.json", state)
             await aggregate.update(index, state)

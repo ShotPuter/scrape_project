@@ -513,3 +513,175 @@ async def test_failed_proxy_does_not_lose_queued_links_or_expose_password(monkey
     for path in (output / "report.json", output / "run.log", output / "worker-1/report.json"):
         text = path.read_text()
         assert "example-user" not in text and "secret-password" not in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["goto", "crash", "download", "timeout_diagnostics"])
+async def test_dead_tab_never_drains_queue_or_stops_healthy_peers(monkeypatch, tmp_path, failure):
+    original_sleep = asyncio.sleep
+    queue = iter(sample(10))
+    shared_stop = asyncio.Event()
+
+    class TargetClosedError(Exception):
+        pass
+
+    class Page:
+        url = ""
+        handlers = {}
+        closed = False
+
+        def on(self, event, handler):
+            self.handlers[event] = handler
+
+        def is_closed(self):
+            return self.closed
+
+        async def goto(self, url, **kwargs):
+            self.url = url
+            if failure == "goto":
+                raise TargetClosedError("Page.goto: Target page, context or browser has been closed")
+            return SimpleNamespace(status=200)
+
+        def locator(self, selector):
+            return self
+
+        async def wait_for(self, **kwargs):
+            if failure == "crash":
+                self.handlers["crash"](self)
+                raise batch.BrowserError("Locator.wait_for: Target crashed")
+
+        async def content(self):
+            if failure == "timeout_diagnostics":
+                raise TargetClosedError("Page.content: Target page, context or browser has been closed")
+            return "test"
+
+        async def title(self):
+            return "test"
+
+        async def inner_text(self, **kwargs):
+            return "test"
+
+        async def screenshot(self, **kwargs):
+            pass
+
+        async def close(self):
+            self.closed = True
+            self.handlers["close"](self)
+
+    class Context:
+        async def new_page(self):
+            return Page()
+
+    async def sleep(seconds):
+        await original_sleep(0)
+
+    async def download(*args):
+        if failure == "timeout_diagnostics":
+            raise batch.BrowserTimeout("Download timed out")
+        raise TargetClosedError("Locator.click: Target page, context or browser has been closed")
+
+    # Let discovery succeed before the diagnostic content call fails.
+    original_content = Page.content
+    content_calls = 0
+
+    async def content(self):
+        nonlocal content_calls
+        content_calls += 1
+        if content_calls == 1:
+            return "test"
+        return await original_content(self)
+
+    monkeypatch.setattr(Page, "content", content)
+    monkeypatch.setattr(batch.asyncio, "sleep", sleep)
+    monkeypatch.setattr(batch, "parse_results", lambda *args: ([{"id": "123", "requires_captcha": True}], None))
+    monkeypatch.setattr(batch, "download_once", download)
+    result = await batch.run(
+        [], tmp_path / "tab", 10, context_override=Context(), next_job=lambda: next(queue, None), stop_event=shared_stop
+    )
+    assert len(result["jobs"]) == 1
+    assert next(queue)["n"] == 2
+    assert result["status"] == "stopped"
+    assert result["stop_reason"] == ("page_crashed" if failure == "crash" else "page_closed")
+    assert not shared_stop.is_set()
+    if failure == "timeout_diagnostics":
+        doc = result["jobs"][0]["documents"][0]
+        assert doc["status"] == "timeout"
+        assert doc["error"]["type"] == "TimeoutError"
+        assert doc["diagnostic_error"]["type"] == "TargetClosedError"
+    assert result["page_events"][-1]["kind"] == "close"
+    assert result["page_events"][-1]["expected"] is True
+
+
+@pytest.mark.asyncio
+async def test_queue_waits_for_every_browser_startup_result(monkeypatch, tmp_path, fake_browsers):
+    last_starting, release_last = asyncio.Event(), asyncio.Event()
+    started_tabs = []
+    contexts = []
+
+    @asynccontextmanager
+    async def browser(options, lock):
+        if options["proxy"]["server"] == "http://192.0.2.2:80":
+            last_starting.set()
+            await release_last.wait()
+
+        class Page:
+            async def goto(self, *args, **kwargs):
+                return SimpleNamespace(status=200)
+
+            def locator(self, *args):
+                return self
+
+            async def inner_text(self):
+                return "192.0.2.1"
+
+            async def close(self):
+                pass
+
+        class Context:
+            async def new_page(self):
+                return Page()
+
+        context = Context()
+        contexts.append(context)
+        yield context
+
+    async def consume(group, output, request_seconds, *, next_job, on_progress, **kwargs):
+        started_tabs.append(str(output))
+        state = {"status": "finished", "jobs": []}
+        while (row := next_job()) is not None:
+            state["jobs"].append({**row, "status": "completed", "documents": []})
+        await on_progress(state, final=True)
+
+    monkeypatch.setattr(parallel, "browser_context", browser)
+    monkeypatch.setattr(parallel, "run", consume)
+    output = tmp_path / "run"
+    task = asyncio.create_task(
+        parallel.run_parallel(
+            sample(10),
+            output,
+            workers=2,
+            tabs=3,
+            request_seconds=10,
+            ca_bundle=tmp_path / "ca",
+            proxy_ca=None,
+            max_seconds=10,
+            proxy=parallel.FixedProxyPool([{"server": f"http://192.0.2.{i}:80"} for i in (1, 2)]),
+            notify=ProgressReporter(None, output),
+        )
+    )
+    try:
+        await asyncio.wait_for(last_starting.wait(), timeout=5)
+        await asyncio.sleep(0)
+        assert not started_tabs
+        release_last.set()
+        result = await asyncio.wait_for(task, timeout=5)
+        assert len(contexts) == 2
+        assert len(started_tabs) == 6
+        assert result["job_counts"] == {"completed": 10}
+        events = [json.loads(line) for line in (output / "run.log").read_text().splitlines()]
+        assert next(event for event in events if event["event"] == "queue_released")["ready_browsers"] == 2
+    finally:
+        release_last.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
