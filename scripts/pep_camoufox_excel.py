@@ -72,6 +72,7 @@ class ProgressReporter:
             f"PDF сохранено: {stats['pdf']}\n"
             f"Браузеров: {report.get('worker_count', 1)}; прошло: {minutes:.1f} мин; темп: {speed:.1f} деклараций/мин\n"
             f"Вкладок: {report.get('tab_count', 1)}; активных ссылок: {stats['running']}; в очереди: {stats['pending']}\n"
+            f"Попыток восстановления вкладок: {report.get('tab_restarts', 0)}\n"
             f"Разных прокси IP при проверке: {len(report.get('proxy_egress_ips', []))}\n"
             f"Статус: {report['status']}; причина остановки: {report.get('stop_reason') or 'нет'}"
         )
@@ -88,6 +89,7 @@ class ProgressReporter:
                         "links_per_minute": round(processed / minutes, 2) if minutes else 0,
                         "worker_count": report.get("worker_count", 1),
                         "tab_count": report.get("tab_count", 1),
+                        "tab_restarts": report.get("tab_restarts", 0),
                         "proxy_egress_ips": report.get("proxy_egress_ips", []),
                     },
                     ensure_ascii=False,
@@ -143,6 +145,7 @@ async def execute(args, sample: list[dict]) -> dict:
             notify=ProgressReporter(session, output, token, chat_id),
             log_interval=args.log_interval,
             tabs=args.tabs,
+            tab_restarts=args.tab_restarts,
         )
 
 
@@ -156,6 +159,7 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=60)
     parser.add_argument("--workers", type=int, default=20, help="1 to 100 independent browsers")
     parser.add_argument("--tabs", type=int, default=3, help="Concurrent tabs per browser (1..10)")
+    parser.add_argument("--tab-restarts", type=int, default=3, help="Replacement tabs after crashes per slot (0..100)")
     parser.add_argument("--proxy-ca", type=Path, default=Path("/opt/brightdata-proxy-ca.crt"))
     parser.add_argument("--max-minutes", type=float, default=120)
     parser.add_argument("--log-interval", type=float, default=30, help="Heartbeat interval in seconds (5..300)")
@@ -165,6 +169,8 @@ def main() -> int:
         parser.error("workers must be between 1 and 100")
     if not 1 <= args.tabs <= 10:
         parser.error("tabs must be between 1 and 10")
+    if not 0 <= args.tab_restarts <= 100:
+        parser.error("tab-restarts must be between 0 and 100")
     if not math.isfinite(args.log_interval) or not 5 <= args.log_interval <= 300:
         parser.error("log-interval must be finite and between 5 and 300 seconds")
     if args.limit < 0 or args.offset < 0:

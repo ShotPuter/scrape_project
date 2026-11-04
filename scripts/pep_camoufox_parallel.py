@@ -144,6 +144,7 @@ class AggregateReport:
                     "failure_stage": worker.get("failure_stage"),
                     "proxy_egress_ip": worker.get("proxy_egress_ip"),
                     "tabs": tab_snapshots,
+                    "tab_restarts": sum(tab.get("restarts", 0) for tab in tab_snapshots),
                     "activity": worker.get("activity", {"stage": "pending"}),
                     "activity_seconds": round(max(0, elapsed - worker.get("activity", {}).get("started_seconds", 0)), 2),
                     "elapsed_seconds": round(elapsed, 2),
@@ -171,6 +172,7 @@ class AggregateReport:
             "worker_count": len(workers),
             "tabs_per_browser": self.tabs,
             "tab_count": len(workers) * self.tabs,
+            "tab_restarts": sum(worker["tab_restarts"] for worker in workers),
             "queue_remaining": sum(job["status"] == "pending" for job in jobs),
             "resources": resources,
             "proxy_egress_ips": addresses,
@@ -246,6 +248,7 @@ async def run_parallel(
     notify,
     log_interval: float = 30,
     tabs: int = 1,
+    tab_restarts: int = 3,
 ) -> dict:
     if not math.isfinite(log_interval) or log_interval <= 0:
         raise ValueError("log_interval must be finite and positive")
@@ -253,6 +256,8 @@ async def run_parallel(
         raise ValueError("Multiple browsers require proxy credentials; use --workers 1 for a direct connection")
     if not 1 <= tabs <= 10:
         raise ValueError("tabs must be between 1 and 10")
+    if not 0 <= tab_restarts <= 100:
+        raise ValueError("tab_restarts must be between 0 and 100")
     groups = split_sample(sample, workers)
     queue = asyncio.Queue()
     for row in sample:
@@ -321,6 +326,8 @@ async def run_parallel(
                 state["tabs"].append(
                     {
                         "tab": number,
+                        "restarts": tab.get("restarts", 0),
+                        "recovery_history": tab.get("recovery_history", []),
                         "status": tab["status"],
                         "activity": tab.get("activity"),
                         "activity_seconds": round(
@@ -350,8 +357,48 @@ async def run_parallel(
             aggregate.observe(index, state)
 
         async def tab_worker(number, context):
+            generations = {}
+            generation = 0
+            slot_started = time.monotonic()
+            generation_offset = 0.0
+            tab_folder = folder / f"tab-{number}"
+
             def observe(report):
-                tab_states[number] = copy.deepcopy(report)
+                generations[generation] = copy.deepcopy(report)
+                merged = copy.deepcopy(report)
+                merged.update(
+                    jobs=[],
+                    pdf_count=0,
+                    archive_count=0,
+                    restarts=generation,
+                    recovery_history=[],
+                    seconds=round(time.monotonic() - slot_started, 2),
+                )
+                if merged.get("activity"):
+                    merged["activity"]["started_seconds"] += generation_offset
+                for segment_index, segment in sorted(generations.items()):
+                    merged["pdf_count"] += segment.get("pdf_count", 0)
+                    merged["archive_count"] += segment.get("archive_count", 0)
+                    if segment_index < generation:
+                        merged["recovery_history"].append(
+                            {
+                                "generation": segment_index,
+                                "stop_reason": segment.get("stop_reason"),
+                                "error": segment.get("error"),
+                                "seconds": segment.get("seconds", 0),
+                            }
+                        )
+                    for job in copy.deepcopy(segment["jobs"]):
+                        job["tab_generation"] = segment_index
+                        if segment_index:
+                            for doc in job["documents"]:
+                                for key in ("local_path", "archive_path"):
+                                    if doc.get(key):
+                                        doc[key] = f"restart-{segment_index}/{doc[key]}"
+                                for item in doc.get("files", []):
+                                    item["local_path"] = f"restart-{segment_index}/{item['local_path']}"
+                        merged["jobs"].append(job)
+                tab_states[number] = merged
                 tab_updated[number] = time.monotonic()
                 combine()
 
@@ -359,21 +406,58 @@ async def run_parallel(
                 observe(report)
                 await aggregate.update(index, state)
 
-            await run(
-                [],
-                folder / f"tab-{number}",
-                request_seconds,
-                ca_bundle=ca_bundle,
-                max_seconds=max_seconds,
-                on_progress=progress,
-                on_state=observe,
-                proxy=assigned_proxy,
-                proxy_ca=proxy_ca if proxy else None,
-                context_override=context,
-                next_job=next_job,
-                stop_event=stop_browser,
-                egress_ip=state.get("proxy_egress_ip"),
-            )
+            try:
+                while True:
+                    generation_offset = time.monotonic() - slot_started
+                    await run(
+                        [],
+                        tab_folder if generation == 0 else tab_folder / f"restart-{generation}",
+                        request_seconds,
+                        ca_bundle=ca_bundle,
+                        max_seconds=max_seconds,
+                        on_progress=progress,
+                        on_state=observe,
+                        proxy=assigned_proxy,
+                        proxy_ca=proxy_ca if proxy else None,
+                        context_override=context,
+                        next_job=next_job,
+                        stop_event=stop_browser,
+                        egress_ip=state.get("proxy_egress_ip"),
+                    )
+                    report = generations.get(generation, {})
+                    if (
+                        report.get("stop_reason") not in {"page_closed", "page_crashed"}
+                        or stop_browser.is_set()
+                        or queue.empty()
+                    ):
+                        break
+                    if generation >= tab_restarts:
+                        aggregate.log.emit(
+                            "tab_restart_limit",
+                            worker=index,
+                            tab=number,
+                            restarts=generation,
+                            reason=report.get("stop_reason"),
+                        )
+                        break
+                    aggregate.log.emit(
+                        "tab_restarting",
+                        worker=index,
+                        tab=number,
+                        generation=generation + 1,
+                        reason=report.get("stop_reason"),
+                    )
+                    try:
+                        await asyncio.wait_for(stop_browser.wait(), timeout=1)
+                        break
+                    except TimeoutError:
+                        pass
+                    if queue.empty():
+                        break
+                    generation += 1
+            finally:
+                if number in tab_states:
+                    atomic_write_json(tab_folder / "summary.json", tab_states[number])
 
         try:
             folder.mkdir(mode=0o700)

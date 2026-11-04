@@ -685,3 +685,110 @@ async def test_queue_waits_for_every_browser_startup_result(monkeypatch, tmp_pat
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_replacement_tab_keeps_context_proxy_and_previous_results(monkeypatch, tmp_path, fake_browsers):
+    calls = []
+
+    async def fake_run(group, output, request_seconds, *, context_override, proxy, next_job, on_progress, **kwargs):
+        calls.append((context_override, dict(proxy), output))
+        jobs = []
+        while (row := next_job()) is not None:
+            jobs.append(
+                {
+                    **row,
+                    "status": "completed",
+                    "documents": [
+                        {
+                            "id": str(row["n"]),
+                            "status": "downloaded",
+                            "local_path": "pdf/test.pdf",
+                            "files": [{"local_path": "pdf/test.pdf"}],
+                        }
+                    ],
+                }
+            )
+            if len(calls) == 1:
+                # Preserve a successful download and a separate failed link before replacing the page.
+                broken = next_job()
+                jobs.append(
+                    {
+                        **broken,
+                        "status": "failed",
+                        "documents": [],
+                        "error": {"type": "TargetClosedError", "message": "page closed"},
+                    }
+                )
+                break
+        report = {
+            "status": "stopped" if len(calls) == 1 else "finished",
+            "jobs": jobs,
+            "stop_reason": "page_closed" if len(calls) == 1 else None,
+            "pdf_count": sum(job["status"] == "completed" for job in jobs),
+        }
+        await on_progress(report, final=True)
+
+    monkeypatch.setattr(parallel, "run", fake_run)
+    output = tmp_path / "run"
+    proxy = parallel.FixedProxyPool([{"server": "http://192.0.2.1:80", "username": "test-user", "password": "test-pass"}])
+    result = await parallel.run_parallel(
+        sample(5),
+        output,
+        workers=1,
+        tabs=1,
+        request_seconds=10,
+        ca_bundle=tmp_path / "ca",
+        proxy_ca=None,
+        max_seconds=10,
+        proxy=proxy,
+        notify=ProgressReporter(None, output),
+    )
+    assert len(calls) == 2
+    assert calls[0][0] is calls[1][0]
+    assert calls[0][1] == calls[1][1]
+    assert len(fake_browsers) == 1
+    assert result["job_counts"] == {"completed": 4, "failed": 1}
+    assert result["tab_restarts"] == 1
+    assert result["pdf_count"] == 4
+    assert [job["n"] for job in result["jobs"]] == [1, 2, 3, 4, 5]
+    assert result["jobs"][0]["documents"][0]["local_path"] == "worker-1/tab-1/pdf/test.pdf"
+    assert result["jobs"][2]["documents"][0]["local_path"] == "worker-1/tab-1/restart-1/pdf/test.pdf"
+    tab = result["workers"][0]["tabs"][0]
+    assert tab["status"] == "finished"
+    assert tab["recovery_history"][0]["stop_reason"] == "page_closed"
+    summary = json.loads((output / "worker-1/tab-1/summary.json").read_text())
+    assert len(summary["jobs"]) == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("reason", "expected_calls"), [("page_crashed", 3), ("recaptcha_notice", 1)])
+async def test_replacement_limit_and_site_refusal(monkeypatch, tmp_path, fake_browsers, reason, expected_calls):
+    calls = []
+
+    async def fake_run(group, output, request_seconds, *, next_job, on_progress, **kwargs):
+        row = next_job()
+        calls.append(row["n"])
+        await on_progress(
+            {"status": "stopped", "stop_reason": reason, "jobs": [{**row, "status": "failed", "documents": []}]}, final=True
+        )
+
+    monkeypatch.setattr(parallel, "run", fake_run)
+    output = tmp_path / "run"
+    result = await parallel.run_parallel(
+        sample(10),
+        output,
+        workers=1,
+        tabs=1,
+        tab_restarts=2,
+        request_seconds=10,
+        ca_bundle=tmp_path / "ca",
+        proxy_ca=None,
+        max_seconds=10,
+        proxy=parallel.FixedProxyPool([{"server": "http://192.0.2.1:80"}]),
+        notify=ProgressReporter(None, output),
+    )
+    assert len(calls) == expected_calls
+    assert result["tab_restarts"] == expected_calls - 1
+    assert result["queue_remaining"] == 10 - expected_calls
+    assert result["status"] == "stopped"

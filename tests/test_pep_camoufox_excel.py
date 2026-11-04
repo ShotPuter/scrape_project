@@ -123,6 +123,7 @@ async def test_webshare_configuration_never_imports_brightdata_ca(monkeypatch, t
         output=tmp_path,
         workers=20,
         tabs=3,
+        tab_restarts=3,
         timeout=60,
         max_minutes=120,
         ca_bundle=tmp_path / "ca",
