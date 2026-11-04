@@ -1,0 +1,43 @@
+services:
+  pep-camoufox:
+    image: pep-camoufox:test
+    build:
+      context: .
+      dockerfile: Dockerfile.camoufox
+    init: true
+    restart: "no"
+    shm_size: 1gb
+    mem_limit: 4g
+    cpus: 2
+    pids_limit: 512
+    stop_signal: SIGINT
+    stop_grace_period: 1m
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+    volumes:
+      - type: bind
+        source: ${PEP_INPUT:-./docs/DECLARACIONES_PEP.xlsx}
+        target: /input/DECLARACIONES_PEP.xlsx
+        read_only: true
+        bind:
+          create_host_path: false
+      - pep-camoufox-data:/app/data
+    command:
+      - /input/DECLARACIONES_PEP.xlsx
+      - --limit
+      - "${PEP_LIMIT:-100}"
+      - --offset
+      - "${PEP_OFFSET:-0}"
+      - --timeout
+      - "${PEP_TIMEOUT:-60}"
+      - --max-minutes
+      - "${PEP_MAX_MINUTES:-120}"
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  pep-camoufox-data:

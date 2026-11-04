@@ -11,6 +11,8 @@ htmlcov/
 venv/
 .env
 .venv/
+/.camoufox-deps/
+/.env.camoufox
 env/
 ENV/
 
@@ -36,3 +38,6 @@ data/*
 
 # Local cookies may contain session credentials.
 cookies*.txt
+
+# PEP workbook contains personal and financial data.
+docs/DECLARACIONES_PEP.xlsx

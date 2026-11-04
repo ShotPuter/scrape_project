@@ -1,0 +1,2 @@
+# Optional one-document Camoufox experiment; install separately from the main scraper.
+camoufox==0.5.9

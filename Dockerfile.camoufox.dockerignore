@@ -1,0 +1,14 @@
+*
+!Dockerfile.camoufox
+!docker/
+!docker/camoufox-requirements.txt
+!docker/pep-sectigo-intermediate.pem
+!config.py
+!src/
+!src/**
+!scripts/
+!scripts/pep_camoufox_pilot.py
+!scripts/pep_camoufox_batch.py
+!scripts/pep_camoufox_excel.py
+**/__pycache__
+**/*.py[cod]
