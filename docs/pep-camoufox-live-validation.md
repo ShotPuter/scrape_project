@@ -44,3 +44,13 @@ Runner возвращает ненулевой exit code при неполном
 их причина не установлена. Для проверки ресурсной причины нужны фактические
 лимиты контейнера, RAM/CPU сервера, `resources` из серверного отчёта и системные
 логи. Локальные успешные скачивания не заменяют эту диагностику.
+## Browser rotation — 2026-11-05
+
+Local Webshare run `pep-webshare-20261105T143849804647Z`: two real browsers,
+three tabs each, four links, forced browser rotation after each claimed link.
+Completed in 112.33 seconds: four completed links, 13 PDFs, two whole-browser
+restarts, zero crash-related tab replacements. All four context closures were
+expected. Every exported PDF path exists and all 13 SHA-256 values match.
+The queue retained all four unique jobs across browser generations. The test
+did not send Telegram messages. This validates lifecycle and persistence,
+not multi-hour memory stability or server capacity.

@@ -110,6 +110,7 @@ class ProgressReporter:
             f" · Вкладок настроено: {report.get('tab_count', 1)}\n"
             f"Прокси IP: {len(report.get('proxy_egress_ips', []))}"
             f" · Замен вкладок: {report.get('tab_restarts', 0)}\n\n"
+            f"Перезапусков браузеров: {report.get('browser_restarts', 0)}\n\n"
             f"⏱ Прошло: {minutes:.1f} мин · Новых деклараций/мин: {speed:.1f}\n"
             f"Статус: {report['status']}\n"
             f"Причина остановки: {(report.get('stop_reason') or 'нет')[:500]}"
@@ -215,9 +216,7 @@ async def _execute(args, sample: list[dict]) -> dict:
         proxy_ca = args.proxy_ca
     elif provider not in {"direct", "webshare", "brightdata"}:
         raise ValueError("PEP_PROXY_PROVIDER must be webshare, brightdata, direct or auto")
-    print(
-        f"Proxy provider: {provider}; browsers: {min(args.workers, remaining)}; tabs per browser: {args.tabs}", flush=True
-    )
+    print(f"Proxy provider: {provider}; browsers: {min(args.workers, remaining)}; tabs per browser: {args.tabs}", flush=True)
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
         reporter.session = session
         return await run_parallel(
@@ -235,6 +234,8 @@ async def _execute(args, sample: list[dict]) -> dict:
             tab_restarts=args.tab_restarts,
             reusable=getattr(args, "reusable", None),
             resume_history=getattr(args, "resume_history", None),
+            browser_max_seconds=getattr(args, "browser_max_minutes", 20) * 60,
+            browser_max_links=getattr(args, "browser_max_links", 40),
         )
 
 
@@ -251,11 +252,15 @@ def main() -> int:
     parser.add_argument("--workers", type=int, default=20, help="1 to 100 independent browsers")
     parser.add_argument("--tabs", type=int, default=3, help="Concurrent tabs per browser (1..10)")
     parser.add_argument("--tab-restarts", type=int, default=3, help="Replacement tabs after crashes per slot (0..100)")
+    parser.add_argument("--browser-max-minutes", type=float, default=20, help="Drain and rotate browser after this age")
+    parser.add_argument("--browser-max-links", type=int, default=40, help="Maximum links claimed per browser cycle")
     parser.add_argument("--proxy-ca", type=Path, default=Path("/opt/brightdata-proxy-ca.crt"))
     parser.add_argument("--max-minutes", type=float, default=120)
     parser.add_argument("--log-interval", type=float, default=30, help="Heartbeat interval in seconds (5..300)")
     parser.add_argument("--preview", action="store_true", help="Read Excel only; no browser or Telegram requests")
     args = parser.parse_args()
+    if not math.isfinite(args.browser_max_minutes) or args.browser_max_minutes <= 0 or args.browser_max_links < 1:
+        parser.error("browser-max-minutes and browser-max-links must be positive")
     if not 1 <= args.workers <= 100:
         parser.error("workers must be between 1 and 100")
     if not 1 <= args.tabs <= 10:

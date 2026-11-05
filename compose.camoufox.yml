@@ -47,6 +47,10 @@ services:
       - "${PEP_TAB_RESTARTS:-3}"
       - --log-interval
       - "${PEP_LOG_INTERVAL:-30}"
+      - --browser-max-minutes
+      - "${PEP_BROWSER_MAX_MINUTES:-20}"
+      - --browser-max-links
+      - "${PEP_BROWSER_MAX_LINKS:-40}"
     logging:
       driver: json-file
       options:

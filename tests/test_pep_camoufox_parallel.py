@@ -18,6 +18,64 @@ def sample(size):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("age_limit", [False, True])
+async def test_browser_rotation_drains_keeps_files_and_closes_old_context(monkeypatch, tmp_path, fake_browsers, age_limit):
+    from src.sites.pep.documents import save_payload
+
+    original = parallel.browser_context
+    alive, maximum, closed = 0, 0, 0
+
+    @asynccontextmanager
+    async def tracked(options, lock):
+        nonlocal alive, maximum, closed
+        async with original(options, lock) as context:
+            alive += 1
+            maximum = max(maximum, alive)
+            try:
+                yield context
+            finally:
+                alive -= 1
+                closed += 1
+
+    async def fake_run(group, output, request_seconds, *, next_job, on_progress, **kwargs):
+        jobs = []
+        output.mkdir(parents=True, exist_ok=True)
+        while (row := next_job()) is not None:
+            await asyncio.sleep(0.02 if age_limit else 0.001)
+            metadata = save_payload(b"%PDF-1.4\ntest\n%%EOF", output, str(row["n"]))
+            jobs.append({**row, "status": "completed", "documents": [{"id": str(row["n"]), **metadata}]})
+        await on_progress({"status": "finished", "jobs": jobs, "pdf_count": len(jobs)}, final=True)
+
+    async def notify(report, *, final):
+        pass
+
+    monkeypatch.setattr(parallel, "browser_context", tracked)
+    monkeypatch.setattr(parallel, "run", fake_run)
+    output = tmp_path / "run"
+    result = await parallel.run_parallel(
+        sample(12),
+        output,
+        workers=2,
+        tabs=3,
+        request_seconds=10,
+        ca_bundle=tmp_path / "ca",
+        proxy_ca=None,
+        max_seconds=10,
+        proxy=parallel.FixedProxyPool([{"server": f"http://192.0.2.{i}:80"} for i in (1, 2)]),
+        notify=notify,
+        browser_max_seconds=0.01 if age_limit else 1000,
+        browser_max_links=1000 if age_limit else 2,
+    )
+    assert result["status"] == "finished"
+    assert result["browser_restarts"] >= 2
+    assert result["tab_restarts"] == 0
+    assert maximum <= 2 and alive == 0 and closed == len(fake_browsers)
+    assert len({job["n"] for job in result["jobs"]}) == 12
+    assert result["pdf_count"] == 12
+    assert all((output / doc["local_path"]).exists() for job in result["jobs"] for doc in job["documents"])
+
+
+@pytest.mark.asyncio
 async def test_resume_only_queues_missing_links(monkeypatch, tmp_path, fake_browsers):
     from scripts.pep_camoufox_resume import resume_history
     from src.sites.pep.documents import save_payload

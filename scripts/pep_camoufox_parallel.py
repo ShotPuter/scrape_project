@@ -182,6 +182,7 @@ class AggregateReport:
                     "worker": index,
                     "status": worker["status"],
                     "links": len(worker["jobs"]),
+                    "browser_restarts": worker.get("browser_restarts", 0),
                     "pdf_count": worker.get("pdf_count", 0),
                     "stop_reason": worker.get("stop_reason"),
                     "error": worker.get("error"),
@@ -221,6 +222,7 @@ class AggregateReport:
             "tabs_per_browser": self.tabs,
             "tab_count": len(workers) * self.tabs,
             "tab_restarts": sum(worker["tab_restarts"] for worker in workers),
+            "browser_restarts": sum(worker["browser_restarts"] for worker in workers),
             "queue_remaining": sum(job["status"] == "pending" for job in jobs),
             "resources": resources,
             "proxy_egress_ips": addresses,
@@ -309,7 +311,11 @@ async def run_parallel(
     tab_restarts: int = 3,
     reusable=None,
     resume_history=None,
+    browser_max_seconds: float = 1200,
+    browser_max_links: int = 40,
 ) -> dict:
+    if not math.isfinite(browser_max_seconds) or browser_max_seconds <= 0 or browser_max_links < 1:
+        raise ValueError("Browser lifetime and link limit must be positive")
     if not math.isfinite(log_interval) or log_interval <= 0:
         raise ValueError("log_interval must be finite and positive")
     if workers > 1 and proxy is None and not resume_history:
@@ -384,9 +390,33 @@ async def run_parallel(
         state = {"status": "running", "jobs": [], "tabs": [], "pdf_count": 0, "archive_count": 0}
         tab_states = {}
         tab_updated = {}
+        tab_segments = {}
+        browser_generation = 0
+        rotation_reason = None
+        cycle_claimed = 0
+        cycle_deadline = float("inf")
         browser_started = time.monotonic()
         stop_browser = asyncio.Event()
         context_closing = False
+
+        def browser_next_job():
+            nonlocal rotation_reason, cycle_claimed
+            if rotation_reason or stop_browser.is_set():
+                return None
+            if not queue.empty() and (time.monotonic() >= cycle_deadline or cycle_claimed >= browser_max_links):
+                rotation_reason = "age_limit" if time.monotonic() >= cycle_deadline else "link_limit"
+                aggregate.log.emit(
+                    "browser_draining",
+                    worker=index,
+                    reason=rotation_reason,
+                    claimed=cycle_claimed,
+                    generation=browser_generation,
+                )
+                return None
+            row = next_job()
+            if row is not None:
+                cycle_claimed += 1
+            return row
 
         def activity(stage):
             state["activity"] = {"stage": stage, "started_seconds": time.monotonic() - browser_started}
@@ -432,8 +462,9 @@ async def run_parallel(
             aggregate.observe(index, state)
 
         async def tab_worker(number, context):
-            generations = {}
-            generation = 0
+            generations = tab_segments.setdefault(number, {})
+            generation = max(generations, default=-1) + 1
+            crash_restarts = 0
             slot_started = time.monotonic()
             generation_offset = 0.0
             tab_folder = folder / f"tab-{number}"
@@ -445,7 +476,11 @@ async def run_parallel(
                     jobs=[],
                     pdf_count=0,
                     archive_count=0,
-                    restarts=generation,
+                    restarts=sum(
+                        segment.get("stop_reason") in {"page_closed", "page_crashed"}
+                        for segment_index, segment in generations.items()
+                        if segment_index < generation
+                    ),
                     recovery_history=[],
                     seconds=round(time.monotonic() - slot_started, 2),
                 )
@@ -495,7 +530,7 @@ async def run_parallel(
                         proxy=assigned_proxy,
                         proxy_ca=proxy_ca if proxy else None,
                         context_override=context,
-                        next_job=next_job,
+                        next_job=browser_next_job,
                         stop_event=stop_browser,
                         egress_ip=state.get("proxy_egress_ip"),
                         reusable=reusable,
@@ -508,7 +543,7 @@ async def run_parallel(
                         or queue.empty()
                     ):
                         break
-                    if generation >= tab_restarts:
+                    if crash_restarts >= tab_restarts:
                         aggregate.log.emit(
                             "tab_restart_limit",
                             worker=index,
@@ -532,6 +567,7 @@ async def run_parallel(
                     if queue.empty():
                         break
                     generation += 1
+                    crash_restarts += 1
             finally:
                 if number in tab_states:
                     atomic_write_json(tab_folder / "summary.json", tab_states[number])
@@ -630,11 +666,27 @@ async def run_parallel(
                                     notice.update(event="download_started", ready_browsers=len(ready_workers))
                                     await aggregate.notify(notice, final=False)
                             activity("tabs_running")
+                            rotation_reason = None
+                            cycle_claimed = 0
+                            # Stagger rotations so the fleet does not drain simultaneously.
+                            cycle_deadline = time.monotonic() + browser_max_seconds * (0.8 + 0.2 * index / len(groups))
                             async with asyncio.TaskGroup() as tab_tasks:
                                 for number in range(1, tabs + 1):
                                     tab_tasks.create_task(tab_worker(number, context))
                             context_closing = True
                     if not retry_proxy:
+                        if rotation_reason and not queue.empty() and not stop_browser.is_set():
+                            browser_generation += 1
+                            state["browser_restarts"] = browser_generation
+                            aggregate.log.emit(
+                                "browser_restarting",
+                                worker=index,
+                                generation=browser_generation,
+                                reason=rotation_reason,
+                                resources=resource_snapshot(),
+                            )
+                            await aggregate.update(index, state)
+                            continue
                         break
                     assigned_proxy = next_proxy
                     stop_browser.clear()

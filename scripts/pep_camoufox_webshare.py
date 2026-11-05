@@ -72,6 +72,8 @@ async def execute(args):
         workers=args.workers,
         tabs=args.tabs,
         tab_restarts=args.tab_restarts,
+        browser_max_seconds=args.browser_max_seconds,
+        browser_max_links=args.browser_max_links,
         request_seconds=60,
         ca_bundle=CA_BUNDLE,
         proxy_ca=None,
@@ -90,6 +92,8 @@ def main():
     parser.add_argument("--tabs", type=int, default=1, choices=range(1, 4))
     parser.add_argument("--tab-restarts", type=int, default=0, choices=range(0, 4))
     parser.add_argument("--max-seconds", type=float, default=480)
+    parser.add_argument("--browser-max-seconds", type=float, default=1200)
+    parser.add_argument("--browser-max-links", type=int, default=40)
     args = parser.parse_args()
     if args.links < args.workers or not math.isfinite(args.max_seconds) or args.max_seconds <= 0:
         parser.error("Use at least one link per browser and a finite positive runtime limit")

@@ -396,7 +396,16 @@ async def run(
                                     continue
                                 raw = output / "downloads" / f"{doc_id}.bin"
                                 await asyncio.to_thread(raw.parent.mkdir, parents=True, exist_ok=True)
-                                await download.save_as(str(raw))
+                                try:
+                                    async with asyncio.timeout(request_seconds):
+                                        await download.save_as(str(raw))
+                                finally:
+                                    with suppress(Exception):
+                                        async with asyncio.timeout(10):
+                                            await download.delete()
+                                    with suppress(Exception):
+                                        if download.page is not page:
+                                            await download.page.close()
                                 activity("document_validation", job=job["n"], document=doc_id)
                                 if raw.stat().st_size > MAX_PDF_BYTES:
                                     raise ValueError("Download exceeds size limit")
@@ -404,6 +413,7 @@ async def run(
                                 if not await asyncio.to_thread(inspect_saved, output, doc_id):
                                     raise ValueError("Saved PDF validation failed")
                                 doc.update(metadata, http_status=200)
+                                raw.unlink(missing_ok=True)
                             except (TimeoutError, BrowserTimeout) as exc:
                                 doc.update(
                                     status="timeout",
