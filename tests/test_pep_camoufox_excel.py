@@ -140,3 +140,21 @@ async def test_webshare_configuration_never_imports_brightdata_ca(monkeypatch, t
         log_interval=30,
     )
     assert await server.execute(args, [{}] * 100) == {"status": "finished"}
+
+
+@pytest.mark.asyncio
+async def test_time_notifications_ignore_link_thresholds_and_include_idle_and_final(monkeypatch, tmp_path):
+    messages = []
+
+    async def send(*args):
+        messages.append(args[-1])
+
+    monkeypatch.setattr(server, "send_telegram", send)
+    notify = server.ProgressReporter(None, tmp_path, "token", "chat", interval_seconds=1800)
+    for seconds, processed in [(10, 10), (100, 20), (1799, 20), (1800, 20), (1810, 20), (3600, 20)]:
+        await notify({**report(processed), "seconds": seconds}, final=False)
+    await notify({**report(21), "seconds": 3610, "status": "finished"}, final=True)
+    assert len(messages) == 3
+    rows = [json.loads(line) for line in (tmp_path / "progress.jsonl").read_text().splitlines()]
+    assert [row["elapsed_seconds"] for row in rows] == [1800, 3600, 3610]
+    assert [row["final"] for row in rows] == [False, False, True]

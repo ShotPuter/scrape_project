@@ -58,17 +58,26 @@ def collect_sample(workbook: Path, limit: int, offset: int) -> list[dict]:
 
 
 class ProgressReporter:
-    def __init__(self, session, output: Path, token: str = "", chat_id: str = ""):
+    def __init__(self, session, output: Path, token: str = "", chat_id: str = "", *, interval_seconds: float = 0):
+        if not math.isfinite(interval_seconds) or interval_seconds < 0:
+            raise ValueError("Notification interval must be finite and nonnegative")
         self.session, self.output, self.token, self.chat_id = session, output, token, chat_id
+        self.interval_seconds, self.last_seconds = interval_seconds, 0.0
         self.last_count = 0
         self.send_lock = asyncio.Lock()
 
     async def __call__(self, report: dict, *, final: bool) -> None:
         stats = totals(report)
         processed = stats["processed"]
-        if not final and (processed == 0 or processed // 10 <= self.last_count // 10):
-            return
+        seconds = report.get("seconds", 0)
+        if not final:
+            if self.interval_seconds:
+                if seconds - self.last_seconds < self.interval_seconds:
+                    return
+            elif processed == 0 or processed // 10 <= self.last_count // 10:
+                return
         self.last_count = processed
+        self.last_seconds = seconds
         minutes = report.get("seconds", 0) / 60
         speed = stats["downloaded"] / minutes if minutes else 0
         text = (
@@ -116,6 +125,9 @@ class ProgressReporter:
 
 
 async def execute(args, sample: list[dict]) -> dict:
+    notification_seconds = float(os.getenv("PEP_TELEGRAM_INTERVAL_MINUTES", "0")) * 60
+    if not math.isfinite(notification_seconds) or notification_seconds < 0:
+        raise ValueError("PEP_TELEGRAM_INTERVAL_MINUTES must be finite and nonnegative")
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
     if bool(token) != bool(chat_id):
@@ -152,7 +164,7 @@ async def execute(args, sample: list[dict]) -> dict:
             max_seconds=args.max_minutes * 60,
             proxy_ca=proxy_ca,
             proxy=proxy,
-            notify=ProgressReporter(session, output, token, chat_id),
+            notify=ProgressReporter(session, output, token, chat_id, interval_seconds=notification_seconds),
             log_interval=args.log_interval,
             tabs=args.tabs,
             tab_restarts=args.tab_restarts,

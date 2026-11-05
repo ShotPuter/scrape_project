@@ -248,6 +248,7 @@ class AggregateReport:
             self.log.summary(
                 "heartbeat", combined, interval=True, workers=combined["workers"], resources=combined["resources"]
             )
+        await self.notify(combined, final=False)
 
     async def finish(self, status: str | None = None) -> dict:
         async with self.lock:
