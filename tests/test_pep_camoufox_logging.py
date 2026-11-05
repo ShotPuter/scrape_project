@@ -146,3 +146,32 @@ def test_reused_documents_do_not_inflate_download_speed():
     assert stats["downloaded"] == 2
     assert stats["reused"] == stats["downloaded_new"] == 1
     assert stats["not_downloaded"] == 1
+
+
+@pytest.mark.asyncio
+async def test_global_export_is_throttled_but_final_report_is_complete(tmp_path):
+    async def notify(report, *, final):
+        pass
+
+    notify.interval_seconds = 1800
+    rows = [{"n": i, "url": f"https://example.com/{i}"} for i in range(1, 101)]
+    aggregate = parallel.AggregateReport(rows, [rows], tmp_path, notify, dynamic=True)
+    calls = []
+    persist = aggregate.persist
+
+    def tracked(report):
+        calls.append(len([job for job in report["jobs"] if job["status"] == "completed"]))
+        persist(report)
+
+    aggregate.persist = tracked
+    state = {"status": "running", "jobs": [], "pdf_count": 0}
+    for row in rows:
+        state["jobs"].append({**row, "status": "completed", "documents": []})
+        await aggregate.update(1, state)
+    assert calls == [1]
+    state["status"] = "finished"
+    aggregate.observe(1, state)
+    await aggregate.finish()
+    assert calls == [1, 100]
+    saved = json.loads((tmp_path / "report.json").read_text())
+    assert len(saved["jobs"]) == 100 and saved["job_counts"] == {"completed": 100}

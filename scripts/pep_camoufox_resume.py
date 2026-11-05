@@ -9,6 +9,7 @@ import shutil
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from scripts.pep_camoufox_db import read_report
 from src.sites.pep.documents import inspect_saved
 from src.sites.pep.source import LEGACY_PATH, safe_url
 from src.utils.atomic import atomic_write_json
@@ -18,8 +19,13 @@ def resume_history(root: Path, sample: list[dict]) -> dict:
     selected = {row["url"] for row in sample}
     history = {}
     # Root reports already incorporate their retry passes. Do not scan worker reports.
-    for path in sorted(root.glob("run-*/report.json")):
-        report = json.loads(path.read_text())
+    folders = sorted(
+        {path.parent for pattern in ("run-*/report.json", "run-*/state.sqlite3") for path in root.glob(pattern)}
+    )
+    for folder in folders:
+        path = folder / "report.json"
+        database = folder / "state.sqlite3"
+        report = read_report(database) if database.exists() else json.loads(path.read_text())
         for job in report["jobs"]:
             if job["url"] not in selected:
                 continue

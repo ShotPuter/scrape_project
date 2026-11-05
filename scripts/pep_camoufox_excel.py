@@ -236,6 +236,7 @@ async def _execute(args, sample: list[dict]) -> dict:
             resume_history=getattr(args, "resume_history", None),
             browser_max_seconds=getattr(args, "browser_max_minutes", 20) * 60,
             browser_max_links=getattr(args, "browser_max_links", 40),
+            sqlite_state=not is_retry,
         )
 
 

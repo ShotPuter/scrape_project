@@ -81,6 +81,7 @@ async def execute(args):
         proxy=WebshareProxyPool(proxies, args.workers),
         notify=notify,
         log_interval=30,
+        sqlite_state=True,
     )
 
 

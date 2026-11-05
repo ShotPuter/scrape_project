@@ -54,3 +54,15 @@ expected. Every exported PDF path exists and all 13 SHA-256 values match.
 The queue retained all four unique jobs across browser generations. The test
 did not send Telegram messages. This validates lifecycle and persistence,
 not multi-hour memory stability or server capacity.
+
+## SQLite state — 2026-11-05
+
+Local Webshare run `pep-webshare-20261105T165044288505Z`: two browsers with three
+tabs each, four links, forced rotation after each claimed link. Finished in
+100.97 seconds: four completed links, 13 PDFs, two browser restarts, zero
+crash-related tab replacements and no timeouts. During the run no root
+`report.json` or `politicians.json` was generated. All state was read back from
+`state.sqlite3`; all 13 PDF hashes and paths passed validation. The separate
+`scripts.pep_camoufox_db` command then produced the JSON export with four records
+and valid PDF paths. No Telegram messages were sent. This is a short functional
+test, not a throughput prediction for the full workbook.

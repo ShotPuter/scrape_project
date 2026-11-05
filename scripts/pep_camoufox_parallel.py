@@ -18,6 +18,7 @@ from urllib.parse import unquote, urlsplit
 from playwright.async_api import Error as BrowserError, TimeoutError as BrowserTimeout
 
 from scripts.pep_camoufox_batch import browser_context, run
+from scripts.pep_camoufox_db import StateDB
 from scripts.pep_camoufox_export import write_export
 from scripts.pep_camoufox_logging import EventLog, report_totals, resource_snapshot
 from scripts.pep_camoufox_pilot import install_intermediate, install_proxy_ca
@@ -139,6 +140,10 @@ class AggregateReport:
         self.lock = asyncio.Lock()
         self.log = EventLog(output)
         self.worker_updated = {}
+        self.last_flush = float("-inf")
+        self.flush_interval = 15.0
+        self.last_notified_count = 0
+        self.database = None
         self.sample = sample
         self.resumed_jobs = []
         self.dynamic, self.tabs = dynamic, tabs
@@ -245,17 +250,50 @@ class AggregateReport:
         # Store copies: other browsers cannot mutate a snapshot while Telegram is sending it.
         async with self.lock:
             self.observe(index, report)
+            if self.database is not None:
+                jobs = copy.deepcopy(report["jobs"])
+                for job in jobs:
+                    job["worker"] = index
+                    for doc in job["documents"]:
+                        for item in [doc, *doc.get("files", [])]:
+                            for key in ("local_path", "archive_path"):
+                                if item.get(key):
+                                    item[key] = f"worker-{index}/{item[key]}"
+                self.database.stage(jobs)
+                if len(self.database.pending) >= self.database.batch_size:
+                    await asyncio.to_thread(self.database.flush)
+            # Per-tab checkpoints retain each result. Do not rewrite the entire
+            # workbook/export for every completed link in a large run.
+            flush_due = time.monotonic() - self.last_flush >= self.flush_interval
+            processed = sum(report_totals(worker)["processed"] for worker in self.workers.values()) + len(self.resumed_jobs)
+            count_notice = (
+                not getattr(self.notify, "interval_seconds", 0) and processed // 10 > self.last_notified_count // 10
+            )
+            if not flush_due and not count_notice:
+                return
             combined = self.snapshot()
-            atomic_write_json(self.output / "report.json", combined)
-            write_export(self.output, combined)
-            self.log.summary("worker_progress", combined, worker=index)
+            if flush_due:
+                await asyncio.to_thread(self.persist, combined)
+                self.last_flush = time.monotonic()
+                self.log.summary("worker_progress", combined, worker=index)
+            self.last_notified_count = processed
         await self.notify(combined, final=False)
+
+    def persist(self, report):
+        if self.database is not None:
+            self.database.stage(report["jobs"])
+            self.database.flush(
+                force=report["status"] != "running" or time.monotonic() - self.database.last_commit >= 60, metadata=report
+            )
+            return
+        atomic_write_json(self.output / "report.json", report)
+        write_export(self.output, report)
 
     async def heartbeat(self) -> None:
         async with self.lock:
             combined = self.snapshot()
-            atomic_write_json(self.output / "report.json", combined)
-            write_export(self.output, combined)
+            await asyncio.to_thread(self.persist, combined)
+            self.last_flush = time.monotonic()
             self.log.summary(
                 "heartbeat", combined, interval=True, workers=combined["workers"], resources=combined["resources"]
             )
@@ -286,9 +324,9 @@ class AggregateReport:
                 if doc["status"] not in {"downloaded", "unavailable_http_404"}
             ]
             combined["incomplete_document_counts"] = dict(Counter(doc["status"] for doc in incomplete))
-            atomic_write_json(self.output / "incomplete-documents.json", incomplete)
-            atomic_write_json(self.output / "report.json", combined)
-            write_export(self.output, combined)
+            if self.database is None:
+                atomic_write_json(self.output / "incomplete-documents.json", incomplete)
+            await asyncio.to_thread(self.persist, combined)
             self.log.summary("run_finished", combined, workers=combined["workers"], resources=combined["resources"])
             self.log.close()
         await self.notify(combined, final=True)
@@ -313,6 +351,7 @@ async def run_parallel(
     resume_history=None,
     browser_max_seconds: float = 1200,
     browser_max_links: int = 40,
+    sqlite_state: bool = False,
 ) -> dict:
     if not math.isfinite(browser_max_seconds) or browser_max_seconds <= 0 or browser_max_links < 1:
         raise ValueError("Browser lifetime and link limit must be positive")
@@ -346,11 +385,18 @@ async def run_parallel(
         except asyncio.QueueEmpty:
             return None
 
-    atomic_write_json(output / "sample.json", sample)
+    if not sqlite_state:
+        atomic_write_json(output / "sample.json", sample)
     aggregate = AggregateReport(sample, groups, output, notify, dynamic=True, tabs=tabs)
     aggregate.resumed_jobs = resumed
+    if sqlite_state:
+        aggregate.database = await asyncio.to_thread(StateDB, output / "state.sqlite3")
+        initial = aggregate.snapshot()
+        aggregate.database.stage(initial["jobs"])
+        await asyncio.to_thread(aggregate.database.flush, force=True, metadata=initial)
     launch_lock = asyncio.Lock()
-    atomic_write_json(output / "report.json", aggregate.snapshot())
+    if not sqlite_state:
+        atomic_write_json(output / "report.json", aggregate.snapshot())
     aggregate.log.summary("run_started", aggregate.snapshot(), worker_count=len(groups), log_interval=log_interval)
     stop_heartbeat = asyncio.Event()
     if not groups:
@@ -535,6 +581,7 @@ async def run_parallel(
                         egress_ip=state.get("proxy_egress_ip"),
                         reusable=reusable,
                         known_unavailable=known_unavailable,
+                        write_json=not sqlite_state,
                     )
                     report = generations.get(generation, {})
                     if (
@@ -569,7 +616,7 @@ async def run_parallel(
                     generation += 1
                     crash_restarts += 1
             finally:
-                if number in tab_states:
+                if number in tab_states and not sqlite_state:
                     atomic_write_json(tab_folder / "summary.json", tab_states[number])
 
         try:
@@ -714,7 +761,8 @@ async def run_parallel(
         finally:
             startup_done(index)
             activity(state["status"])
-            atomic_write_json(folder / "report.json", state)
+            if not sqlite_state:
+                atomic_write_json(folder / "report.json", state)
             await aggregate.update(index, state)
             finished_workers += 1
             if finished_workers == len(groups):

@@ -19,7 +19,10 @@ def sample(size):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("age_limit", [False, True])
-async def test_browser_rotation_drains_keeps_files_and_closes_old_context(monkeypatch, tmp_path, fake_browsers, age_limit):
+@pytest.mark.parametrize("sqlite_state", [False, True])
+async def test_browser_rotation_drains_keeps_files_and_closes_old_context(
+    monkeypatch, tmp_path, fake_browsers, age_limit, sqlite_state
+):
     from src.sites.pep.documents import save_payload
 
     original = parallel.browser_context
@@ -65,6 +68,7 @@ async def test_browser_rotation_drains_keeps_files_and_closes_old_context(monkey
         notify=notify,
         browser_max_seconds=0.01 if age_limit else 1000,
         browser_max_links=1000 if age_limit else 2,
+        sqlite_state=sqlite_state,
     )
     assert result["status"] == "finished"
     assert result["browser_restarts"] >= 2
@@ -73,6 +77,14 @@ async def test_browser_rotation_drains_keeps_files_and_closes_old_context(monkey
     assert len({job["n"] for job in result["jobs"]}) == 12
     assert result["pdf_count"] == 12
     assert all((output / doc["local_path"]).exists() for job in result["jobs"] for doc in job["documents"])
+    if sqlite_state:
+        from scripts.pep_camoufox_db import read_report
+
+        saved = read_report(output / "state.sqlite3")
+        assert saved["jobs"] == result["jobs"]
+        assert saved["status"] == "finished"
+        assert not (output / "report.json").exists()
+        assert not (output / "politicians.json").exists()
 
 
 @pytest.mark.asyncio
@@ -250,7 +262,11 @@ async def test_twenty_browsers_sixty_tabs_global_queue_and_progress(monkeypatch,
     assert result["worker_count"] == 20 and result["tab_count"] == 60
     assert result["queue_remaining"] == 0
     progress = [json.loads(line) for line in (output / "progress.jsonl").read_text().splitlines()]
-    assert [row["processed"] for row in progress if row.get("event") != "download_started"] == [*range(10, 101, 10), 100]
+    counts = [row["processed"] for row in progress if row.get("event") != "download_started"]
+    # Threaded persistence allows multiple tabs to finish while a snapshot is
+    # being written; notifications can skip intermediate ten-link boundaries.
+    assert counts == sorted(counts) and counts[-1] == 100
+    assert all(count >= 10 for count in counts)
     assert sum(row["final"] for row in progress) == 1
     for job in result["jobs"]:
         expected = f"worker-{job['worker']}/tab-{job['tab']}/pdf/example.pdf"

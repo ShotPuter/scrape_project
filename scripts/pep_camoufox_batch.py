@@ -121,6 +121,7 @@ async def run(
     egress_ip: str | None = None,
     reusable=None,
     known_unavailable=None,
+    write_json=True,
 ) -> dict:
     started = time.monotonic()
     stop_event = stop_event or asyncio.Event()
@@ -139,7 +140,8 @@ async def run(
         "proxy_egress_ip": egress_ip,
         "jobs": [{**row, "status": "pending", "documents": []} for row in sample],
     }
-    atomic_write_json(output / "sample.json", sample)
+    if write_json:
+        atomic_write_json(output / "sample.json", sample)
     log = EventLog(output, secrets=tuple(proxy.values()) if proxy else ())
 
     def redact(value) -> str:
@@ -165,7 +167,8 @@ async def run(
             }
         )
         report["archive_count"] = len(list((output / "archives").glob("*.zip")))
-        atomic_write_json(output / "report.json", report)
+        if write_json:
+            atomic_write_json(output / "report.json", report)
         reason = report.get("stop_reason", "") or ""
         if reason == "recaptcha_notice" or reason.startswith("download_http_") or reason == "time_budget":
             stop_event.set()
@@ -364,6 +367,7 @@ async def run(
                                     element = anchors.nth(index)
                                     await element.evaluate("(anchor, url) => { anchor.href = url; }", target)
                                 doc["attempts"] = 1
+                                doc["download_stage"] = "waiting_download_event"
                                 checkpoint()
                                 if modern:
                                     download, status = await download_once(
@@ -395,6 +399,7 @@ async def run(
                                         break
                                     continue
                                 raw = output / "downloads" / f"{doc_id}.bin"
+                                doc["download_stage"] = "saving_file"
                                 await asyncio.to_thread(raw.parent.mkdir, parents=True, exist_ok=True)
                                 try:
                                     async with asyncio.timeout(request_seconds):
@@ -407,18 +412,25 @@ async def run(
                                         if download.page is not page:
                                             await download.page.close()
                                 activity("document_validation", job=job["n"], document=doc_id)
+                                doc["download_stage"] = "validating_file"
                                 if raw.stat().st_size > MAX_PDF_BYTES:
                                     raise ValueError("Download exceeds size limit")
                                 metadata = await asyncio.to_thread(save_payload, raw.read_bytes(), output, doc_id)
                                 if not await asyncio.to_thread(inspect_saved, output, doc_id):
                                     raise ValueError("Saved PDF validation failed")
                                 doc.update(metadata, http_status=200)
+                                doc["download_stage"] = "finished"
                                 raw.unlink(missing_ok=True)
                             except (TimeoutError, BrowserTimeout) as exc:
                                 doc.update(
                                     status="timeout",
                                     recaptcha_notice=False,
-                                    error={"type": type(exc).__name__, "message": redact(exc)[:800]},
+                                    error={
+                                        "type": type(exc).__name__,
+                                        "message": redact(exc)[:800]
+                                        or f"Timeout during {doc.get('download_stage', 'download')}",
+                                        "stage": doc.get("download_stage"),
+                                    },
                                 )
                                 try:
                                     doc["recaptcha_notice"] = "Recaptcha did not pass validation" in await page.content()
