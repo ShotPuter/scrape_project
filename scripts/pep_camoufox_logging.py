@@ -41,6 +41,7 @@ def report_totals(report: dict) -> dict:
     counts = Counter(job["status"] for job in jobs)
     documents = [doc for job in jobs for doc in job["documents"]]
     downloaded = sum(doc["status"] == "downloaded" for doc in documents)
+    reused = sum(doc["status"] == "downloaded" and bool(doc.get("reused")) for doc in documents)
     empty = sum(job["status"] == "completed" and not job["documents"] for job in jobs)
     return {
         "total": len(jobs),
@@ -52,6 +53,8 @@ def report_totals(report: dict) -> dict:
         "pending": counts.get("pending", 0),
         "running": counts.get("running", 0),
         "downloaded": downloaded,
+        "reused": reused,
+        "downloaded_new": downloaded - reused,
         "not_downloaded": len(documents) - downloaded,
         "pdf": report.get("pdf_count", 0),
     }
@@ -111,7 +114,7 @@ class EventLog:
             "elapsed_seconds": seconds,
             **stats,
             "links_per_minute": round(stats["processed"] / minutes, 2) if minutes else 0,
-            "declarations_per_minute": round(stats["downloaded"] / minutes, 2) if minutes else 0,
+            "declarations_per_minute": round(stats["downloaded_new"] / minutes, 2) if minutes else 0,
             "stop_reason": report.get("stop_reason"),
             **fields,
         }
@@ -121,10 +124,12 @@ class EventLog:
             info.update(
                 interval_seconds=round(window, 2),
                 interval_processed=stats["processed"] - old_links,
-                interval_downloaded=stats["downloaded"] - old_docs,
-                interval_declarations_per_minute=(round((stats["downloaded"] - old_docs) * 60 / window, 2) if window else 0),
+                interval_downloaded=stats["downloaded_new"] - old_docs,
+                interval_declarations_per_minute=(
+                    round((stats["downloaded_new"] - old_docs) * 60 / window, 2) if window else 0
+                ),
             )
-            self.previous = (seconds, stats["processed"], stats["downloaded"])
+            self.previous = (seconds, stats["processed"], stats["downloaded_new"])
         self.emit(event, **info)
 
     def close(self) -> None:

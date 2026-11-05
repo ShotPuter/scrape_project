@@ -127,3 +127,22 @@ def test_resource_snapshot_reads_container_memory_and_oom_counters(tmp_path):
     assert resources["memory.max"] == "max"
     assert resources["memory.events"] == {"oom": 3, "oom_kill": 2}
     assert resources["shm_available_bytes"] > 0
+
+
+def test_reused_documents_do_not_inflate_download_speed():
+    from scripts.pep_camoufox_logging import report_totals
+
+    stats = report_totals(
+        {
+            "jobs": [
+                {
+                    "status": "partial",
+                    "documents": [{"status": "downloaded", "reused": True}, {"status": "downloaded"}, {"status": "timeout"}],
+                }
+            ],
+            "pdf_count": 2,
+        }
+    )
+    assert stats["downloaded"] == 2
+    assert stats["reused"] == stats["downloaded_new"] == 1
+    assert stats["not_downloaded"] == 1

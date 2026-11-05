@@ -123,7 +123,16 @@ async def run(
     def checkpoint():
         report["seconds"] = round(time.monotonic() - started, 2)
         report["job_counts"] = dict(Counter(job["status"] for job in report["jobs"]))
-        report["pdf_count"] = len(list((output / "pdf").glob("*.pdf")))
+        report["pdf_count"] = len(
+            {
+                item["local_path"]
+                for job in report["jobs"]
+                for doc in job["documents"]
+                if doc["status"] == "downloaded"
+                for item in (doc.get("files") or [doc])
+                if item.get("local_path")
+            }
+        )
         report["archive_count"] = len(list((output / "archives").glob("*.zip")))
         atomic_write_json(output / "report.json", report)
         reason = report.get("stop_reason", "") or ""

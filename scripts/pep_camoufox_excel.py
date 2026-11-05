@@ -83,7 +83,7 @@ class ProgressReporter:
         self.last_count = processed
         self.last_seconds = seconds
         minutes = report.get("seconds", 0) / 60
-        speed = stats["downloaded"] / minutes if minutes else 0
+        speed = stats["downloaded_new"] / minutes if minutes else 0
         text = (
             f"PEP Camoufox {'— итог' if final else '— прогресс'}\n"
             f"Запуск: {self.output.name}\n"
@@ -92,6 +92,7 @@ class ProgressReporter:
             f"Без деклараций: {stats['empty']}\n"
             f"Частично: {stats['partial']}; ошибки: {stats['failed']}; ожидают: {stats['pending']}\n"
             f"Деклараций скачано: {stats['downloaded']}; не скачано из найденных: {stats['not_downloaded']}\n"
+            f"Новых скачиваний: {stats['downloaded_new']}; переиспользовано: {stats['reused']}\n"
             f"PDF сохранено: {stats['pdf']}\n"
             f"Браузеров: {report.get('worker_count', 1)}; прошло: {minutes:.1f} мин; темп: {speed:.1f} деклараций/мин\n"
             f"Вкладок: {report.get('tab_count', 1)}; активных ссылок: {stats['running']}; в очереди: {stats['pending']}\n"
