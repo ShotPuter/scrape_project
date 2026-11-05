@@ -18,6 +18,7 @@ from camoufox.async_api import AsyncCamoufox
 from playwright.async_api import Error as BrowserError, TimeoutError as BrowserTimeout
 
 from scripts.pep_camoufox_logging import EventLog
+from scripts.pep_camoufox_retry import reuse_document
 from scripts.pep_camoufox_pilot import CA_BUNDLE, DEFAULT_SAMPLE, ROOT, install_intermediate, install_proxy_ca
 from src.sites.pep.documents import MAX_PDF_BYTES, inspect_saved, save_payload
 from src.sites.pep.source import DOWNLOAD_PATH, LEGACY_PATH, RESULT_PATH, parse_results, safe_url
@@ -88,6 +89,7 @@ async def run(
     next_job=None,
     stop_event: asyncio.Event | None = None,
     egress_ip: str | None = None,
+    reusable=None,
 ) -> dict:
     started = time.monotonic()
     stop_event = stop_event or asyncio.Event()
@@ -288,6 +290,9 @@ async def run(
                             try:
                                 activity("document_download", job=job["n"], document=doc_id)
                                 existing = await asyncio.to_thread(inspect_saved, output, doc_id)
+                                source = (reusable or {}).get((job["url"], doc_id))
+                                if existing is None and source is not None:
+                                    existing = await asyncio.to_thread(reuse_document, source, output, doc_id)
                                 if existing:
                                     doc.update(existing, reused=True)
                                     continue

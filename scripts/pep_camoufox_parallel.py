@@ -298,6 +298,7 @@ async def run_parallel(
     log_interval: float = 30,
     tabs: int = 1,
     tab_restarts: int = 3,
+    reusable=None,
 ) -> dict:
     if not math.isfinite(log_interval) or log_interval <= 0:
         raise ValueError("log_interval must be finite and positive")
@@ -472,6 +473,7 @@ async def run_parallel(
                         next_job=next_job,
                         stop_event=stop_browser,
                         egress_ip=state.get("proxy_egress_ip"),
+                        reusable=reusable,
                     )
                     report = generations.get(generation, {})
                     if (

@@ -13,8 +13,10 @@ from urllib.parse import urlsplit
 
 import aiohttp
 
+from scripts.pep_camoufox_export import write_export
 from scripts.pep_camoufox_logging import report_totals as totals
 from scripts.pep_camoufox_parallel import BrightDataProxy, run_parallel, webshare_pool
+from scripts.pep_camoufox_retry import combined_report, load_retry
 from src.services.notifications import send_telegram
 from src.sites.pep.source import RESULT_PATH, safe_url
 from src.sites.pep.workbook import LINK_COLUMN, read_rows
@@ -155,7 +157,7 @@ async def execute(args, sample: list[dict]) -> dict:
         f"Proxy provider: {provider}; browsers: {min(args.workers, len(sample))}; tabs per browser: {args.tabs}", flush=True
     )
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-        return await run_parallel(
+        result = await run_parallel(
             sample,
             output,
             workers=args.workers,
@@ -168,12 +170,18 @@ async def execute(args, sample: list[dict]) -> dict:
             log_interval=args.log_interval,
             tabs=args.tabs,
             tab_restarts=args.tab_restarts,
+            reusable=getattr(args, "reusable", None),
         )
+        if getattr(args, "previous_report", None) is not None:
+            merged = await asyncio.to_thread(combined_report, args.previous_report, result, args.retry_report.parent, output)
+            write_export(output, merged)
+        return result
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("workbook", type=Path)
+    parser.add_argument("--retry-report", type=Path, help="Retry incomplete links in this previous report")
     parser.add_argument("--limit", type=int, default=100, help="Unique links; 0 means all")
     parser.add_argument("--offset", type=int, default=0, help="Skip this many unique links")
     parser.add_argument("--output", type=Path, default=Path("/app/data"))
@@ -201,7 +209,13 @@ def main() -> int:
         parser.error("timeout must be finite and between 5 and 120 seconds")
     if not math.isfinite(args.max_minutes) or args.max_minutes <= 0:
         parser.error("max-minutes must be finite and positive")
-    sample = collect_sample(args.workbook, args.limit, args.offset)
+    if args.retry_report:
+        args.previous_report, sample, args.reusable = load_retry(args.retry_report)
+        if not sample:
+            print("No incomplete links to retry", flush=True)
+            return 0
+    else:
+        sample = collect_sample(args.workbook, args.limit, args.offset)
     print(f"Selected {len(sample)} unique links from {args.workbook.name}, offset {args.offset}", flush=True)
     if args.preview:
         return 0
