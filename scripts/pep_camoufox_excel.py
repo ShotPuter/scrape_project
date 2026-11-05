@@ -17,6 +17,7 @@ import aiohttp
 from scripts.pep_camoufox_export import write_export
 from scripts.pep_camoufox_logging import report_totals as totals
 from scripts.pep_camoufox_parallel import BrightDataProxy, run_parallel, webshare_pool
+from scripts.pep_camoufox_resume import resume_history
 from scripts.pep_camoufox_retry import combined_report, load_retry, retry_lock
 from src.services.notifications import send_telegram
 from src.sites.pep.source import RESULT_PATH, safe_url
@@ -92,6 +93,7 @@ class ProgressReporter:
             f"{heading}\nЗапуск: {self.output.name}\n\n"
             f"👤 ССЫЛКИ: {processed}/{stats['total']}\n"
             f"✅ Полностью скачаны: {stats['completed']}\n"
+            f"♻️ Готовых ссылок из прошлых запусков: {report.get('resumed_links', 0)}\n"
             f"📭 Без деклараций: {stats['empty']}\n"
             f"📂 Обработаны с недоступными PDF: {stats['links_with_unavailable']}\n"
             f"⚠️ Частично: {stats['partial']} · Ошибки ссылок: {stats['failed']}\n"
@@ -146,12 +148,18 @@ class ProgressReporter:
 
 async def execute(args, sample: list[dict]) -> dict:
     retry_path = getattr(args, "retry_report", None)
-    with retry_lock(retry_path.parent) if retry_path else nullcontext():
+    auto_resume = not retry_path and not getattr(args, "fresh", False)
+    if auto_resume:
+        args.output.mkdir(parents=True, exist_ok=True)
+    with retry_lock(retry_path.parent if retry_path else args.output) if retry_path or auto_resume else nullcontext():
         if retry_path:
             args.previous_report, sample, args.reusable = load_retry(retry_path)
             if not sample:
                 print("No incomplete links to retry", flush=True)
                 return {"status": "finished", "jobs": args.previous_report["jobs"]}
+        if auto_resume:
+            print("Checking previous runs and PDF integrity…", flush=True)
+            args.resume_history = await asyncio.to_thread(resume_history, args.output, sample)
         return await _execute(args, sample)
 
 
@@ -192,15 +200,23 @@ async def _execute(args, sample: list[dict]) -> dict:
         )
     proxy = None
     proxy_ca = None
-    if provider == "webshare":
-        proxy = await webshare_pool(os.getenv("WEBSHARE_API_TOKEN", ""), min(args.workers, len(sample)))
-    elif provider == "brightdata":
+    history = getattr(args, "resume_history", {})
+    remaining = sum(
+        not (
+            history.get(row["url"], {}).get("complete")
+            and all(doc is not None for doc, _ in history[row["url"]]["documents"].values())
+        )
+        for row in sample
+    )
+    if provider == "webshare" and remaining:
+        proxy = await webshare_pool(os.getenv("WEBSHARE_API_TOKEN", ""), min(args.workers, remaining))
+    elif provider == "brightdata" and remaining:
         proxy = BrightDataProxy(os.getenv("BRIGHTDATA_PROXY_SERVER", "http://brd.superproxy.io:44445"), username, password)
         proxy_ca = args.proxy_ca
-    elif provider != "direct":
+    elif provider not in {"direct", "webshare", "brightdata"}:
         raise ValueError("PEP_PROXY_PROVIDER must be webshare, brightdata, direct or auto")
     print(
-        f"Proxy provider: {provider}; browsers: {min(args.workers, len(sample))}; tabs per browser: {args.tabs}", flush=True
+        f"Proxy provider: {provider}; browsers: {min(args.workers, remaining)}; tabs per browser: {args.tabs}", flush=True
     )
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
         reporter.session = session
@@ -218,6 +234,7 @@ async def _execute(args, sample: list[dict]) -> dict:
             tabs=args.tabs,
             tab_restarts=args.tab_restarts,
             reusable=getattr(args, "reusable", None),
+            resume_history=getattr(args, "resume_history", None),
         )
 
 
@@ -225,6 +242,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("workbook", type=Path)
     parser.add_argument("--retry-report", type=Path, help="Retry incomplete links in this previous report")
+    parser.add_argument("--fresh", action="store_true", help="Ignore earlier runs; download selected links again")
     parser.add_argument("--limit", type=int, default=100, help="Unique links; 0 means all")
     parser.add_argument("--offset", type=int, default=0, help="Skip this many unique links")
     parser.add_argument("--output", type=Path, default=Path("/app/data"))

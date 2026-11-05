@@ -15,5 +15,6 @@
 !scripts/pep_camoufox_logging.py
 !scripts/pep_camoufox_export.py
 !scripts/pep_camoufox_retry.py
+!scripts/pep_camoufox_resume.py
 **/__pycache__
 **/*.py[cod]

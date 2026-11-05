@@ -21,6 +21,7 @@ from scripts.pep_camoufox_batch import browser_context, run
 from scripts.pep_camoufox_export import write_export
 from scripts.pep_camoufox_logging import EventLog, report_totals, resource_snapshot
 from scripts.pep_camoufox_pilot import install_intermediate, install_proxy_ca
+from scripts.pep_camoufox_resume import materialize_history
 from src.utils.atomic import atomic_write_json
 
 
@@ -139,6 +140,7 @@ class AggregateReport:
         self.log = EventLog(output)
         self.worker_updated = {}
         self.sample = sample
+        self.resumed_jobs = []
         self.dynamic, self.tabs = dynamic, tabs
         self.initial_resources = resource_snapshot()
         self.workers = {
@@ -154,7 +156,7 @@ class AggregateReport:
         self.worker_updated[index] = time.monotonic()
 
     def snapshot(self, status: str = "running") -> dict:
-        jobs, workers, reasons = [], [], []
+        jobs, workers, reasons = copy.deepcopy(self.resumed_jobs), [], []
         for index, worker in self.workers.items():
             folder = f"worker-{index}"
             idle_seconds = (
@@ -215,6 +217,7 @@ class AggregateReport:
             "jobs": sorted(jobs, key=lambda job: job["n"]),
             "workers": workers,
             "worker_count": len(workers),
+            "resumed_links": len(self.resumed_jobs),
             "tabs_per_browser": self.tabs,
             "tab_count": len(workers) * self.tabs,
             "tab_restarts": sum(worker["tab_restarts"] for worker in workers),
@@ -224,7 +227,13 @@ class AggregateReport:
             "proxy_observed_browsers": sum(bool(worker.get("proxy_egress_ip")) for worker in workers),
             "seconds": round(time.monotonic() - self.started, 2),
             "job_counts": dict(Counter(job["status"] for job in jobs)),
-            "pdf_count": sum(worker.get("pdf_count", 0) for worker in self.workers.values()),
+            "pdf_count": sum(worker.get("pdf_count", 0) for worker in self.workers.values())
+            + sum(
+                len(doc.get("files") or [doc])
+                for job in self.resumed_jobs
+                for doc in job["documents"]
+                if doc["status"] == "downloaded"
+            ),
             "archive_count": sum(worker.get("archive_count", 0) for worker in self.workers.values()),
             "sample_sha256": hashlib.sha256(json.dumps(self.sample, sort_keys=True).encode()).hexdigest(),
             "stop_reason": "; ".join(reasons) or None,
@@ -299,18 +308,30 @@ async def run_parallel(
     tabs: int = 1,
     tab_restarts: int = 3,
     reusable=None,
+    resume_history=None,
 ) -> dict:
     if not math.isfinite(log_interval) or log_interval <= 0:
         raise ValueError("log_interval must be finite and positive")
-    if workers > 1 and proxy is None:
+    if workers > 1 and proxy is None and not resume_history:
         raise ValueError("Multiple browsers require proxy credentials; use --workers 1 for a direct connection")
     if not 1 <= tabs <= 10:
         raise ValueError("tabs must be between 1 and 10")
     if not 0 <= tab_restarts <= 100:
         raise ValueError("tab_restarts must be between 0 and 100")
-    groups = split_sample(sample, workers)
+    await asyncio.to_thread(output.mkdir, parents=True, exist_ok=False, mode=0o700)
+    resumed, copied, known_unavailable = await asyncio.to_thread(materialize_history, resume_history or {}, sample, output)
+    reusable = {**(reusable or {}), **copied}
+    resumed_urls = {job["url"] for job in resumed}
+    pending_sample = [row for row in sample if row["url"] not in resumed_urls]
+    if pending_sample and workers > 1 and proxy is None:
+        raise ValueError("Multiple browsers require proxy credentials; use --workers 1 for a direct connection")
+    print(
+        f"Resume: {len(resumed)} links complete; {len(copied)} declarations reused; {len(pending_sample)} links queued",
+        flush=True,
+    )
+    groups = split_sample(pending_sample, workers) if pending_sample else []
     queue = asyncio.Queue()
-    for row in sample:
+    for row in pending_sample:
         queue.put_nowait(row)
 
     def next_job():
@@ -319,13 +340,15 @@ async def run_parallel(
         except asyncio.QueueEmpty:
             return None
 
-    await asyncio.to_thread(output.mkdir, parents=True, exist_ok=False, mode=0o700)
     atomic_write_json(output / "sample.json", sample)
     aggregate = AggregateReport(sample, groups, output, notify, dynamic=True, tabs=tabs)
+    aggregate.resumed_jobs = resumed
     launch_lock = asyncio.Lock()
     atomic_write_json(output / "report.json", aggregate.snapshot())
     aggregate.log.summary("run_started", aggregate.snapshot(), worker_count=len(groups), log_interval=log_interval)
     stop_heartbeat = asyncio.Event()
+    if not groups:
+        return await aggregate.finish()
     finished_workers = 0
     startup_gate = asyncio.Event()
     startup_finished, ready_workers = set(), set()
@@ -476,6 +499,7 @@ async def run_parallel(
                         stop_event=stop_browser,
                         egress_ip=state.get("proxy_egress_ip"),
                         reusable=reusable,
+                        known_unavailable=known_unavailable,
                     )
                     report = generations.get(generation, {})
                     if (

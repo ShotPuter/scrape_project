@@ -17,6 +17,52 @@ def sample(size):
     ]
 
 
+@pytest.mark.asyncio
+async def test_resume_only_queues_missing_links(monkeypatch, tmp_path, fake_browsers):
+    from scripts.pep_camoufox_resume import resume_history
+    from src.sites.pep.documents import save_payload
+
+    rows = sample(2)
+    old = tmp_path / "run-old"
+    metadata = save_payload(b"%PDF-1.4\ntest\n%%EOF", old, "1")
+    (old / "report.json").write_text(
+        json.dumps({"jobs": [{**rows[0], "status": "completed", "documents": [{"id": "1", **metadata}]}]})
+    )
+    assigned = []
+
+    async def fake_run(group, output, request_seconds, *, next_job, on_state, **kwargs):
+        jobs = []
+        while row := next_job():
+            assigned.append(row["n"])
+            jobs.append({**row, "status": "completed", "documents": []})
+        state = {"status": "finished", "jobs": jobs, "pdf_count": 0}
+        on_state(state)
+        return state
+
+    async def notify(report, *, final):
+        pass
+
+    monkeypatch.setattr(parallel, "run", fake_run)
+    output = tmp_path / "run-new"
+    report = await parallel.run_parallel(
+        rows,
+        output,
+        workers=1,
+        request_seconds=60,
+        ca_bundle=tmp_path / "ca",
+        proxy_ca=None,
+        max_seconds=60,
+        proxy=None,
+        notify=notify,
+        resume_history=resume_history(tmp_path, rows),
+    )
+    assert assigned == [2]
+    assert [job["n"] for job in report["jobs"]] == [1, 2]
+    assert report["resumed_links"] == 1
+    assert report["pdf_count"] == 1
+    assert (output / report["jobs"][0]["documents"][0]["local_path"]).exists()
+
+
 @pytest.mark.parametrize(
     ("size", "workers", "sizes"), [(100, 4, [25] * 4), (100, 3, [34, 33, 33]), (101, 4, [26, 25, 25, 25]), (2, 4, [1, 1])]
 )

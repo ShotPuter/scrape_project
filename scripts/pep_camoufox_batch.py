@@ -120,6 +120,7 @@ async def run(
     stop_event: asyncio.Event | None = None,
     egress_ip: str | None = None,
     reusable=None,
+    known_unavailable=None,
 ) -> dict:
     started = time.monotonic()
     stop_event = stop_event or asyncio.Event()
@@ -328,6 +329,9 @@ async def run(
                             checkpoint()
                             try:
                                 activity("document_download", job=job["n"], document=doc_id)
+                                if (job["url"], doc_id) in (known_unavailable or set()):
+                                    doc.update(status="unavailable_http_404", http_status=404)
+                                    continue
                                 existing = await asyncio.to_thread(inspect_saved, output, doc_id)
                                 source = (reusable or {}).get((job["url"], doc_id))
                                 if existing is None and source is not None:

@@ -29,6 +29,7 @@ RUN python -m camoufox fetch
 COPY config.py ./
 COPY scripts/pep_camoufox_export.py ./scripts/
 COPY scripts/pep_camoufox_retry.py ./scripts/
+COPY scripts/pep_camoufox_resume.py ./scripts/
 COPY src ./src
 COPY scripts/pep_camoufox_pilot.py scripts/pep_camoufox_batch.py scripts/pep_camoufox_parallel.py scripts/pep_camoufox_excel.py scripts/pep_camoufox_logging.py ./scripts/
 STOPSIGNAL SIGINT

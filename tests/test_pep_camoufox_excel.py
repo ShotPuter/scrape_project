@@ -139,7 +139,7 @@ async def test_webshare_configuration_never_imports_brightdata_ca(monkeypatch, t
         proxy_ca=tmp_path / "brd",
         log_interval=30,
     )
-    assert await server.execute(args, [{}] * 100) == {"status": "finished"}
+    assert await server.execute(args, [{"url": BASE + str(i)} for i in range(100)]) == {"status": "finished"}
 
 
 @pytest.mark.asyncio
