@@ -55,3 +55,58 @@ def test_retry_includes_corrupt_completed_files(tmp_path):
     assert len(selected) == 1
     assert not reusable
     assert previous["jobs"][0]["documents"][0]["status"] == "invalid_local_file"
+
+
+def test_inplace_retry_keeps_old_paths_and_updates_same_root(tmp_path):
+    root = tmp_path / "original"
+    first = save_payload(PDF, root, "1")
+    previous = {
+        "jobs": [
+            {
+                "n": 1,
+                "url": BASE + "1",
+                "status": "partial",
+                "documents": [{"id": "1", **first}, {"id": "2", "status": "timeout"}],
+            }
+        ]
+    }
+    attempt = root / "retries" / "pass1"
+    references = reuse_document(root, attempt, "1", True)
+    assert not (attempt / "pdf/1.pdf").exists()
+    assert (attempt / references["local_path"]).resolve() == (root / "pdf/1.pdf").resolve()
+    new_pdf = save_payload(PDF, attempt, "2")
+    merged = combined_report(
+        previous,
+        {
+            "status": "finished",
+            "attempt_folder": str(attempt),
+            "jobs": [
+                {
+                    "n": 1,
+                    "url": BASE + "1",
+                    "status": "completed",
+                    "documents": [{"id": "1", **references}, {"id": "2", **new_pdf}],
+                }
+            ],
+        },
+        root,
+        root,
+    )
+    documents = merged["jobs"][0]["documents"]
+    assert documents[0]["local_path"] == "pdf/1.pdf"
+    assert documents[1]["local_path"] == "retries/pass1/pdf/2.pdf"
+    assert not (root / "previous").exists()
+    assert (root / "report.json").is_file()
+    assert merged["pdf_count"] == 2
+    assert all((root / doc["local_path"]).is_file() for doc in documents)
+
+
+def test_same_folder_retries_are_exclusive(tmp_path):
+    import pytest
+
+    from scripts.pep_camoufox_retry import retry_lock
+
+    with retry_lock(tmp_path), pytest.raises(ValueError, match="already running"), retry_lock(tmp_path):
+        pass
+    with retry_lock(tmp_path):
+        pass

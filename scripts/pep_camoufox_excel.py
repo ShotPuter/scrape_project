@@ -7,6 +7,7 @@ import asyncio
 import json
 import math
 import os
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -16,10 +17,11 @@ import aiohttp
 from scripts.pep_camoufox_export import write_export
 from scripts.pep_camoufox_logging import report_totals as totals
 from scripts.pep_camoufox_parallel import BrightDataProxy, run_parallel, webshare_pool
-from scripts.pep_camoufox_retry import combined_report, load_retry
+from scripts.pep_camoufox_retry import combined_report, load_retry, retry_lock
 from src.services.notifications import send_telegram
 from src.sites.pep.source import RESULT_PATH, safe_url
 from src.sites.pep.workbook import LINK_COLUMN, read_rows
+from src.utils.atomic import atomic_write_json
 
 
 def collect_sample(workbook: Path, limit: int, offset: int) -> list[dict]:
@@ -127,6 +129,17 @@ class ProgressReporter:
 
 
 async def execute(args, sample: list[dict]) -> dict:
+    retry_path = getattr(args, "retry_report", None)
+    with retry_lock(retry_path.parent) if retry_path else nullcontext():
+        if retry_path:
+            args.previous_report, sample, args.reusable = load_retry(retry_path)
+            if not sample:
+                print("No incomplete links to retry", flush=True)
+                return {"status": "finished", "jobs": args.previous_report["jobs"]}
+        return await _execute(args, sample)
+
+
+async def _execute(args, sample: list[dict]) -> dict:
     notification_seconds = float(os.getenv("PEP_TELEGRAM_INTERVAL_MINUTES", "0")) * 60
     if not math.isfinite(notification_seconds) or notification_seconds < 0:
         raise ValueError("PEP_TELEGRAM_INTERVAL_MINUTES must be finite and nonnegative")
@@ -136,7 +149,24 @@ async def execute(args, sample: list[dict]) -> dict:
         raise ValueError("Set both TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID")
     if not token:
         print("Telegram is not configured; reports will be written to logs and progress.jsonl", flush=True)
-    output = args.output / datetime.now(UTC).strftime("run-%Y%m%dT%H%M%S%fZ")
+    is_retry = getattr(args, "retry_report", None) is not None
+    output = ((args.retry_report.parent / "retries") if is_retry else args.output) / datetime.now(UTC).strftime(
+        "run-%Y%m%dT%H%M%S%fZ"
+    )
+    if is_retry:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(output.parent / f"before-{output.name}.json", args.previous_report)
+    reporter = ProgressReporter(
+        session=None, output=output, token=token, chat_id=chat_id, interval_seconds=notification_seconds
+    )
+
+    async def notify(report, *, final):
+        if is_retry:
+            report["attempt_folder"] = str(output)
+            merged = combined_report(args.previous_report, report, args.retry_report.parent, args.retry_report.parent)
+            write_export(args.retry_report.parent, merged)
+        await reporter(report, final=final)
+
     username = os.getenv("BRIGHTDATA_PROXY_USERNAME", "").strip()
     password = os.getenv("BRIGHTDATA_PROXY_PASSWORD", "")
     provider = os.getenv("PEP_PROXY_PROVIDER", "auto").strip().lower()
@@ -157,7 +187,8 @@ async def execute(args, sample: list[dict]) -> dict:
         f"Proxy provider: {provider}; browsers: {min(args.workers, len(sample))}; tabs per browser: {args.tabs}", flush=True
     )
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-        result = await run_parallel(
+        reporter.session = session
+        return await run_parallel(
             sample,
             output,
             workers=args.workers,
@@ -166,16 +197,12 @@ async def execute(args, sample: list[dict]) -> dict:
             max_seconds=args.max_minutes * 60,
             proxy_ca=proxy_ca,
             proxy=proxy,
-            notify=ProgressReporter(session, output, token, chat_id, interval_seconds=notification_seconds),
+            notify=notify,
             log_interval=args.log_interval,
             tabs=args.tabs,
             tab_restarts=args.tab_restarts,
             reusable=getattr(args, "reusable", None),
         )
-        if getattr(args, "previous_report", None) is not None:
-            merged = await asyncio.to_thread(combined_report, args.previous_report, result, args.retry_report.parent, output)
-            write_export(output, merged)
-        return result
 
 
 def main() -> int:
