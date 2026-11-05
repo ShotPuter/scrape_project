@@ -66,3 +66,15 @@ crash-related tab replacements and no timeouts. During the run no root
 `scripts.pep_camoufox_db` command then produced the JSON export with four records
 and valid PDF paths. No Telegram messages were sent. This is a short functional
 test, not a throughput prediction for the full workbook.
+
+## Navigation availability investigation — 2026-11-05
+
+Two-browser Webshare run `pep-webshare-20261105T175532601159Z` reproduced current
+navigation failures: both consultation links timed out in `waiting_result_html`,
+zero PDFs, no claim of successful live downloading. Changing the lifecycle wait
+alone did not restore availability. A direct request to the same consultation
+URL also received zero bytes before its 20-second timeout, while a control GET
+to api.ipify.org returned HTTP 200 in 0.24 seconds. These observations narrow the
+failure to access to the target site but do not distinguish an outage, filtering,
+or routing trouble. Unit tests cover parsed-table readiness, identity checks,
+bounded timeout recovery, and no recovery for non-timeout failures.

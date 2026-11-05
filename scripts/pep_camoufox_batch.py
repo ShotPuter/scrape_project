@@ -12,7 +12,7 @@ from collections import Counter
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from camoufox.async_api import AsyncCamoufox
 from playwright.async_api import Error as BrowserError, TimeoutError as BrowserTimeout
@@ -101,6 +101,28 @@ async def download_once(page, element, endpoint: str, timeout_ms: int, *, expect
                         await popup.close()
         completed.cancel()
         rejected.cancel()
+
+
+async def navigate_results(page, url: str, request_seconds: float, diagnostics=None):
+    """Wait for parsed result HTML without waiting for deferred third-party scripts."""
+    async with asyncio.timeout(request_seconds):
+        response = await page.goto(url, wait_until="commit", timeout=int(request_seconds * 1000))
+        if diagnostics is not None:
+            diagnostics["landing_http_status"] = response.status if response else None
+        if not response or response.status != 200:
+            raise ValueError(f"Landing HTTP {response.status if response else 'missing'}")
+        await page.wait_for_function(
+            "() => document.readyState !== 'loading' && !!document.querySelector('table.table tbody')",
+            timeout=int(request_seconds * 1000),
+        )
+        target, actual = urlsplit(safe_url(url)), urlsplit(safe_url(page.url))
+        if (actual.netloc, actual.path) != (target.netloc, target.path):
+            raise ValueError("Navigation left consultation results")
+        expected, observed = parse_qs(target.query), parse_qs(actual.query)
+        for key in ("numeroDocumento", "tipoPersonaId"):
+            if key in expected and observed.get(key) != expected[key]:
+                raise ValueError("Navigation returned results for a different identity")
+        return response
 
 
 async def run(
@@ -298,9 +320,8 @@ async def run(
                         await asyncio.sleep(3)
                         for navigation_attempt in range(2):
                             try:
-                                landing = await page.goto(
-                                    next_url, wait_until="domcontentloaded", timeout=int(request_seconds * 1000)
-                                )
+                                job["navigation_stage"] = "waiting_result_html"
+                                landing = await navigate_results(page, next_url, request_seconds, job)
                                 break
                             except BrowserError as exc:
                                 if navigation_attempt or "NS_ERROR_UNKNOWN_HOST" not in str(exc):
@@ -310,9 +331,7 @@ async def run(
                         if not landing or landing.status != 200:
                             raise ValueError(f"Landing HTTP {landing.status if landing else 'missing'}")
                         activity("discovery", job=job["n"])
-                        await page.locator("table.table tbody").wait_for(
-                            state="attached", timeout=int(request_seconds * 1000)
-                        )
+                        job["navigation_stage"] = "results_ready"
                         documents, next_url = parse_results(await page.content(), page.url)
                         documents = [doc for doc in documents if str(doc["id"]) not in seen_docs]
                         for doc in documents:
@@ -484,10 +503,24 @@ async def run(
                     ):
                         job["status"] = "completed_with_unavailable"
                 except Exception as exc:
-                    job.update(status="failed", error={"type": type(exc).__name__, "message": redact(exc)[:800]})
+                    job.update(
+                        status="failed",
+                        error={
+                            "type": type(exc).__name__,
+                            "message": redact(exc)[:800] or f"Timeout during {job.get('navigation_stage', 'navigation')}",
+                            "stage": job.get("navigation_stage"),
+                        },
+                    )
                     if target_failure(exc):
                         stop_target(exc)
                     try:
+                        with suppress(Exception):
+                            async with asyncio.timeout(5):
+                                job["navigation_readiness"] = await page.evaluate(
+                                    "() => ({ready_state:document.readyState,"
+                                    "results_table:!!document.querySelector('table.table tbody'),"
+                                    "result_rows:document.querySelectorAll('table.table tbody tr').length})"
+                                )
                         job["page_title"] = redact(await page.title())
                         body = await page.locator("body").inner_text(timeout=5000)
                         job["page_text_excerpt"] = redact(body)[:1500]

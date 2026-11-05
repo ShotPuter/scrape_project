@@ -352,9 +352,12 @@ async def run_parallel(
     browser_max_seconds: float = 1200,
     browser_max_links: int = 40,
     sqlite_state: bool = False,
+    navigation_backoff: float = 30,
 ) -> dict:
     if not math.isfinite(browser_max_seconds) or browser_max_seconds <= 0 or browser_max_links < 1:
         raise ValueError("Browser lifetime and link limit must be positive")
+    if not math.isfinite(navigation_backoff) or navigation_backoff < 0:
+        raise ValueError("Navigation backoff must be finite and nonnegative")
     if not math.isfinite(log_interval) or log_interval <= 0:
         raise ValueError("log_interval must be finite and positive")
     if workers > 1 and proxy is None and not resume_history:
@@ -438,6 +441,7 @@ async def run_parallel(
         tab_updated = {}
         tab_segments = {}
         browser_generation = 0
+        navigation_recoveries = 0
         rotation_reason = None
         cycle_claimed = 0
         cycle_deadline = float("inf")
@@ -722,6 +726,30 @@ async def run_parallel(
                                     tab_tasks.create_task(tab_worker(number, context))
                             context_closing = True
                     if not retry_proxy:
+                        failed_tabs = [
+                            tab for tab in tab_states.values() if tab.get("stop_reason") == "consecutive_navigation_errors"
+                        ]
+                        if (
+                            not rotation_reason
+                            and failed_tabs
+                            and navigation_recoveries < 3
+                            and not queue.empty()
+                            and not stop_browser.is_set()
+                            and all(
+                                tab.get("jobs")
+                                and all((job.get("error") or {}).get("type") == "TimeoutError" for job in tab["jobs"][-3:])
+                                for tab in failed_tabs
+                            )
+                        ):
+                            navigation_recoveries += 1
+                            rotation_reason = "navigation_timeouts"
+                            pause = navigation_backoff * 2 ** (navigation_recoveries - 1)
+                            aggregate.log.emit(
+                                "navigation_cooldown", worker=index, attempt=navigation_recoveries, seconds=pause
+                            )
+                            activity("navigation_cooldown")
+                            await aggregate.update(index, state)
+                            await asyncio.sleep(pause)
                         if rotation_reason and not queue.empty() and not stop_browser.is_set():
                             browser_generation += 1
                             state["browser_restarts"] = browser_generation

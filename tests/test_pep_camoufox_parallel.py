@@ -18,6 +18,63 @@ def sample(size):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("error_type,expected_contexts", [("TimeoutError", 2), ("ValueError", 1), ("PersistentTimeout", 4)])
+async def test_navigation_cooldown_only_recovers_timeouts(
+    monkeypatch, tmp_path, fake_browsers, error_type, expected_contexts
+):
+    calls = 0
+
+    async def fake_run(group, output, request_seconds, *, next_job, on_progress, **kwargs):
+        nonlocal calls
+        calls += 1
+        jobs = []
+        while (row := next_job()) is not None:
+            failed = calls == 1 or error_type == "PersistentTimeout"
+            jobs.append(
+                {
+                    **row,
+                    "status": "failed" if failed else "completed",
+                    "documents": [],
+                    "error": {"type": "TimeoutError" if error_type == "PersistentTimeout" else error_type}
+                    if failed
+                    else None,
+                }
+            )
+            if failed and len(jobs) == 3:
+                break
+        await on_progress(
+            {
+                "status": "stopped" if calls == 1 or error_type == "PersistentTimeout" else "finished",
+                "jobs": jobs,
+                "stop_reason": "consecutive_navigation_errors" if calls == 1 or error_type == "PersistentTimeout" else None,
+            },
+            final=True,
+        )
+
+    async def notify(report, *, final):
+        pass
+
+    monkeypatch.setattr(parallel, "run", fake_run)
+    report = await parallel.run_parallel(
+        sample(15 if error_type == "PersistentTimeout" else 5),
+        tmp_path / "run",
+        workers=1,
+        request_seconds=10,
+        ca_bundle=tmp_path / "ca",
+        proxy_ca=None,
+        max_seconds=10,
+        proxy=None,
+        notify=notify,
+        navigation_backoff=0,
+    )
+    assert len(fake_browsers) == expected_contexts
+    assert report["queue_remaining"] == (
+        0 if error_type == "TimeoutError" else 3 if error_type == "PersistentTimeout" else 2
+    )
+    assert report["browser_restarts"] == expected_contexts - 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("age_limit", [False, True])
 @pytest.mark.parametrize("sqlite_state", [False, True])
 async def test_browser_rotation_drains_keeps_files_and_closes_old_context(
@@ -466,6 +523,9 @@ async def test_actual_tabs_share_context_but_keep_downloads_separate(monkeypatch
         async def content(self):
             return "test"
 
+        async def wait_for_function(self, *args, **kwargs):
+            pass
+
         async def evaluate_all(self, *args):
             return 0
 
@@ -692,6 +752,9 @@ async def test_dead_tab_never_drains_queue_or_stops_healthy_peers(monkeypatch, t
             if failure == "crash":
                 self.handlers["crash"](self)
                 raise batch.BrowserError("Locator.wait_for: Target crashed")
+
+        async def wait_for_function(self, *args, **kwargs):
+            await self.wait_for()
 
         async def content(self):
             if failure == "timeout_diagnostics":
