@@ -11,13 +11,41 @@ import math
 import secrets
 import time
 from collections import Counter
+from contextlib import suppress
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
+
+from playwright.async_api import TimeoutError as BrowserTimeout
 
 from scripts.pep_camoufox_batch import browser_context, run
 from scripts.pep_camoufox_logging import EventLog, report_totals, resource_snapshot
 from scripts.pep_camoufox_pilot import install_intermediate, install_proxy_ca
 from src.utils.atomic import atomic_write_json
+
+
+async def proxy_preflight(context, request_seconds, *, on_attempt, log, worker):
+    """Retry a timed-out IP check once, within the same browser and proxy session."""
+    for attempt in (1, 2):
+        on_attempt(attempt)
+        page = None
+        try:
+            page = await context.new_page()
+            response = await page.goto(
+                "https://api.ipify.org", wait_until="domcontentloaded", timeout=int(request_seconds * 1000)
+            )
+            if response is None or response.status != 200:
+                raise ValueError("Proxy browser preflight failed")
+            address = (await page.locator("body").inner_text()).strip()
+            return str(ipaddress.ip_address(address))
+        except (BrowserTimeout, TimeoutError):
+            log.emit("proxy_preflight_timeout", worker=worker, attempt=attempt, will_retry=attempt == 1)
+            if attempt == 2:
+                raise
+        finally:
+            if page is not None:
+                with suppress(Exception):
+                    await page.close()
+    raise AssertionError("Unreachable")
 
 
 class FixedProxyPool:
@@ -142,6 +170,7 @@ class AggregateReport:
                     "stop_reason": worker.get("stop_reason"),
                     "error": worker.get("error"),
                     "failure_stage": worker.get("failure_stage"),
+                    "proxy_preflight_attempts": worker.get("proxy_preflight_attempts", 0),
                     "proxy_egress_ip": worker.get("proxy_egress_ip"),
                     "tabs": tab_snapshots,
                     "tab_restarts": sum(tab.get("restarts", 0) for tab in tab_snapshots),
@@ -500,15 +529,14 @@ async def run_parallel(
                         context.on("close", context_closed)
                     if assigned_proxy:
                         activity("proxy_preflight")
-                        page = await context.new_page()
-                        response = await page.goto(
-                            "https://api.ipify.org", wait_until="domcontentloaded", timeout=int(request_seconds * 1000)
+
+                        def record_attempt(attempt):
+                            state["proxy_preflight_attempts"] = attempt
+                            combine()
+
+                        state["proxy_egress_ip"] = await proxy_preflight(
+                            context, request_seconds, on_attempt=record_attempt, log=aggregate.log, worker=index
                         )
-                        if response is None or response.status != 200:
-                            raise ValueError("Proxy browser preflight failed")
-                        address = (await page.locator("body").inner_text()).strip()
-                        state["proxy_egress_ip"] = str(ipaddress.ip_address(address))
-                        await page.close()
                         aggregate.log.emit("proxy_ready", worker=index, egress_ip=state["proxy_egress_ip"])
                     activity("waiting_for_browsers")
                     startup_done(index, ready=True)

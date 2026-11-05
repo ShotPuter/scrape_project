@@ -792,3 +792,50 @@ async def test_replacement_limit_and_site_refusal(monkeypatch, tmp_path, fake_br
     assert result["tab_restarts"] == expected_calls - 1
     assert result["queue_remaining"] == 10 - expected_calls
     assert result["status"] == "stopped"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timeouts", [1, 2])
+async def test_proxy_preflight_retries_timeout_in_same_context_and_closes_pages(tmp_path, timeouts):
+    pages, attempts = [], []
+    log = parallel.EventLog(tmp_path)
+
+    class Page:
+        def __init__(self, number):
+            self.number = number
+            self.closed = False
+
+        async def goto(self, url, **kwargs):
+            assert url == "https://api.ipify.org"
+            if self.number <= timeouts:
+                raise parallel.BrowserTimeout("test timeout")
+            return SimpleNamespace(status=200)
+
+        def locator(self, selector):
+            return self
+
+        async def inner_text(self):
+            return "192.0.2.1"
+
+        async def close(self):
+            self.closed = True
+
+    class Context:
+        async def new_page(self):
+            page = Page(len(pages) + 1)
+            pages.append(page)
+            return page
+
+    context = Context()
+    try:
+        if timeouts == 2:
+            with pytest.raises(parallel.BrowserTimeout):
+                await parallel.proxy_preflight(context, 60, on_attempt=attempts.append, log=log, worker=1)
+        else:
+            assert await parallel.proxy_preflight(context, 60, on_attempt=attempts.append, log=log, worker=1) == "192.0.2.1"
+    finally:
+        log.close()
+    assert attempts == [1, 2]
+    assert all(page.closed for page in pages)
+    events = [json.loads(line) for line in (tmp_path / "run.log").read_text().splitlines()]
+    assert [event["will_retry"] for event in events] == ([True, False] if timeouts == 2 else [True])
