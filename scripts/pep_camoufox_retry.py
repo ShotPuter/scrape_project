@@ -10,9 +10,10 @@ import os
 import shutil
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from src.sites.pep.documents import inspect_saved, save_payload, valid_pdf
-from src.sites.pep.source import safe_url
+from src.sites.pep.source import LEGACY_PATH, safe_url
 from src.utils.atomic import atomic_write_json
 
 
@@ -23,6 +24,12 @@ def load_retry(path: Path):
     for job in previous["jobs"]:
         url = safe_url(job["url"])
         for doc in job["documents"]:
+            if (
+                doc["status"] == "http_404"
+                and doc.get("download_url")
+                and urlsplit(safe_url(doc["download_url"])).path == LEGACY_PATH
+            ):
+                doc["status"] = "unavailable_http_404"
             if doc["status"] == "downloaded" and doc.get("local_path"):
                 pdf = (root / doc["local_path"]).resolve()
                 if not pdf.is_relative_to(root):
@@ -32,7 +39,13 @@ def load_retry(path: Path):
                 else:
                     doc["status"] = "invalid_local_file"
                     job["status"] = "partial"
-        if job["status"] != "completed":
+        if (
+            job["documents"]
+            and all(doc["status"] in {"downloaded", "unavailable_http_404"} for doc in job["documents"])
+            and any(doc["status"] == "unavailable_http_404" for doc in job["documents"])
+        ):
+            job["status"] = "completed_with_unavailable"
+        if job["status"] not in {"completed", "completed_with_unavailable"}:
             selected.append(
                 {key: copy.deepcopy(job[key]) for key in ("n", "source_row", "source_records", "url") if key in job}
             )
@@ -117,6 +130,12 @@ def combined_report(previous: dict, current: dict, old_root: Path, output: Path)
             if job["documents"]
             else update["status"]
         )
+        if (
+            update["status"] in {"completed", "completed_with_unavailable"}
+            and any(doc["status"] == "unavailable_http_404" for doc in job["documents"])
+            and all(doc["status"] in {"downloaded", "unavailable_http_404"} for doc in job["documents"])
+        ):
+            job["status"] = "completed_with_unavailable"
         job["error"] = update.get("error")
     combined["status"] = current["status"]
     combined["retry_of"] = str(old_root)
@@ -141,7 +160,7 @@ def combined_report(previous: dict, current: dict, old_root: Path, output: Path)
                 {"job": job["n"], "document": doc.get("id"), "status": doc["status"], "error": doc.get("error")}
                 for job in combined["jobs"]
                 for doc in job["documents"]
-                if doc["status"] != "downloaded"
+                if doc["status"] not in {"downloaded", "unavailable_http_404"}
             ],
         )
     else:

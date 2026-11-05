@@ -158,3 +158,71 @@ async def test_time_notifications_ignore_link_thresholds_and_include_idle_and_fi
     rows = [json.loads(line) for line in (tmp_path / "progress.jsonl").read_text().splitlines()]
     assert [row["elapsed_seconds"] for row in rows] == [1800, 3600, 3610]
     assert [row["final"] for row in rows] == [False, False, True]
+
+
+@pytest.mark.asyncio
+async def test_start_notice_is_immediate_and_reports_unavailable_separately(monkeypatch, tmp_path):
+    messages = []
+
+    async def send(*args):
+        messages.append(args[-1])
+
+    monkeypatch.setattr(server, "send_telegram", send)
+    notify = server.ProgressReporter(None, tmp_path, "token", "chat", interval_seconds=1800)
+    state = {
+        **report(0),
+        "event": "download_started",
+        "seconds": 150,
+        "ready_browsers": 25,
+        "worker_count": 25,
+        "tab_count": 75,
+    }
+    await notify(state, final=False)
+    assert len(messages) == 1 and "старт" in messages[0] and "25 / 25" in messages[0]
+    await notify({**report(10), "seconds": 160}, final=False)
+    assert len(messages) == 1
+    stats = server.totals(
+        {
+            "jobs": [
+                {
+                    "status": "completed_with_unavailable",
+                    "documents": [{"status": "downloaded"}, {"status": "unavailable_http_404"}],
+                }
+            ]
+        }
+    )
+    assert stats["processed"] == 1 and stats["completed"] == 0
+    assert stats["unavailable"] == 1 and stats["not_downloaded"] == 0
+
+
+def test_existing_legacy_404_report_is_saved_without_starting_browsers(monkeypatch, tmp_path):
+    path = tmp_path / "report.json"
+    path.write_text(
+        json.dumps(
+            {
+                "status": "finished",
+                "jobs": [
+                    {
+                        "n": 1,
+                        "url": BASE + "1",
+                        "status": "partial",
+                        "documents": [
+                            {
+                                "id": "legacy-test",
+                                "status": "http_404",
+                                "publication_type": "OTRO",
+                                "download_url": "https://www.funcionpublica.gov.co/ley-transparencia-web/declaracionServlet?action=download",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+    monkeypatch.setattr("sys.argv", ["pep", "unused.xlsx", "--retry-report", str(path)])
+    assert server.main() == 0
+    saved = json.loads(path.read_text())
+    assert saved["jobs"][0]["status"] == "completed_with_unavailable"
+    unavailable = json.loads((tmp_path / "unavailable-documents.json").read_text())
+    assert len(unavailable) == 1 and unavailable[0]["publication_type"] == "OTRO"
+    assert list((tmp_path / "retries").glob("before-classify-*.json"))

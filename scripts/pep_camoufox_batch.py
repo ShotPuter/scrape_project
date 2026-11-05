@@ -371,6 +371,9 @@ async def run(
                                     )
                                 if download is None:
                                     doc.update(status=f"http_{status}", http_status=status)
+                                    if not modern and status == 404:
+                                        doc["status"] = "unavailable_http_404"
+                                        continue
                                     if modern or status in {403, 429}:
                                         # A redirect alone does not establish the CAPTCHA rejection reason.
                                         try:
@@ -446,6 +449,14 @@ async def run(
                         and all(doc["status"] == "downloaded" for doc in job["documents"])
                         else "partial"
                     )
+                    if (
+                        job["status"] == "partial"
+                        and not next_url
+                        and not report.get("stop_reason")
+                        and not stop_event.is_set()
+                        and all(doc["status"] in {"downloaded", "unavailable_http_404"} for doc in job["documents"])
+                    ):
+                        job["status"] = "completed_with_unavailable"
                 except Exception as exc:
                     job.update(status="failed", error={"type": type(exc).__name__, "message": redact(exc)[:800]})
                     if target_failure(exc):

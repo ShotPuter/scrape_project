@@ -74,7 +74,8 @@ class ProgressReporter:
         stats = totals(report)
         processed = stats["processed"]
         seconds = report.get("seconds", 0)
-        if not final:
+        starting = report.get("event") == "download_started"
+        if not final and not starting:
             if self.interval_seconds:
                 if seconds - self.last_seconds < self.interval_seconds:
                     return
@@ -84,22 +85,35 @@ class ProgressReporter:
         self.last_seconds = seconds
         minutes = report.get("seconds", 0) / 60
         speed = stats["downloaded_new"] / minutes if minutes else 0
-        text = (
-            f"PEP Camoufox {'— итог' if final else '— прогресс'}\n"
-            f"Запуск: {self.output.name}\n"
-            f"Обработано ссылок: {processed}/{stats['total']}\n"
-            f"Полностью скачаны: {stats['completed']}\n"
-            f"Без деклараций: {stats['empty']}\n"
-            f"Частично: {stats['partial']}; ошибки: {stats['failed']}; ожидают: {stats['pending']}\n"
-            f"Деклараций скачано: {stats['downloaded']}; не скачано из найденных: {stats['not_downloaded']}\n"
-            f"Новых скачиваний: {stats['downloaded_new']}; переиспользовано: {stats['reused']}\n"
-            f"PDF сохранено: {stats['pdf']}\n"
-            f"Браузеров: {report.get('worker_count', 1)}; прошло: {minutes:.1f} мин; темп: {speed:.1f} деклараций/мин\n"
-            f"Вкладок: {report.get('tab_count', 1)}; активных ссылок: {stats['running']}; в очереди: {stats['pending']}\n"
-            f"Попыток восстановления вкладок: {report.get('tab_restarts', 0)}\n"
-            f"Разных прокси IP при проверке: {len(report.get('proxy_egress_ips', []))}\n"
-            f"Статус: {report['status']}; причина остановки: {report.get('stop_reason') or 'нет'}"
+        heading = (
+            "🚀 PEP Camoufox — старт" if starting else "🏁 PEP Camoufox — итог" if final else "📊 PEP Camoufox — прогресс"
         )
+        text = (
+            f"{heading}\nЗапуск: {self.output.name}\n\n"
+            f"👤 ССЫЛКИ: {processed}/{stats['total']}\n"
+            f"✅ Полностью скачаны: {stats['completed']}\n"
+            f"📭 Без деклараций: {stats['empty']}\n"
+            f"📂 Обработаны с недоступными PDF: {stats['links_with_unavailable']}\n"
+            f"⚠️ Частично: {stats['partial']} · Ошибки ссылок: {stats['failed']}\n"
+            f"⏳ Активны: {stats['running']} · В очереди: {stats['pending']}\n\n"
+            f"📄 ДЕКЛАРАЦИИ\n"
+            f"Новых скачиваний: {stats['downloaded_new']} · Переиспользовано: {stats['reused']}\n"
+            f"Всего скачано: {stats['downloaded']} · PDF: {stats['pdf']}\n"
+            f"🚫 Недоступны на сайте (legacy 404): {stats['unavailable']}\n"
+            f"Осталось из найденных: {stats['not_downloaded']}\n"
+            f"Таймауты: {stats['document_timeouts']} · HTTP 302: {stats['http_302']}\n\n"
+            f"⚙️ БРАУЗЕРЫ\n"
+            f"Готовы: {report.get('ready_browsers', report.get('proxy_observed_browsers', 0))}"
+            f" / {report.get('worker_count', 1)}"
+            f" · Вкладок настроено: {report.get('tab_count', 1)}\n"
+            f"Прокси IP: {len(report.get('proxy_egress_ips', []))}"
+            f" · Замен вкладок: {report.get('tab_restarts', 0)}\n\n"
+            f"⏱ Прошло: {minutes:.1f} мин · Новых деклараций/мин: {speed:.1f}\n"
+            f"Статус: {report['status']}\n"
+            f"Причина остановки: {(report.get('stop_reason') or 'нет')[:500]}"
+        )
+        if starting:
+            text += "\n\n▶️ Браузеры проверены, начинается обработка очереди."
         print(text, flush=True)
         with (self.output / "progress.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(
@@ -107,6 +121,7 @@ class ProgressReporter:
                     {
                         "at": datetime.now(UTC).isoformat(),
                         "final": final,
+                        "event": report.get("event", "progress"),
                         **stats,
                         "elapsed_seconds": report.get("seconds", 0),
                         "declarations_per_minute": round(speed, 2),
@@ -240,6 +255,24 @@ def main() -> int:
     if args.retry_report:
         args.previous_report, sample, args.reusable = load_retry(args.retry_report)
         if not sample:
+            if not args.preview:
+                with retry_lock(args.retry_report.parent):
+                    previous = json.loads(args.retry_report.read_text())
+                    classified, remaining, _ = load_retry(args.retry_report)
+                    if remaining:
+                        raise ValueError("Report changed; repeat the retry command")
+                    classified["job_counts"] = {
+                        status: sum(job["status"] == status for job in classified["jobs"])
+                        for status in {job["status"] for job in classified["jobs"]}
+                    }
+                    backup = (
+                        args.retry_report.parent
+                        / "retries"
+                        / datetime.now(UTC).strftime("before-classify-%Y%m%dT%H%M%S%fZ.json")
+                    )
+                    atomic_write_json(backup, previous)
+                    atomic_write_json(args.retry_report, classified)
+                    write_export(args.retry_report.parent, classified)
             print("No incomplete links to retry", flush=True)
             return 0
     else:
@@ -248,7 +281,12 @@ def main() -> int:
     if args.preview:
         return 0
     report = asyncio.run(execute(args, sample))
-    return 0 if report["status"] == "finished" and all(job["status"] == "completed" for job in report["jobs"]) else 1
+    return (
+        0
+        if report["status"] == "finished"
+        and all(job["status"] in {"completed", "completed_with_unavailable"} for job in report["jobs"])
+        else 1
+    )
 
 
 if __name__ == "__main__":

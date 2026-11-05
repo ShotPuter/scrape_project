@@ -272,7 +272,7 @@ class AggregateReport:
                 }
                 for job in combined["jobs"]
                 for doc in job["documents"]
-                if doc["status"] != "downloaded"
+                if doc["status"] not in {"downloaded", "unavailable_http_404"}
             ]
             combined["incomplete_document_counts"] = dict(Counter(doc["status"] for doc in incomplete))
             atomic_write_json(self.output / "incomplete-documents.json", incomplete)
@@ -329,6 +329,8 @@ async def run_parallel(
     finished_workers = 0
     startup_gate = asyncio.Event()
     startup_finished, ready_workers = set(), set()
+    start_notice_lock = asyncio.Lock()
+    start_notified = False
 
     def startup_done(index, *, ready=False):
         if index in startup_finished:
@@ -353,7 +355,7 @@ async def run_parallel(
                 await aggregate.heartbeat()
 
     async def worker(index, group):
-        nonlocal finished_workers
+        nonlocal finished_workers, start_notified
         folder = output / f"worker-{index}"
         assigned_proxy = proxy.for_worker(index) if proxy else None
         state = {"status": "running", "jobs": [], "tabs": [], "pdf_count": 0, "archive_count": 0}
@@ -597,6 +599,12 @@ async def run_parallel(
                             activity("waiting_for_browsers")
                             startup_done(index, ready=True)
                             await startup_gate.wait()
+                            async with start_notice_lock:
+                                if not start_notified:
+                                    start_notified = True
+                                    notice = aggregate.snapshot()
+                                    notice.update(event="download_started", ready_browsers=len(ready_workers))
+                                    await aggregate.notify(notice, final=False)
                             activity("tabs_running")
                             async with asyncio.TaskGroup() as tab_tasks:
                                 for number in range(1, tabs + 1):

@@ -42,10 +42,17 @@ def report_totals(report: dict) -> dict:
     documents = [doc for job in jobs for doc in job["documents"]]
     downloaded = sum(doc["status"] == "downloaded" for doc in documents)
     reused = sum(doc["status"] == "downloaded" and bool(doc.get("reused")) for doc in documents)
+    unavailable = sum(doc["status"] == "unavailable_http_404" for doc in documents)
     empty = sum(job["status"] == "completed" and not job["documents"] for job in jobs)
     return {
         "total": len(jobs),
-        "processed": sum(counts.get(s, 0) for s in ("completed", "partial", "failed", "interrupted")),
+        "processed": sum(
+            counts.get(s, 0) for s in ("completed", "completed_with_unavailable", "partial", "failed", "interrupted")
+        ),
+        "links_with_unavailable": counts.get("completed_with_unavailable", 0),
+        "unavailable": unavailable,
+        "document_timeouts": sum(doc["status"] == "timeout" for doc in documents),
+        "http_302": sum(doc["status"] == "http_302" for doc in documents),
         "completed": counts.get("completed", 0) - empty,
         "empty": empty,
         "partial": counts.get("partial", 0),
@@ -55,7 +62,7 @@ def report_totals(report: dict) -> dict:
         "downloaded": downloaded,
         "reused": reused,
         "downloaded_new": downloaded - reused,
-        "not_downloaded": len(documents) - downloaded,
+        "not_downloaded": len(documents) - downloaded - unavailable,
         "pdf": report.get("pdf_count", 0),
     }
 

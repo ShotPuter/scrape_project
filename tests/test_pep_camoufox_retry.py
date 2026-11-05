@@ -110,3 +110,33 @@ def test_same_folder_retries_are_exclusive(tmp_path):
         pass
     with retry_lock(tmp_path):
         pass
+
+
+def test_legacy_404_is_classified_and_not_retried_but_modern_404_is_retried(tmp_path):
+    path = tmp_path / "report.json"
+    path.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "n": 1,
+                        "url": BASE + "1",
+                        "status": "partial",
+                        "documents": [
+                            {
+                                "id": "legacy-test",
+                                "status": "http_404",
+                                "publication_type": "OTRO",
+                                "download_url": "https://www.funcionpublica.gov.co/ley-transparencia-web/declaracionServlet?action=download",
+                            }
+                        ],
+                    },
+                    {"n": 2, "url": BASE + "2", "status": "partial", "documents": [{"id": "123", "status": "http_404"}]},
+                ]
+            }
+        )
+    )
+    previous, selected, _ = load_retry(path)
+    assert previous["jobs"][0]["status"] == "completed_with_unavailable"
+    assert previous["jobs"][0]["documents"][0]["status"] == "unavailable_http_404"
+    assert [job["n"] for job in selected] == [2]

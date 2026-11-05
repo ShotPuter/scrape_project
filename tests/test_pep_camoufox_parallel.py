@@ -146,7 +146,7 @@ async def test_twenty_browsers_sixty_tabs_global_queue_and_progress(monkeypatch,
     assert result["worker_count"] == 20 and result["tab_count"] == 60
     assert result["queue_remaining"] == 0
     progress = [json.loads(line) for line in (output / "progress.jsonl").read_text().splitlines()]
-    assert [row["processed"] for row in progress] == [*range(10, 101, 10), 100]
+    assert [row["processed"] for row in progress if row.get("event") != "download_started"] == [*range(10, 101, 10), 100]
     assert sum(row["final"] for row in progress) == 1
     for job in result["jobs"]:
         expected = f"worker-{job['worker']}/tab-{job['tab']}/pdf/example.pdf"
@@ -315,7 +315,8 @@ async def test_webshare_chooses_distinct_addresses_and_decodes_auth(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_actual_tabs_share_context_but_keep_downloads_separate(monkeypatch, tmp_path):
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_actual_tabs_share_context_but_keep_downloads_separate(monkeypatch, tmp_path, legacy):
     original_sleep = asyncio.sleep
     pages, contexts_closed = [], []
     claimed = iter(sample(6))
@@ -345,6 +346,15 @@ async def test_actual_tabs_share_context_but_keep_downloads_separate(monkeypatch
         async def content(self):
             return "test"
 
+        async def evaluate_all(self, *args):
+            return 0
+
+        def nth(self, index):
+            return self
+
+        async def evaluate(self, *args):
+            pass
+
         async def close(self):
             self.closed = True
 
@@ -359,12 +369,21 @@ async def test_actual_tabs_share_context_but_keep_downloads_separate(monkeypatch
 
     def parse(content, url):
         doc_id = str(100 + int(url.rsplit("=", 1)[1]))
-        return [{"id": doc_id, "requires_captcha": True}], None
+        return [
+            {
+                "id": doc_id,
+                "requires_captcha": not legacy,
+                "download_url": "https://www.funcionpublica.gov.co" + batch.LEGACY_PATH + "?action=download",
+            }
+        ], None
 
-    async def download(page, element, endpoint, timeout_ms):
+    async def download(page, element, endpoint, timeout_ms, **kwargs):
         # An empty pageerror must not break the event callback or PDF processing.
         page.handlers["pageerror"](batch.BrowserError(""))
         page.handlers["pageerror"](batch.BrowserError("first line\nsecond line"))
+        if legacy:
+            assert kwargs["expected_url"].startswith("https://")
+            return None, 404
         # A per-page URL identifies its own native download.
         doc_id = str(100 + int(page.url.rsplit("=", 1)[1]))
 
@@ -389,9 +408,9 @@ async def test_actual_tabs_share_context_but_keep_downloads_separate(monkeypatch
     )
     jobs = [job for report in results for job in report["jobs"]]
     assert sorted(job["n"] for job in jobs) == list(range(1, 7))
-    assert all(job["status"] == "completed" for job in jobs)
+    assert all(job["status"] == ("completed_with_unavailable" if legacy else "completed") for job in jobs)
     assert all(job["documents"][0]["javascript_errors"] == ["Error", "first line"] for job in jobs)
-    assert sum(report["pdf_count"] for report in results) == 6
+    assert sum(report["pdf_count"] for report in results) == (0 if legacy else 6)
     assert len(pages) == 3 and all(page.closed for page in pages)
     assert not contexts_closed
     for path in tmp_path.glob("tab-*/pdf/*.pdf"):

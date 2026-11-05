@@ -26,6 +26,7 @@ def build_export(report: dict) -> list[dict]:
             declarations.append(
                 {
                     "id": doc.get("id"),
+                    "download_url": doc.get("download_url"),
                     "publication_date": doc.get("publication_date"),
                     "publication_type": doc.get("publication_type"),
                     "declaration_number": doc.get("declaration_number"),
@@ -49,6 +50,15 @@ def build_export(report: dict) -> list[dict]:
 
 def write_export(output: Path, report: dict) -> None:
     atomic_write_json(output / "politicians.json", build_export(report))
+    atomic_write_json(
+        output / "unavailable-documents.json",
+        [
+            {"consultation_url": job["url"], **doc}
+            for job in report["jobs"]
+            for doc in job["documents"]
+            if doc["status"] == "unavailable_http_404"
+        ],
+    )
 
 
 def main():
