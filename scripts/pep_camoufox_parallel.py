@@ -17,10 +17,11 @@ from urllib.parse import unquote, urlsplit
 
 from playwright.async_api import Error as BrowserError, TimeoutError as BrowserTimeout
 
-from scripts.pep_camoufox_batch import browser_context, run
+from scripts.pep_camoufox_batch import browser_context, navigate_results, run
 from scripts.pep_camoufox_db import StateDB
 from scripts.pep_camoufox_export import write_export
 from scripts.pep_camoufox_logging import EventLog, report_totals, resource_snapshot
+from scripts.pep_camoufox_pause import SitePause
 from scripts.pep_camoufox_pilot import install_intermediate, install_proxy_ca
 from scripts.pep_camoufox_resume import materialize_history
 from src.utils.atomic import atomic_write_json
@@ -144,6 +145,7 @@ class AggregateReport:
         self.flush_interval = 15.0
         self.last_notified_count = 0
         self.database = None
+        self.site_pause = None
         self.sample = sample
         self.resumed_jobs = []
         self.dynamic, self.tabs = dynamic, tabs
@@ -219,6 +221,7 @@ class AggregateReport:
         }
         return {
             "engine": "camoufox",
+            "site_pause": self.site_pause.snapshot() if self.site_pause else {"state": "running"},
             "status": status,
             "jobs": sorted(jobs, key=lambda job: job["n"]),
             "workers": workers,
@@ -353,7 +356,10 @@ async def run_parallel(
     browser_max_links: int = 40,
     sqlite_state: bool = False,
     navigation_backoff: float = 30,
+    site_pause_seconds: float = 1200,
 ) -> dict:
+    if not math.isfinite(site_pause_seconds) or site_pause_seconds <= 0:
+        raise ValueError("Site pause must be finite and positive")
     if not math.isfinite(browser_max_seconds) or browser_max_seconds <= 0 or browser_max_links < 1:
         raise ValueError("Browser lifetime and link limit must be positive")
     if not math.isfinite(navigation_backoff) or navigation_backoff < 0:
@@ -404,6 +410,19 @@ async def run_parallel(
     stop_heartbeat = asyncio.Event()
     if not groups:
         return await aggregate.finish()
+
+    async def announce_pause(event):
+        async with aggregate.lock:
+            notice = aggregate.snapshot()
+            notice["event"] = event
+            await asyncio.to_thread(aggregate.persist, notice)
+            if aggregate.database is not None:
+                await asyncio.to_thread(aggregate.database.flush, force=True, metadata=notice)
+            aggregate.log.emit(event, **site_pause.snapshot())
+        await aggregate.notify(notice, final=False)
+
+    site_pause = SitePause(len(groups), announce_pause, seconds=site_pause_seconds)
+    aggregate.site_pause = site_pause
     finished_workers = 0
     startup_gate = asyncio.Event()
     startup_finished, ready_workers = set(), set()
@@ -452,6 +471,9 @@ async def run_parallel(
         def browser_next_job():
             nonlocal rotation_reason, cycle_claimed
             if rotation_reason or stop_browser.is_set():
+                return None
+            if site_pause.blocked:
+                rotation_reason = "site_pause"
                 return None
             if not queue.empty() and (time.monotonic() >= cycle_deadline or cycle_claimed >= browser_max_links):
                 rotation_reason = "age_limit" if time.monotonic() >= cycle_deadline else "link_limit"
@@ -564,6 +586,9 @@ async def run_parallel(
 
             async def progress(report, *, final):
                 observe(report)
+                if not queue.empty():
+                    for job in report["jobs"]:
+                        await site_pause.record(index, job)
                 await aggregate.update(index, state)
 
             try:
@@ -639,6 +664,8 @@ async def run_parallel(
                 state["proxy_replacements"] = 0
                 state["proxy_failures"] = []
                 while True:
+                    activity("waiting_for_site" if site_pause.blocked else "browser_start")
+                    probe_only = await site_pause.permission(index)
                     activity("browser_start")
                     context_closing = False
                     retry_proxy = False
@@ -673,6 +700,23 @@ async def run_parallel(
 
                         if hasattr(context, "on"):
                             context.on("close", context_closed)
+                        if probe_only:
+                            activity("site_probe")
+                            probe_page = None
+                            try:
+                                probe_page = await context.new_page()
+                                await navigate_results(probe_page, site_pause.probe_url, request_seconds)
+                            except Exception as exc:
+                                aggregate.log.emit("site_probe_error", worker=index, error_type=type(exc).__name__)
+                                await site_pause.probe_result(index, False)
+                                context_closing = True
+                                continue
+                            else:
+                                await site_pause.probe_result(index, True)
+                            finally:
+                                if probe_page is not None:
+                                    with suppress(Exception):
+                                        await probe_page.close()
                         try:
                             if assigned_proxy:
                                 activity("proxy_preflight")
@@ -726,6 +770,8 @@ async def run_parallel(
                                     tab_tasks.create_task(tab_worker(number, context))
                             context_closing = True
                     if not retry_proxy:
+                        if site_pause.blocked and not queue.empty() and not stop_browser.is_set():
+                            rotation_reason = "site_pause"
                         failed_tabs = [
                             tab for tab in tab_states.values() if tab.get("stop_reason") == "consecutive_navigation_errors"
                         ]
@@ -787,6 +833,9 @@ async def run_parallel(
                 state["status"] = "interrupted"
                 raise
         finally:
+            # A cancelled/failed probe owner must not leave the rest waiting forever.
+            if site_pause.owner == index:
+                await site_pause.probe_result(index, False)
             startup_done(index)
             activity(state["status"])
             if not sqlite_state:

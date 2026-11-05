@@ -18,6 +18,70 @@ def sample(size):
 
 
 @pytest.mark.asyncio
+async def test_fleet_pause_drains_then_one_probe_resumes_queue(monkeypatch, tmp_path, fake_browsers):
+    initial = asyncio.Event()
+    calls = 0
+    probes = 0
+    events = []
+
+    async def fake_run(group, output, request_seconds, *, next_job, on_progress, **kwargs):
+        nonlocal calls
+        calls += 1
+        fail = calls <= 2
+        if calls == 2:
+            initial.set()
+        await initial.wait()
+        jobs = []
+        while (row := next_job()) is not None:
+            jobs.append(
+                {
+                    **row,
+                    "status": "failed" if fail else "completed",
+                    "documents": [],
+                    "navigation_stage": "waiting_result_html",
+                    "error": {"type": "TimeoutError"} if fail else None,
+                }
+            )
+            await on_progress({"status": "running", "jobs": jobs}, final=False)
+            await asyncio.sleep(0.001)
+            if fail:
+                break
+        await on_progress({"status": "finished", "jobs": jobs}, final=True)
+
+    async def probe(*args):
+        nonlocal probes
+        probes += 1
+        if probes == 1:
+            raise TimeoutError("site unavailable")
+
+    async def notify(report, *, final):
+        if report.get("event"):
+            events.append(report["event"])
+
+    monkeypatch.setattr(parallel, "run", fake_run)
+    monkeypatch.setattr(parallel, "navigate_results", probe)
+    result = await parallel.run_parallel(
+        sample(10),
+        tmp_path / "run",
+        workers=2,
+        tabs=1,
+        request_seconds=1,
+        ca_bundle=tmp_path / "ca",
+        proxy_ca=None,
+        max_seconds=5,
+        proxy=parallel.FixedProxyPool([{"server": f"http://192.0.2.{i}:80"} for i in (1, 2)]),
+        notify=notify,
+        site_pause_seconds=0.02,
+    )
+    assert events.count("site_paused") == 1
+    assert events.count("site_probe_failed") == events.count("site_resumed") == 1
+    assert probes == 2
+    assert result["queue_remaining"] == 0
+    assert len({job["n"] for job in result["jobs"]}) == 10
+    assert result["site_pause"]["state"] == "running"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("error_type,expected_contexts", [("TimeoutError", 2), ("ValueError", 1), ("PersistentTimeout", 4)])
 async def test_navigation_cooldown_only_recovers_timeouts(
     monkeypatch, tmp_path, fake_browsers, error_type, expected_contexts

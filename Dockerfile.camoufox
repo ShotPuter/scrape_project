@@ -31,6 +31,7 @@ COPY scripts/pep_camoufox_export.py ./scripts/
 COPY scripts/pep_camoufox_retry.py ./scripts/
 COPY scripts/pep_camoufox_resume.py ./scripts/
 COPY scripts/pep_camoufox_db.py ./scripts/
+COPY scripts/pep_camoufox_pause.py ./scripts/
 COPY src ./src
 COPY scripts/pep_camoufox_pilot.py scripts/pep_camoufox_batch.py scripts/pep_camoufox_parallel.py scripts/pep_camoufox_excel.py scripts/pep_camoufox_logging.py ./scripts/
 STOPSIGNAL SIGINT

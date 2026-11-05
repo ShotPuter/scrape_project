@@ -76,7 +76,8 @@ class ProgressReporter:
         processed = stats["processed"]
         seconds = report.get("seconds", 0)
         starting = report.get("event") == "download_started"
-        if not final and not starting:
+        pause_event = report.get("event") in {"site_paused", "site_probe_failed", "site_resumed"}
+        if not final and not starting and not pause_event:
             if self.interval_seconds:
                 if seconds - self.last_seconds < self.interval_seconds:
                     return
@@ -89,6 +90,8 @@ class ProgressReporter:
         heading = (
             "🚀 PEP Camoufox — старт" if starting else "🏁 PEP Camoufox — итог" if final else "📊 PEP Camoufox — прогресс"
         )
+        if pause_event:
+            heading = "▶️ PEP Camoufox — продолжение" if report["event"] == "site_resumed" else "⏸️ PEP Camoufox — пауза сайта"
         text = (
             f"{heading}\nЗапуск: {self.output.name}\n\n"
             f"👤 ССЫЛКИ: {processed}/{stats['total']}\n"
@@ -117,6 +120,13 @@ class ProgressReporter:
         )
         if starting:
             text += "\n\n▶️ Браузеры проверены, начинается обработка очереди."
+        pause = report.get("site_pause", {})
+        if pause.get("state") in {"paused", "probing"}:
+            text += (
+                f"\n\n⏸️ Массовые таймауты навигации: {pause.get('affected_workers', 0)} браузеров."
+                f"\nДо проверки сайта: {pause.get('remaining_seconds', 0) / 60:.1f} мин."
+                "\nНовые ссылки не выдаются; затем проверка одним браузером."
+            )
         print(text, flush=True)
         with (self.output / "progress.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(
@@ -133,6 +143,7 @@ class ProgressReporter:
                         "tab_count": report.get("tab_count", 1),
                         "tab_restarts": report.get("tab_restarts", 0),
                         "proxy_egress_ips": report.get("proxy_egress_ips", []),
+                        "site_pause": report.get("site_pause"),
                     },
                     ensure_ascii=False,
                 )
@@ -237,6 +248,7 @@ async def _execute(args, sample: list[dict]) -> dict:
             browser_max_seconds=getattr(args, "browser_max_minutes", 20) * 60,
             browser_max_links=getattr(args, "browser_max_links", 40),
             sqlite_state=not is_retry,
+            site_pause_seconds=getattr(args, "site_pause_minutes", 20) * 60,
         )
 
 
@@ -255,11 +267,16 @@ def main() -> int:
     parser.add_argument("--tab-restarts", type=int, default=3, help="Replacement tabs after crashes per slot (0..100)")
     parser.add_argument("--browser-max-minutes", type=float, default=20, help="Drain and rotate browser after this age")
     parser.add_argument("--browser-max-links", type=int, default=40, help="Maximum links claimed per browser cycle")
+    parser.add_argument(
+        "--site-pause-minutes", type=float, default=20, help="Fleet cooldown after widespread navigation timeouts"
+    )
     parser.add_argument("--proxy-ca", type=Path, default=Path("/opt/brightdata-proxy-ca.crt"))
     parser.add_argument("--max-minutes", type=float, default=120)
     parser.add_argument("--log-interval", type=float, default=30, help="Heartbeat interval in seconds (5..300)")
     parser.add_argument("--preview", action="store_true", help="Read Excel only; no browser or Telegram requests")
     args = parser.parse_args()
+    if not math.isfinite(args.site_pause_minutes) or args.site_pause_minutes <= 0:
+        parser.error("site-pause-minutes must be finite and positive")
     if not math.isfinite(args.browser_max_minutes) or args.browser_max_minutes <= 0 or args.browser_max_links < 1:
         parser.error("browser-max-minutes and browser-max-links must be positive")
     if not 1 <= args.workers <= 100:

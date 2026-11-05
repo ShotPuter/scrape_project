@@ -51,6 +51,8 @@ services:
       - "${PEP_BROWSER_MAX_MINUTES:-20}"
       - --browser-max-links
       - "${PEP_BROWSER_MAX_LINKS:-40}"
+      - --site-pause-minutes
+      - "${PEP_SITE_PAUSE_MINUTES:-20}"
     logging:
       driver: json-file
       options:

@@ -51,6 +51,28 @@ def report(processed):
 
 
 @pytest.mark.asyncio
+async def test_pause_and_resume_notifications_bypass_thirty_minute_interval(monkeypatch, tmp_path):
+    messages = []
+
+    async def send(session, token, chat_id, text):
+        messages.append(text)
+
+    monkeypatch.setattr(server, "send_telegram", send)
+    reporter = server.ProgressReporter(None, tmp_path, "test-token", "test-chat", interval_seconds=1800)
+    paused = {
+        **report(0),
+        "seconds": 10,
+        "event": "site_paused",
+        "site_pause": {"state": "paused", "remaining_seconds": 1200, "affected_workers": 13},
+    }
+    await reporter(paused, final=False)
+    await reporter({**paused, "event": "site_resumed", "site_pause": {"state": "running"}}, final=False)
+    assert len(messages) == 2
+    assert "пауза сайта" in messages[0] and "20.0 мин" in messages[0]
+    assert "продолжение" in messages[1]
+
+
+@pytest.mark.asyncio
 async def test_telegram_every_ten_and_final(monkeypatch, tmp_path):
     messages = []
 
