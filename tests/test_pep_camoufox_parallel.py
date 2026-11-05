@@ -908,3 +908,84 @@ async def test_webshare_failure_replaces_proxy_without_duplicate_assignment(monk
     assert result["workers"][0]["proxy_preflight_attempts"] == 1
     assert result["status"] == "finished"
     assert pool.replacement() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [404, 200])
+async def test_legacy_popup_response_or_download_is_observed_without_other_tab_events(status):
+    class Emitter:
+        def __init__(self):
+            self.listeners = {}
+            self.closed = False
+
+        def on(self, name, callback):
+            self.listeners[name] = callback
+
+        def remove_listener(self, name, callback):
+            del self.listeners[name]
+
+        async def close(self):
+            self.closed = True
+
+    context, page, popup, unrelated = Emitter(), Emitter(), Emitter(), Emitter()
+    page.context = context
+
+    async def opener():
+        return page
+
+    async def no_opener():
+        return None
+
+    popup.opener = opener
+    unrelated.opener = no_opener
+    download = object()
+
+    class Element:
+        async def click(self, **kwargs):
+            handler = context.listeners["response"]
+            await handler(
+                SimpleNamespace(
+                    url="https://example.com" + batch.LEGACY_PATH, status=500, frame=SimpleNamespace(page=unrelated)
+                )
+            )
+            page.listeners["popup"](popup)
+            if status == 200:
+                popup.listeners["download"](download)
+            else:
+                await handler(
+                    SimpleNamespace(
+                        url="https://example.com" + batch.LEGACY_PATH, status=404, frame=SimpleNamespace(page=popup)
+                    )
+                )
+
+    result, code = await batch.download_once(page, Element(), batch.LEGACY_PATH, 1000)
+    assert (result is download and code is None) if status == 200 else (result is None and code == 404)
+    assert not page.listeners and not popup.listeners and not context.listeners
+    assert popup.closed is (status == 404)
+
+
+@pytest.mark.asyncio
+async def test_legacy_expected_url_handles_popup_response_without_frame():
+    class Emitter:
+        def __init__(self):
+            self.listeners = {}
+
+        def on(self, name, handler):
+            self.listeners[name] = handler
+
+        def remove_listener(self, name, handler):
+            del self.listeners[name]
+
+    page, context = Emitter(), Emitter()
+    page.context = context
+    target = "https://example.com" + batch.LEGACY_PATH + "?file=one"
+
+    class Element:
+        async def click(self, **kwargs):
+            handler = context.listeners["response"]
+            await handler(SimpleNamespace(url=target.replace("one", "other"), status=500))
+            # Provisional popup responses can lack a usable frame.
+            await handler(SimpleNamespace(url=target, status=404))
+
+    assert await batch.download_once(page, Element(), batch.LEGACY_PATH, 1000, expected_url=target) == (None, 404)
+    assert not context.listeners

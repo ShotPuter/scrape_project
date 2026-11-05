@@ -43,11 +43,30 @@ async def browser_context(options: dict, launch_lock: asyncio.Lock | None = None
         yield context
 
 
-async def download_once(page, element, endpoint: str, timeout_ms: int):
+async def download_once(page, element, endpoint: str, timeout_ms: int, *, expected_url: str | None = None):
     """Observe the native download or an HTTP failure, whichever arrives first."""
     loop = asyncio.get_running_loop()
     completed = loop.create_future()
     rejected = loop.create_future()
+    popup_pages = []
+
+    async def on_popup_response(response):
+        if urlsplit(response.url).path != endpoint or response.status < 300:
+            return
+        try:
+            if expected_url:
+                related = response.url == expected_url
+            else:
+                owner = response.frame.page
+                related = owner is not page and await owner.opener() is page
+            if related and not rejected.done():
+                rejected.set_result(response.status)
+        except BrowserError:
+            pass
+
+    def on_popup(popup):
+        popup_pages.append(popup)
+        popup.on("download", on_download)
 
     def on_download(download):
         if not completed.done():
@@ -59,6 +78,9 @@ async def download_once(page, element, endpoint: str, timeout_ms: int):
 
     page.on("download", on_download)
     page.on("response", on_response)
+    if endpoint == LEGACY_PATH:
+        page.on("popup", on_popup)
+        page.context.on("response", on_popup_response)
     try:
         async with asyncio.timeout(timeout_ms / 1000):
             await element.click(timeout=timeout_ms, no_wait_after=True)
@@ -69,6 +91,14 @@ async def download_once(page, element, endpoint: str, timeout_ms: int):
     finally:
         page.remove_listener("download", on_download)
         page.remove_listener("response", on_response)
+        if endpoint == LEGACY_PATH:
+            page.remove_listener("popup", on_popup)
+            page.context.remove_listener("response", on_popup_response)
+            for popup in popup_pages:
+                popup.remove_listener("download", on_download)
+                if not completed.done():
+                    with suppress(Exception):
+                        await popup.close()
         completed.cancel()
         rejected.cancel()
 
@@ -314,20 +344,31 @@ async def run(
                                     # Resolve only the same-host HTTPS URL validated by the parser.
                                     target = safe_url(doc["download_url"])
                                     anchors = page.locator("a[href]")
-                                    matches = []
-                                    for anchor in await anchors.all():
-                                        href = await anchor.get_attribute("href")
-                                        try:
-                                            if href and safe_url(href, page.url) == target:
-                                                matches.append(anchor)
-                                        except ValueError:
-                                            continue
-                                    if not matches:
+                                    index = await anchors.evaluate_all(
+                                        """(links, target) => links.findIndex(link => {
+                                            try {
+                                                const url = new URL(link.getAttribute('href'), document.baseURI);
+                                                if (!['http:', 'https:'].includes(url.protocol)) return false;
+                                                url.protocol = 'https:'; url.port = ''; url.hash = '';
+                                                return url.href === target;
+                                            } catch (_) { return false; }
+                                        })""",
+                                        target,
+                                    )
+                                    if index < 0:
                                         raise ValueError("Legacy download anchor not found")
-                                    element = matches[0]
+                                    element = anchors.nth(index)
+                                    await element.evaluate("(anchor, url) => { anchor.href = url; }", target)
                                 doc["attempts"] = 1
                                 checkpoint()
-                                download, status = await download_once(page, element, endpoint, int(request_seconds * 1000))
+                                if modern:
+                                    download, status = await download_once(
+                                        page, element, endpoint, int(request_seconds * 1000)
+                                    )
+                                else:
+                                    download, status = await download_once(
+                                        page, element, endpoint, int(request_seconds * 1000), expected_url=target
+                                    )
                                 if download is None:
                                     doc.update(status=f"http_{status}", http_status=status)
                                     if modern or status in {403, 429}:
