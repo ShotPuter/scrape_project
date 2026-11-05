@@ -13,7 +13,7 @@ from urllib.parse import unquote, urlsplit
 
 from dotenv import load_dotenv
 
-from scripts.pep_camoufox_parallel import FixedProxyPool, run_parallel
+from scripts.pep_camoufox_parallel import WebshareProxyPool, run_parallel
 from scripts.pep_camoufox_pilot import CA_BUNDLE, DEFAULT_SAMPLE, ROOT
 from src.proxy.sources.webshare import load_webshare_candidates
 
@@ -34,9 +34,7 @@ async def execute(args):
                 "password": unquote(parsed.password or ""),
             }
         )
-        if len(proxies) == args.workers:
-            break
-    if len(proxies) != args.workers:
+    if len(proxies) < args.workers:
         raise ValueError(f"Webshare must supply {args.workers} valid proxies with distinct addresses")
     sample = json.loads(args.sample.read_text())[: args.links]
     if len(sample) < args.workers:
@@ -78,7 +76,7 @@ async def execute(args):
         ca_bundle=CA_BUNDLE,
         proxy_ca=None,
         max_seconds=args.max_seconds,
-        proxy=FixedProxyPool(proxies),
+        proxy=WebshareProxyPool(proxies, args.workers),
         notify=notify,
         log_interval=30,
     )

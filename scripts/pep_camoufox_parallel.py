@@ -11,11 +11,11 @@ import math
 import secrets
 import time
 from collections import Counter
-from contextlib import suppress
+from contextlib import AsyncExitStack, suppress
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-from playwright.async_api import TimeoutError as BrowserTimeout
+from playwright.async_api import Error as BrowserError, TimeoutError as BrowserTimeout
 
 from scripts.pep_camoufox_batch import browser_context, run
 from scripts.pep_camoufox_logging import EventLog, report_totals, resource_snapshot
@@ -60,6 +60,19 @@ class FixedProxyPool:
         return dict(self._proxies[number - 1])
 
 
+class WebshareProxyPool(FixedProxyPool):
+    def __init__(self, proxies: list[dict], workers: int):
+        super().__init__(proxies)
+        self._next = workers
+
+    def replacement(self) -> dict | None:
+        if self._next >= len(self._proxies):
+            return None
+        proxy = dict(self._proxies[self._next])
+        self._next += 1
+        return proxy
+
+
 async def webshare_pool(token: str, workers: int) -> FixedProxyPool:
     from src.proxy.sources.webshare import load_webshare_candidates
 
@@ -78,9 +91,9 @@ async def webshare_pool(token: str, workers: int) -> FixedProxyPool:
                 "password": unquote(parsed.password or ""),
             }
         )
-        if len(proxies) == workers:
-            return FixedProxyPool(proxies)
-    raise ValueError(f"Webshare supplied only {len(proxies)} distinct valid proxy addresses; requested {workers}")
+    if len(proxies) < workers:
+        raise ValueError(f"Webshare supplied only {len(proxies)} distinct valid proxy addresses; requested {workers}")
+    return WebshareProxyPool(proxies, workers)
 
 
 def split_sample(sample: list[dict], workers: int) -> list[list[dict]]:
@@ -171,6 +184,8 @@ class AggregateReport:
                     "error": worker.get("error"),
                     "failure_stage": worker.get("failure_stage"),
                     "proxy_preflight_attempts": worker.get("proxy_preflight_attempts", 0),
+                    "proxy_replacements": worker.get("proxy_replacements", 0),
+                    "proxy_failures": worker.get("proxy_failures", []),
                     "proxy_egress_ip": worker.get("proxy_egress_ip"),
                     "tabs": tab_snapshots,
                     "tab_restarts": sum(tab.get("restarts", 0) for tab in tab_snapshots),
@@ -501,51 +516,89 @@ async def run_parallel(
                     raise ValueError("Bright Data proxy CA is required")
                 if assigned_proxy and proxy_ca is not None:
                     await asyncio.to_thread(install_proxy_ca, folder / "profile", proxy_ca)
-                activity("browser_start")
-                async with browser_context(
-                    {
-                        "headless": "virtual",
-                        "os": "linux",
-                        "locale": "es-CO",
-                        "persistent_context": True,
-                        "user_data_dir": str(folder / "profile"),
-                        "accept_downloads": True,
-                        "ignore_https_errors": False,
-                        "proxy": assigned_proxy,
-                    },
-                    launch_lock,
-                ) as context:
-
-                    def context_closed(*_):
-                        if not context_closing:
-                            stop_browser.set()
-                            ready_workers.discard(index)
-                        state["context_closed"] = True
-                        aggregate.log.emit(
-                            "browser_context_closed", worker=index, expected=context_closing, activity=state.get("activity")
+                state["proxy_replacements"] = 0
+                state["proxy_failures"] = []
+                while True:
+                    activity("browser_start")
+                    context_closing = False
+                    retry_proxy = False
+                    async with AsyncExitStack() as browser_stack:
+                        context = await browser_stack.enter_async_context(
+                            browser_context(
+                                {
+                                    "headless": "virtual",
+                                    "os": "linux",
+                                    "locale": "es-CO",
+                                    "persistent_context": True,
+                                    "user_data_dir": str(folder / "profile"),
+                                    "accept_downloads": True,
+                                    "ignore_https_errors": False,
+                                    "proxy": assigned_proxy,
+                                },
+                                launch_lock,
+                            )
                         )
 
-                    if hasattr(context, "on"):
-                        context.on("close", context_closed)
-                    if assigned_proxy:
-                        activity("proxy_preflight")
+                        def context_closed(*_):
+                            if not context_closing:  # noqa: B023 - closed before the next iteration
+                                stop_browser.set()
+                                ready_workers.discard(index)
+                            state["context_closed"] = True
+                            aggregate.log.emit(
+                                "browser_context_closed",
+                                worker=index,
+                                expected=context_closing,  # noqa: B023
+                                activity=state.get("activity"),
+                            )
 
-                        def record_attempt(attempt):
-                            state["proxy_preflight_attempts"] = attempt
-                            combine()
+                        if hasattr(context, "on"):
+                            context.on("close", context_closed)
+                        try:
+                            if assigned_proxy:
+                                activity("proxy_preflight")
 
-                        state["proxy_egress_ip"] = await proxy_preflight(
-                            context, request_seconds, on_attempt=record_attempt, log=aggregate.log, worker=index
-                        )
-                        aggregate.log.emit("proxy_ready", worker=index, egress_ip=state["proxy_egress_ip"])
-                    activity("waiting_for_browsers")
-                    startup_done(index, ready=True)
-                    await startup_gate.wait()
-                    activity("tabs_running")
-                    async with asyncio.TaskGroup() as tab_tasks:
-                        for number in range(1, tabs + 1):
-                            tab_tasks.create_task(tab_worker(number, context))
-                    context_closing = True
+                                def record_attempt(attempt):
+                                    state["proxy_preflight_attempts"] = attempt
+                                    combine()
+
+                                state["proxy_egress_ip"] = await proxy_preflight(
+                                    context, request_seconds, on_attempt=record_attempt, log=aggregate.log, worker=index
+                                )
+                                aggregate.log.emit("proxy_ready", worker=index, egress_ip=state["proxy_egress_ip"])
+                        except (BrowserError, TimeoutError, ValueError) as exc:
+                            state["proxy_failures"].append(
+                                {"type": type(exc).__name__, "attempts": state.get("proxy_preflight_attempts", 0)}
+                            )
+                            replacement = (
+                                proxy.replacement()
+                                if isinstance(proxy, WebshareProxyPool) and state["proxy_replacements"] < 3
+                                else None
+                            )
+                            if replacement is None:
+                                raise
+                            state["proxy_replacements"] += 1
+                            aggregate.log.emit(
+                                "proxy_replaced",
+                                worker=index,
+                                replacement=state["proxy_replacements"],
+                                failure_type=type(exc).__name__,
+                            )
+                            next_proxy = replacement
+                            context_closing = True
+                            retry_proxy = True
+                        if not retry_proxy:
+                            activity("waiting_for_browsers")
+                            startup_done(index, ready=True)
+                            await startup_gate.wait()
+                            activity("tabs_running")
+                            async with asyncio.TaskGroup() as tab_tasks:
+                                for number in range(1, tabs + 1):
+                                    tab_tasks.create_task(tab_worker(number, context))
+                            context_closing = True
+                    if not retry_proxy:
+                        break
+                    assigned_proxy = next_proxy
+                    stop_browser.clear()
                 statuses = {tab["status"] for tab in tab_states.values()}
                 state["status"] = "error" if "error" in statuses else "stopped" if "stopped" in statuses else "finished"
                 reasons = {tab["stop_reason"] for tab in tab_states.values() if tab.get("stop_reason")}

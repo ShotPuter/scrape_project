@@ -839,3 +839,68 @@ async def test_proxy_preflight_retries_timeout_in_same_context_and_closes_pages(
     assert all(page.closed for page in pages)
     events = [json.loads(line) for line in (tmp_path / "run.log").read_text().splitlines()]
     assert [event["will_retry"] for event in events] == ([True, False] if timeouts == 2 else [True])
+
+
+@pytest.mark.asyncio
+async def test_webshare_failure_replaces_proxy_without_duplicate_assignment(monkeypatch, tmp_path, fake_browsers):
+    launches = []
+
+    class Page:
+        def __init__(self, server):
+            self.server = server
+
+        async def goto(self, *args, **kwargs):
+            if self.server.endswith(".1:80"):
+                raise parallel.BrowserTimeout("timeout")
+            return SimpleNamespace(status=200)
+
+        def locator(self, selector):
+            return self
+
+        async def inner_text(self):
+            return "192.0.2.10"
+
+        async def close(self):
+            pass
+
+    class Context:
+        def __init__(self, server):
+            self.server = server
+
+        async def new_page(self):
+            return Page(self.server)
+
+    @asynccontextmanager
+    async def browser(options, lock):
+        launches.append(options["proxy"]["server"])
+        yield Context(options["proxy"]["server"])
+
+    async def run(group, output, request_seconds, *, next_job, on_progress, **kwargs):
+        jobs = []
+        while (row := next_job()) is not None:
+            jobs.append({**row, "status": "completed", "documents": []})
+        await on_progress({"status": "finished", "jobs": jobs}, final=True)
+
+    monkeypatch.setattr(parallel, "browser_context", browser)
+    monkeypatch.setattr(parallel, "run", run)
+    output = tmp_path / "run"
+    pool = parallel.WebshareProxyPool([{"server": f"http://192.0.2.{i}:80"} for i in (1, 2, 3)], 2)
+    result = await parallel.run_parallel(
+        sample(6),
+        output,
+        workers=2,
+        tabs=1,
+        request_seconds=1,
+        ca_bundle=tmp_path / "ca",
+        proxy_ca=None,
+        max_seconds=10,
+        proxy=pool,
+        notify=ProgressReporter(None, output),
+    )
+    assert sorted(launches) == [f"http://192.0.2.{i}:80" for i in (1, 2, 3)]
+    assert result["job_counts"] == {"completed": 6}
+    assert result["workers"][0]["proxy_replacements"] == 1
+    assert result["workers"][0]["proxy_failures"] == [{"type": "TimeoutError", "attempts": 2}]
+    assert result["workers"][0]["proxy_preflight_attempts"] == 1
+    assert result["status"] == "finished"
+    assert pool.replacement() is None
