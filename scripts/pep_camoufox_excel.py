@@ -24,6 +24,7 @@ def collect_sample(workbook: Path, limit: int, offset: int) -> list[dict]:
     """Keep first occurrence order; count unique consultation links, not duplicate Excel rows."""
     seen = set()
     sample = []
+    selected = {}
     rows = read_rows(workbook)
     try:
         for number, row in rows:
@@ -33,13 +34,22 @@ def collect_sample(workbook: Path, limit: int, offset: int) -> list[dict]:
             if urlsplit(url).path != RESULT_PATH:
                 raise ValueError(f"Unexpected consultation URL in Excel row {number}")
             if url in seen:
+                if url in selected:
+                    selected[url]["source_records"].append({"excel_row": number, "data": row})
                 continue
             seen.add(url)
             if len(seen) <= offset:
                 continue
-            sample.append({"n": len(sample) + 1, "source_row": number, "url": url})
             if limit and len(sample) >= limit:
-                break
+                continue
+            item = {
+                "n": len(sample) + 1,
+                "source_row": number,
+                "url": url,
+                "source_records": [{"excel_row": number, "data": row}],
+            }
+            sample.append(item)
+            selected[url] = item
     finally:
         rows.close()
     if not sample:

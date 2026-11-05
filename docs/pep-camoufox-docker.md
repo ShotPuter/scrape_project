@@ -208,3 +208,61 @@ docker compose --env-file .env.camoufox -f compose.camoufox.yml run --rm pep-cam
 по всем поколениям вкладки, включая историю восстановления и исходные ошибки.
 В общем `report.json` все поколения учитываются вместе, пути файлов включают
 `restart-K/`, прежние результаты не перезаписываются.
+
+## JSON с исходными данными политиков и PDF
+
+`politicians.json` в корне `run-<UTC>/` обновляется вместе с общим отчётом
+на границах прогресса, heartbeat и при завершении. Одна запись соответствует
+уникальной ссылке политика:
+
+```json
+[
+  {
+    "excel_records": [
+      {"excel_row": 2, "data": {"NAME": "Example", "OTHER_EXCEL_COLUMN": null}}
+    ],
+    "consultation_url": "https://www.funcionpublica.gov.co/fdci/consultaCiudadana/index?...",
+    "status": "completed",
+    "declarations": [
+      {
+        "id": "123",
+        "publication_date": "2024-01-01",
+        "publication_type": "...",
+        "declaration_number": "...",
+        "declaration_status": "...",
+        "download_status": "downloaded",
+        "pdfs": [
+          {"path": "worker-1/tab-1/pdf/123.pdf", "sha256": "...", "size_bytes": 12345}
+        ],
+        "error": null
+      }
+    ],
+    "error": null
+  }
+]
+```
+
+В `excel_records[].data` сохраняются все столбцы исходного Excel под их исходными
+названиями, включая пустые значения и все дублирующиеся строки этой ссылки.
+Даты Excel сериализуются в ISO. Исходная строка не заменяется данными сайта.
+`declarations` содержит все найденные записи со всех пройденных страниц, включая
+ошибочные и не скачанные. У таких деклараций нет фиктивных путей PDF.
+Один ZIP может дать несколько PDF — все входят в `pdfs`.
+`publication_date` — дата публикации на сайте, не автоматически определённый
+год отчётности или период пребывания в должности. Полнота скачивания видна по статусам.
+
+`pdfs[].path` задаётся относительно папки запуска. Копируйте всю папку запуска
+вместе с JSON, сохраняя подкаталоги; тогда пути продолжат работать. Впоследствии
+можно заменить эти значения на `s3://bucket/key`. Загрузка в S3 не выполняется.
+
+Для уже существующего отчёта можно создать такой JSON без повторного скачивания:
+
+```bash
+docker compose --env-file .env.camoufox -f compose.camoufox.yml run --rm --no-deps \
+  --entrypoint python pep-camoufox -m scripts.pep_camoufox_export \
+  /app/data/run-20261104T194412033002Z/report.json /input/DECLARACIONES_PEP.xlsx
+```
+
+Предварительно пересоберите образ с новой версией кода. JSON появится рядом
+с выбранным `report.json`. Политики связываются с Excel по нормализованной ссылке;
+если для кого-либо не нашлось строки, экспорт завершается ошибкой.

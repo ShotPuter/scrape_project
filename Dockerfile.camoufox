@@ -27,6 +27,7 @@ USER scraper
 # Fetch verifies the official paired browser and the pinned fingerprint model.
 RUN python -m camoufox fetch
 COPY config.py ./
+COPY scripts/pep_camoufox_export.py ./scripts/
 COPY src ./src
 COPY scripts/pep_camoufox_pilot.py scripts/pep_camoufox_batch.py scripts/pep_camoufox_parallel.py scripts/pep_camoufox_excel.py scripts/pep_camoufox_logging.py ./scripts/
 STOPSIGNAL SIGINT

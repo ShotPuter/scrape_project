@@ -23,7 +23,16 @@ def test_excel_unique_selection_and_offset(tmp_path):
     workbook.save(path)
     workbook.close()
     sample = server.collect_sample(path, limit=1, offset=1)
-    assert sample == [{"n": 1, "source_row": 4, "url": BASE + "2"}]
+    assert sample == [
+        {
+            "n": 1,
+            "source_row": 4,
+            "url": BASE + "2",
+            "source_records": [{"excel_row": 4, "data": {server.LINK_COLUMN: BASE + "2"}}],
+        }
+    ]
+    full = server.collect_sample(path, limit=1, offset=0)
+    assert [record["excel_row"] for record in full[0]["source_records"]] == [2, 3]
     assert len(server.collect_sample(path, limit=0, offset=0)) == 3
 
 

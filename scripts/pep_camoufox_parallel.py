@@ -18,6 +18,7 @@ from urllib.parse import unquote, urlsplit
 from playwright.async_api import Error as BrowserError, TimeoutError as BrowserTimeout
 
 from scripts.pep_camoufox_batch import browser_context, run
+from scripts.pep_camoufox_export import write_export
 from scripts.pep_camoufox_logging import EventLog, report_totals, resource_snapshot
 from scripts.pep_camoufox_pilot import install_intermediate, install_proxy_ca
 from src.utils.atomic import atomic_write_json
@@ -235,6 +236,7 @@ class AggregateReport:
             self.observe(index, report)
             combined = self.snapshot()
             atomic_write_json(self.output / "report.json", combined)
+            write_export(self.output, combined)
             self.log.summary("worker_progress", combined, worker=index)
         await self.notify(combined, final=False)
 
@@ -242,6 +244,7 @@ class AggregateReport:
         async with self.lock:
             combined = self.snapshot()
             atomic_write_json(self.output / "report.json", combined)
+            write_export(self.output, combined)
             self.log.summary(
                 "heartbeat", combined, interval=True, workers=combined["workers"], resources=combined["resources"]
             )
@@ -273,6 +276,7 @@ class AggregateReport:
             combined["incomplete_document_counts"] = dict(Counter(doc["status"] for doc in incomplete))
             atomic_write_json(self.output / "incomplete-documents.json", incomplete)
             atomic_write_json(self.output / "report.json", combined)
+            write_export(self.output, combined)
             self.log.summary("run_finished", combined, workers=combined["workers"], resources=combined["resources"])
             self.log.close()
         await self.notify(combined, final=True)
