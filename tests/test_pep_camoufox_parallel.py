@@ -362,6 +362,9 @@ async def test_actual_tabs_share_context_but_keep_downloads_separate(monkeypatch
         return [{"id": doc_id, "requires_captcha": True}], None
 
     async def download(page, element, endpoint, timeout_ms):
+        # An empty pageerror must not break the event callback or PDF processing.
+        page.handlers["pageerror"](batch.BrowserError(""))
+        page.handlers["pageerror"](batch.BrowserError("first line\nsecond line"))
         # A per-page URL identifies its own native download.
         doc_id = str(100 + int(page.url.rsplit("=", 1)[1]))
 
@@ -387,6 +390,7 @@ async def test_actual_tabs_share_context_but_keep_downloads_separate(monkeypatch
     jobs = [job for report in results for job in report["jobs"]]
     assert sorted(job["n"] for job in jobs) == list(range(1, 7))
     assert all(job["status"] == "completed" for job in jobs)
+    assert all(job["documents"][0]["javascript_errors"] == ["Error", "first line"] for job in jobs)
     assert sum(report["pdf_count"] for report in results) == 6
     assert len(pages) == 3 and all(page.closed for page in pages)
     assert not contexts_closed

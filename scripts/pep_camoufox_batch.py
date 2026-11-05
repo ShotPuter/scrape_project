@@ -217,7 +217,9 @@ async def run(
 
             def on_error(error):
                 if active:
-                    active.setdefault("javascript_errors", []).append(redact(error).splitlines()[0][:300])
+                    lines = redact(error).splitlines()
+                    message = lines[0] if lines else type(error).__name__
+                    active.setdefault("javascript_errors", []).append(message[:300])
 
             page.on("request", on_request)
             page.on("response", on_response)
