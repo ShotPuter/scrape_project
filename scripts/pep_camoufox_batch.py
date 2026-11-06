@@ -145,6 +145,7 @@ async def run(
     reusable=None,
     known_unavailable=None,
     write_json=True,
+    page_creation_lock: asyncio.Lock | None = None,
 ) -> dict:
     started = time.monotonic()
     stop_event = stop_event or asyncio.Event()
@@ -260,7 +261,12 @@ async def run(
                 )
             ) as context,
         ):
-            page = await context.new_page()
+            if page_creation_lock is None:
+                page = await context.new_page()
+            else:
+                async with page_creation_lock:
+                    page = await context.new_page()
+                    await asyncio.sleep(0.1)
             if proxy and context_override is None:
                 activity("proxy_preflight")
                 # Check the route in this browser, without sending proxy credentials to a separate client.

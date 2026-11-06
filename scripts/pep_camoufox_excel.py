@@ -108,12 +108,13 @@ class ProgressReporter:
             f"Осталось из найденных: {stats['not_downloaded']}\n"
             f"Таймауты: {stats['document_timeouts']} · HTTP 302: {stats['http_302']}\n\n"
             f"⚙️ БРАУЗЕРЫ\n"
-            f"Готовы: {report.get('ready_browsers', report.get('proxy_observed_browsers', 0))}"
+            f"Готовы сейчас: {report.get('ready_browsers', report.get('proxy_observed_browsers', 0))}"
             f" / {report.get('worker_count', 1)}"
             f" · Вкладок настроено: {report.get('tab_count', 1)}\n"
             f"Прокси IP: {len(report.get('proxy_egress_ips', []))}"
             f" · Замен вкладок: {report.get('tab_restarts', 0)}\n\n"
-            f"Перезапусков браузеров: {report.get('browser_restarts', 0)}\n\n"
+            f"Перезапусков браузеров: {report.get('browser_restarts', 0)}"
+            f" · После аварий: {report.get('browser_recoveries', 0)}\n\n"
             f"⏱ Прошло: {minutes:.1f} мин · Новых деклараций/мин: {speed:.1f}\n"
             f"Статус: {report['status']}\n"
             f"Причина остановки: {(report.get('stop_reason') or 'нет')[:500]}"
@@ -142,6 +143,7 @@ class ProgressReporter:
                         "worker_count": report.get("worker_count", 1),
                         "tab_count": report.get("tab_count", 1),
                         "tab_restarts": report.get("tab_restarts", 0),
+                        "browser_recoveries": report.get("browser_recoveries", 0),
                         "proxy_egress_ips": report.get("proxy_egress_ips", []),
                         "site_pause": report.get("site_pause"),
                     },
@@ -249,6 +251,7 @@ async def _execute(args, sample: list[dict]) -> dict:
             browser_max_links=getattr(args, "browser_max_links", 40),
             sqlite_state=not is_retry,
             site_pause_seconds=getattr(args, "site_pause_minutes", 20) * 60,
+            browser_recoveries=getattr(args, "browser_recoveries", 3),
         )
 
 
@@ -268,6 +271,9 @@ def main() -> int:
     parser.add_argument("--browser-max-minutes", type=float, default=20, help="Drain and rotate browser after this age")
     parser.add_argument("--browser-max-links", type=int, default=40, help="Maximum links claimed per browser cycle")
     parser.add_argument(
+        "--browser-recoveries", type=int, default=3, help="Whole-browser recoveries after target loss (0..20)"
+    )
+    parser.add_argument(
         "--site-pause-minutes", type=float, default=20, help="Fleet cooldown after widespread navigation timeouts"
     )
     parser.add_argument("--proxy-ca", type=Path, default=Path("/opt/brightdata-proxy-ca.crt"))
@@ -275,6 +281,8 @@ def main() -> int:
     parser.add_argument("--log-interval", type=float, default=30, help="Heartbeat interval in seconds (5..300)")
     parser.add_argument("--preview", action="store_true", help="Read Excel only; no browser or Telegram requests")
     args = parser.parse_args()
+    if not 0 <= args.browser_recoveries <= 20:
+        parser.error("browser-recoveries must be between 0 and 20")
     if not math.isfinite(args.site_pause_minutes) or args.site_pause_minutes <= 0:
         parser.error("site-pause-minutes must be finite and positive")
     if not math.isfinite(args.browser_max_minutes) or args.browser_max_minutes <= 0 or args.browser_max_links < 1:

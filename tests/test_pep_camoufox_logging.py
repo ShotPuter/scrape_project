@@ -122,10 +122,12 @@ def test_resource_snapshot_reads_container_memory_and_oom_counters(tmp_path):
     (tmp_path / "memory.current").write_text("123456\n")
     (tmp_path / "memory.max").write_text("max\n")
     (tmp_path / "memory.events").write_text("oom 3\noom_kill 2\n")
+    (tmp_path / "pids.events").write_text("max 7\n")
     resources = resource_snapshot(tmp_path, tmp_path)
     assert resources["memory.current"] == 123456
     assert resources["memory.max"] == "max"
     assert resources["memory.events"] == {"oom": 3, "oom_kill": 2}
+    assert resources["pids.events"] == {"max": 7}
     assert resources["shm_available_bytes"] > 0
 
 

@@ -18,6 +18,113 @@ def sample(size):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("persistent", [False, True])
+async def test_lost_browser_is_recreated_with_same_proxy_and_saved_results(monkeypatch, tmp_path, persistent):
+    from scripts.pep_camoufox_db import read_report
+    from src.sites.pep.documents import save_payload
+
+    contexts, proxies = [], []
+
+    class Page:
+        async def goto(self, *args, **kwargs):
+            return SimpleNamespace(status=200)
+
+        def locator(self, *args):
+            return self
+
+        async def inner_text(self):
+            return "192.0.2.1"
+
+        async def close(self):
+            pass
+
+    class Context:
+        def __init__(self):
+            self.handlers, self.closed = {}, False
+
+        def on(self, event, handler):
+            self.handlers[event] = handler
+
+        async def new_page(self):
+            return Page()
+
+        def crash(self):
+            if not self.closed:
+                self.closed = True
+                self.handlers["close"]()
+
+    @asynccontextmanager
+    async def browser(options, lock):
+        assert all(context.closed for context in contexts)
+        context = Context()
+        contexts.append(context)
+        proxies.append(options["proxy"])
+        try:
+            yield context
+        finally:
+            context.crash()
+
+    async def fake_run(group, output, request_seconds, *, next_job, context_override, on_progress, **kwargs):
+        first = context_override is contexts[0]
+        broken = first or persistent
+        jobs = []
+        output.mkdir(parents=True, exist_ok=True)
+        if first and not context_override.closed:
+            row = next_job()
+            metadata = save_payload(b"%PDF-1.4\ntest\n%%EOF", output, str(row["n"]))
+            jobs.append({**row, "status": "completed", "documents": [{"id": str(row["n"]), **metadata}]})
+        if broken:
+            context_override.crash()
+        else:
+            while (row := next_job()) is not None:
+                metadata = save_payload(b"%PDF-1.4\ntest\n%%EOF", output, str(row["n"]))
+                jobs.append({**row, "status": "completed", "documents": [{"id": str(row["n"]), **metadata}]})
+                await asyncio.sleep(0)
+        await on_progress(
+            {
+                "status": "error" if broken else "finished",
+                "jobs": jobs,
+                "stop_reason": "page_closed" if broken else None,
+                "pdf_count": len(jobs),
+                "error": {"type": "TargetClosedError", "message": "context lost"} if broken else None,
+            },
+            final=True,
+        )
+
+    async def notify(report, *, final):
+        pass
+
+    monkeypatch.setattr(parallel, "browser_context", browser)
+    monkeypatch.setattr(parallel, "run", fake_run)
+    monkeypatch.setattr(parallel, "install_intermediate", lambda *args: None)
+    output = tmp_path / "run"
+    result = await parallel.run_parallel(
+        sample(8),
+        output,
+        workers=1,
+        tabs=5,
+        request_seconds=5,
+        ca_bundle=tmp_path / "ca",
+        proxy_ca=None,
+        max_seconds=10,
+        proxy=parallel.FixedProxyPool([{"server": "http://192.0.2.1:80", "username": "same-proxy"}]),
+        notify=notify,
+        browser_recoveries=2,
+        browser_recovery_backoff=0,
+        sqlite_state=True,
+    )
+    assert len(contexts) == (3 if persistent else 2)
+    assert all(proxy == proxies[0] for proxy in proxies)
+    assert result["ready_browsers"] == 0
+    assert result["workers"][0]["browser_recoveries"] == (2 if persistent else 1)
+    assert result["queue_remaining"] == (7 if persistent else 0)
+    stored = read_report(output / "state.sqlite3")
+    assert len(stored["jobs"]) == 8
+    assert all((output / doc["local_path"]).exists() for job in stored["jobs"] for doc in job["documents"])
+    assert stored["jobs"][0]["documents"][0]["status"] == "downloaded"
+
+
+@pytest.mark.asyncio
 async def test_fleet_pause_drains_then_one_probe_resumes_queue(monkeypatch, tmp_path, fake_browsers):
     initial = asyncio.Event()
     calls = 0
@@ -561,6 +668,8 @@ async def test_webshare_chooses_distinct_addresses_and_decodes_auth(monkeypatch)
 async def test_actual_tabs_share_context_but_keep_downloads_separate(monkeypatch, tmp_path, legacy, duplicate_rows):
     original_sleep = asyncio.sleep
     pages, contexts_closed = [], []
+    creating, max_creating = 0, 0
+    page_lock = asyncio.Lock()
     claimed = iter(sample(6))
 
     async def fast_sleep(seconds):
@@ -605,8 +714,13 @@ async def test_actual_tabs_share_context_but_keep_downloads_separate(monkeypatch
 
     class Context:
         async def new_page(self):
+            nonlocal creating, max_creating
+            creating += 1
+            max_creating = max(max_creating, creating)
+            await original_sleep(0)
             page = Page()
             pages.append(page)
+            creating -= 1
             return page
 
         async def close(self):
@@ -647,7 +761,14 @@ async def test_actual_tabs_share_context_but_keep_downloads_separate(monkeypatch
     context = Context()
     results = await asyncio.gather(
         *(
-            batch.run([], tmp_path / f"tab-{i}", 10, context_override=context, next_job=lambda: next(claimed, None))
+            batch.run(
+                [],
+                tmp_path / f"tab-{i}",
+                10,
+                context_override=context,
+                next_job=lambda: next(claimed, None),
+                page_creation_lock=page_lock,
+            )
             for i in range(3)
         )
     )
@@ -658,6 +779,7 @@ async def test_actual_tabs_share_context_but_keep_downloads_separate(monkeypatch
     assert sum(report["pdf_count"] for report in results) == (0 if legacy else 6)
     assert len(pages) == 3 and all(page.closed for page in pages)
     assert not contexts_closed
+    assert max_creating == 1
     for path in tmp_path.glob("tab-*/pdf/*.pdf"):
         assert path.stem.encode() in path.read_bytes()
 
@@ -1052,6 +1174,7 @@ async def test_replacement_limit_and_site_refusal(monkeypatch, tmp_path, fake_br
         workers=1,
         tabs=1,
         tab_restarts=2,
+        browser_recoveries=0,
         request_seconds=10,
         ca_bundle=tmp_path / "ca",
         proxy_ca=None,

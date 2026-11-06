@@ -17,7 +17,7 @@ from pathlib import Path
 def resource_snapshot(cgroup: Path = Path("/sys/fs/cgroup"), shm: Path = Path("/dev/shm")) -> dict:
     """Read container counters when available; absence is not a run failure."""
     result = {}
-    for filename in ("memory.current", "memory.max", "memory.peak", "pids.current", "pids.max"):
+    for filename in ("memory.current", "memory.max", "memory.peak", "pids.current", "pids.max", "pids.peak"):
         try:
             value = (cgroup / filename).read_text().strip()
             result[filename] = int(value) if value.isdigit() else value
@@ -26,6 +26,10 @@ def resource_snapshot(cgroup: Path = Path("/sys/fs/cgroup"), shm: Path = Path("/
     with suppress(OSError, ValueError):
         result["memory.events"] = {
             key: int(value) for key, value in (line.split() for line in (cgroup / "memory.events").read_text().splitlines())
+        }
+    with suppress(OSError, ValueError):
+        result["pids.events"] = {
+            key: int(value) for key, value in (line.split() for line in (cgroup / "pids.events").read_text().splitlines())
         }
     try:
         stats = os.statvfs(shm)

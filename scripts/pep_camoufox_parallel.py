@@ -190,6 +190,9 @@ class AggregateReport:
                     "status": worker["status"],
                     "links": len(worker["jobs"]),
                     "browser_restarts": worker.get("browser_restarts", 0),
+                    "browser_recoveries": worker.get("browser_recoveries", 0),
+                    "browser_live": worker.get("browser_live", False),
+                    "browser_failures": worker.get("browser_failures", []),
                     "pdf_count": worker.get("pdf_count", 0),
                     "stop_reason": worker.get("stop_reason"),
                     "error": worker.get("error"),
@@ -219,6 +222,10 @@ class AggregateReport:
         resources["memory_events_since_start"] = {
             key: max(0, value - initial_events.get(key, 0)) for key, value in resources.get("memory.events", {}).items()
         }
+        resources["pids_events_since_start"] = {
+            key: max(0, value - self.initial_resources.get("pids.events", {}).get(key, 0))
+            for key, value in resources.get("pids.events", {}).items()
+        }
         return {
             "engine": "camoufox",
             "site_pause": self.site_pause.snapshot() if self.site_pause else {"state": "running"},
@@ -231,6 +238,8 @@ class AggregateReport:
             "tab_count": len(workers) * self.tabs,
             "tab_restarts": sum(worker["tab_restarts"] for worker in workers),
             "browser_restarts": sum(worker["browser_restarts"] for worker in workers),
+            "browser_recoveries": sum(worker["browser_recoveries"] for worker in workers),
+            "ready_browsers": sum(worker["browser_live"] for worker in workers),
             "queue_remaining": sum(job["status"] == "pending" for job in jobs),
             "resources": resources,
             "proxy_egress_ips": addresses,
@@ -367,7 +376,11 @@ async def run_parallel(
     sqlite_state: bool = False,
     navigation_backoff: float = 30,
     site_pause_seconds: float = 1200,
+    browser_recoveries: int = 3,
+    browser_recovery_backoff: float = 5,
 ) -> dict:
+    if not 0 <= browser_recoveries <= 20 or not math.isfinite(browser_recovery_backoff) or browser_recovery_backoff < 0:
+        raise ValueError("Browser recoveries must be 0..20 and recovery backoff finite and nonnegative")
     if not math.isfinite(site_pause_seconds) or site_pause_seconds <= 0:
         raise ValueError("Site pause must be finite and positive")
     if not math.isfinite(browser_max_seconds) or browser_max_seconds <= 0 or browser_max_links < 1:
@@ -414,6 +427,7 @@ async def run_parallel(
         aggregate.database.stage(initial["jobs"])
         await asyncio.to_thread(aggregate.database.flush, force=True, metadata=initial)
     launch_lock = asyncio.Lock()
+    page_creation_lock = asyncio.Lock()
     if not sqlite_state:
         atomic_write_json(output / "report.json", aggregate.snapshot())
     aggregate.log.summary("run_started", aggregate.snapshot(), worker_count=len(groups), log_interval=log_interval)
@@ -471,6 +485,7 @@ async def run_parallel(
         tab_segments = {}
         browser_generation = 0
         navigation_recoveries = 0
+        crash_recoveries = 0
         rotation_reason = None
         cycle_claimed = 0
         cycle_deadline = float("inf")
@@ -515,6 +530,7 @@ async def run_parallel(
                         "tab": number,
                         "restarts": tab.get("restarts", 0),
                         "recovery_history": tab.get("recovery_history", []),
+                        "error": tab.get("error"),
                         "status": tab["status"],
                         "activity": tab.get("activity"),
                         "activity_seconds": round(
@@ -621,6 +637,7 @@ async def run_parallel(
                         reusable=reusable,
                         known_unavailable=known_unavailable,
                         write_json=not sqlite_state,
+                        page_creation_lock=page_creation_lock,
                     )
                     report = generations.get(generation, {})
                     if (
@@ -699,7 +716,8 @@ async def run_parallel(
                         def context_closed(*_):
                             if not context_closing:  # noqa: B023 - closed before the next iteration
                                 stop_browser.set()
-                                ready_workers.discard(index)
+                            ready_workers.discard(index)
+                            state["browser_live"] = False
                             state["context_closed"] = True
                             aggregate.log.emit(
                                 "browser_context_closed",
@@ -762,6 +780,8 @@ async def run_parallel(
                             retry_proxy = True
                         if not retry_proxy:
                             activity("waiting_for_browsers")
+                            state["browser_live"] = True
+                            ready_workers.add(index)
                             startup_done(index, ready=True)
                             await startup_gate.wait()
                             async with start_notice_lock:
@@ -779,7 +799,35 @@ async def run_parallel(
                                 for number in range(1, tabs + 1):
                                     tab_tasks.create_task(tab_worker(number, context))
                             context_closing = True
+                    state["browser_live"] = False
+                    ready_workers.discard(index)
                     if not retry_proxy:
+                        tab_reasons = {tab.get("stop_reason") for tab in tab_states.values()}
+                        lost_target = bool(tab_reasons & {"page_closed", "page_crashed"})
+                        refusal = any(
+                            reason
+                            and (
+                                reason.startswith("download_http_")
+                                or reason in {"recaptcha_notice", "time_budget", "document_error"}
+                            )
+                            for reason in tab_reasons
+                        )
+                        if lost_target and not refusal and not queue.empty() and crash_recoveries < browser_recoveries:
+                            crash_recoveries += 1
+                            state["browser_recoveries"] = crash_recoveries
+                            failure = {
+                                "attempt": crash_recoveries,
+                                "reasons": sorted(reason for reason in tab_reasons if reason),
+                                "errors": [tab["error"] for tab in tab_states.values() if tab.get("error")],
+                            }
+                            state.setdefault("browser_failures", []).append(failure)
+                            pause = browser_recovery_backoff * 2 ** (crash_recoveries - 1)
+                            aggregate.log.emit("browser_recovery", worker=index, seconds=pause, **failure)
+                            stop_browser.clear()
+                            rotation_reason = "browser_target_lost"
+                            activity("browser_recovery")
+                            await aggregate.update(index, state)
+                            await asyncio.sleep(pause)
                         if site_pause.blocked and not queue.empty() and not stop_browser.is_set():
                             rotation_reason = "site_pause"
                         failed_tabs = [
@@ -843,6 +891,8 @@ async def run_parallel(
                 state["status"] = "interrupted"
                 raise
         finally:
+            state["browser_live"] = False
+            ready_workers.discard(index)
             # A cancelled/failed probe owner must not leave the rest waiting forever.
             if site_pause.owner == index:
                 await site_pause.probe_result(index, False)

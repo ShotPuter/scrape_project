@@ -78,3 +78,15 @@ to api.ipify.org returned HTTP 200 in 0.24 seconds. These observations narrow th
 failure to access to the target site but do not distinguish an outage, filtering,
 or routing trouble. Unit tests cover parsed-table readiness, identity checks,
 bounded timeout recovery, and no recovery for non-timeout failures.
+
+## Whole-browser recovery — 2026-11-06
+
+Run `pep-webshare-20261106T094221727816Z`: two real browsers with three tabs each,
+four links. One real context was deliberately closed before it claimed work.
+The worker detected `TargetClosedError`, closed the old owner, waited five
+seconds and launched another context on the same assigned proxy. The queue
+finished in 105.99 seconds: four completed links, 13 verified PDFs, one
+whole-browser recovery, no failed links or timeouts. SQLite retained every
+unique link and all SHA-256 values matched the saved files. Final live browser
+count was zero after expected cleanup. Telegram was disabled for this test.
+This validates recovery, not stability of 40 browsers × five tabs on the server.
