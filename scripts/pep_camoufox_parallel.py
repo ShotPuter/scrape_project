@@ -815,7 +815,7 @@ async def run_parallel(
                         refusal = any(
                             reason
                             and (
-                                reason.startswith("download_http_")
+                                reason.startswith(("download_http_", "tls_certificate_error:"))
                                 or reason in {"recaptcha_notice", "time_budget", "document_error"}
                             )
                             for reason in tab_reasons

@@ -49,7 +49,8 @@ BRIGHTDATA_PROXY_PASSWORD=пароль
 при наличии credentials, иначе прямое соединение. Для прямого соединения разрешён
 один браузер: `PEP_PROXY_PROVIDER=direct`, `PEP_WORKERS=1`.
 
-TLS-проверка включена. Проверенный Sectigo intermediate для PEP импортируется
+TLS-проверка включена. Проверенные промежуточные сертификаты Sectigo и цепочка
+Let's Encrypt YR1 для PEP импортируются
 в отдельный профиль браузера. Закреплённый CA Bright Data импортируется только
 для Bright Data, Webshare использует обычные доверенные CA.
 
@@ -499,6 +500,29 @@ docker compose --env-file .env.camoufox -f compose.camoufox.yml run --rm --no-de
 нужны корректные заголовки и строки либо явное сообщение об отсутствии деклараций.
 Это отмечается полем `navigation_wait_fallback`. Старый HTML до HTTP commit,
 чужая страница, неполный документ и справочный текст без результатов не принимаются.
+
+### TLS после смены сертификата 6 ноября 2026
+
+При проверке сайт предъявил новый `*.funcionpublica.gov.co`, выданный Let's Encrypt
+YR1 (notBefore `2026-11-06 20:46:12 UTC`), вместе с неподходящим старым Sectigo
+intermediate. Это приводило к `SEC_ERROR_UNKNOWN_ISSUER` ещё до получения HTML.
+
+В образ и профили добавлены официальные сертификаты:
+
+- https://letsencrypt.org/certs/gen-y/int-yr1.pem
+- https://letsencrypt.org/certs/gen-y/root-yr-by-x1.pem
+
+Полная цепочка: сервер → YR1 → Root YR, cross-signed by X1 → доверенный ISRG Root X1.
+Отпечатки закреплены в `pep_camoufox_pilot.py`; OpenSSL проверяет цепочку через
+системные корни до импорта. Оба сертификата импортируются в NSS с `,,`, а не как
+новые доверенные корни. Старый Sectigo сохранён для совместимости.
+`ignore_https_errors=False` остаётся включённым; сертификаты сервера не добавляются
+в доверенные автоматически. Источник цепочек: https://letsencrypt.org/certificates/.
+Сбой UNKNOWN_ISSUER теперь явно останавливает браузер с причиной
+`tls_certificate_error:SEC_ERROR_UNKNOWN_ISSUER`.
+
+Для применения нужен `git pull`, пересборка образа и пересоздание контейнера.
+Переписывать БД и повторно скачивать готовые записи не требуется.
 
 После трёх последовательных таймаутов навигации допускается до трёх восстановлений
 браузера с тем же прокси и паузами 30/60/120 секунд. Событие `navigation_cooldown`

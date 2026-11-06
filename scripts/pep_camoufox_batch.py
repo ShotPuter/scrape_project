@@ -572,6 +572,9 @@ async def run(
                             "stage": job.get("navigation_stage"),
                         },
                     )
+                    if "SEC_ERROR_UNKNOWN_ISSUER" in str(exc):
+                        report["stop_reason"] = "tls_certificate_error:SEC_ERROR_UNKNOWN_ISSUER"
+                        stop_event.set()
                     if target_failure(exc):
                         stop_target(exc)
                     try:

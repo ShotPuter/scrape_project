@@ -113,3 +113,19 @@ four completed links, 13 PDFs with verified hashes, one
 `navigation_wait_fallback`, no failed links or download timeouts. Timer polling
 was enabled for all pages. This validates handling of a timed-out waiter with
 ready HTML; it does not prove that every server timeout was caused by RAF.
+
+## TLS certificate renewal — 2026-11-07
+
+Observed leaf issuer: Let's Encrypt YR1, valid from 2026-11-06 20:46:12 UTC.
+The server supplied an unrelated Sectigo DV intermediate. Official YR1 and
+Root YR cross-signed by ISRG Root X1 were fetched over verified HTTPS, pinned by
+SHA-256, and verified with the system root store. OpenSSL verification of the
+live leaf, including hostname and server purpose, passed. Curl with the updated
+bundle returned HTTP 200 for the reported failing consultation URL.
+
+Run `pep-webshare-20261106T222829572573Z`: two real Webshare browsers × three tabs,
+four completed consultation links, 13 PDFs, zero errors/timeouts, 79.63 seconds.
+All PDF hashes and paths passed validation. TLS verification remained enabled;
+the new chain material is imported into NSS with `,,`, not root-trust flags.
+Tests additionally verify pinned fingerprints, repeatable NSS import and rejection
+of an incomplete chain. Telegram was disabled during the live test.

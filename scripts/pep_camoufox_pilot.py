@@ -26,6 +26,13 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SAMPLE = ROOT / "data/pep-firefox-10-20261103T132909Z/sample.json"
 CA_BUNDLE = ROOT / "data/pep/ca-bundle.pem"
 INTERMEDIATE_SHA256 = "72A34AC2B424AED3F6B0B04755B88CC027DCCC806FDDB22B4CD7C47773973EC0"
+YR1_SHA256 = "13949634D99CD6FD6AA80BC034FEFACCEB1969FEEF986586713ECDBB05758D3F"
+YR_CROSS_SHA256 = "072639D0B140D5BFFAE16AD9C3F6CC6086040621F51EE61A6D46A8915C07CF76"
+PINNED_INTERMEDIATES = {
+    INTERMEDIATE_SHA256: "PEP Sectigo intermediate",
+    YR1_SHA256: "PEP Lets Encrypt YR1",
+    YR_CROSS_SHA256: "PEP ISRG Root YR cross-signed by X1",
+}
 BRIGHTDATA_CA_SHA256 = "DB8548F8A5B1166536920CCD0473840F7FDBAF165DEDF907B7B52361ABC87B60"
 
 
@@ -47,7 +54,7 @@ def install_proxy_ca(profile: Path, certificate: Path) -> None:
 
 
 def install_intermediate(profile: Path, ca_bundle: Path = CA_BUNDLE) -> None:
-    """Import the already verified intermediate into this Firefox profile without trusting it as a root."""
+    """Import pinned chain material into Firefox, retaining existing root trust."""
     if not ca_bundle.is_file():
         raise FileNotFoundError(ca_bundle)
     certutil = shutil.which("certutil")
@@ -55,35 +62,47 @@ def install_intermediate(profile: Path, ca_bundle: Path = CA_BUNDLE) -> None:
     if not certutil or not openssl:
         raise RuntimeError("certutil and openssl are required to validate the PEP intermediate")
     candidates = re.findall(rb"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", ca_bundle.read_bytes(), re.S)
-    certificate = next(
-        (
-            cert
-            for cert in candidates
-            if hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert.decode("ascii"))).hexdigest().upper() == INTERMEDIATE_SHA256
-        ),
-        None,
-    )
-    if certificate is None:
+    certificates = {
+        hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert.decode("ascii"))).hexdigest().upper(): cert for cert in candidates
+    }
+    selected = {digest: certificates[digest] for digest in PINNED_INTERMEDIATES if digest in certificates}
+    if INTERMEDIATE_SHA256 not in selected:
         raise ValueError("Validated Sectigo intermediate is missing from the CA bundle")
+    if (YR1_SHA256 in selected) != (YR_CROSS_SHA256 in selected):
+        raise ValueError("Both YR1 and its cross-signed YR chain are required")
     profile.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with tempfile.NamedTemporaryFile(prefix="pep-camoufox-cert-", suffix=".pem") as certfile:
-        certfile.write(certificate + b"\n")
-        certfile.flush()
-        subprocess.run(
-            [openssl, "verify", "-CAfile", "/etc/ssl/certs/ca-certificates.crt", certfile.name],
-            check=True,
-            capture_output=True,
-            timeout=10,
-        )
+    with tempfile.TemporaryDirectory(prefix="pep-camoufox-certs-") as temporary:
+        chain = Path(temporary) / "chain.pem"
+        chain.write_bytes(b"\n".join(selected.values()) + b"\n")
+        verified = []
+        for digest, certificate in selected.items():
+            certfile = Path(temporary) / f"{digest}.pem"
+            certfile.write_bytes(certificate + b"\n")
+            subprocess.run(
+                [
+                    openssl,
+                    "verify",
+                    "-CAfile",
+                    "/etc/ssl/certs/ca-certificates.crt",
+                    "-untrusted",
+                    str(chain),
+                    str(certfile),
+                ],
+                check=True,
+                capture_output=True,
+                timeout=10,
+            )
+            verified.append((digest, certfile))
         database = f"sql:{profile}"
         if not (profile / "cert9.db").exists():
             subprocess.run([certutil, "-N", "-d", database, "--empty-password"], check=True, capture_output=True, timeout=10)
-        subprocess.run(
-            [certutil, "-A", "-d", database, "-n", "PEP Sectigo intermediate", "-t", ",,", "-i", certfile.name],
-            check=True,
-            capture_output=True,
-            timeout=10,
-        )
+        for digest, certfile in verified:
+            subprocess.run(
+                [certutil, "-A", "-d", database, "-n", PINNED_INTERMEDIATES[digest], "-t", ",,", "-i", str(certfile)],
+                check=True,
+                capture_output=True,
+                timeout=10,
+            )
 
 
 def selected_url(sample: Path, index: int) -> str:

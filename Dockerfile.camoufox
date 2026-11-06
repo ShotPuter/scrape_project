@@ -15,9 +15,15 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
        libgl1-mesa-dri libegl1 libgbm1 libdbus-glib-1-2 fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 COPY docker/pep-sectigo-intermediate.pem /opt/pep-intermediate.pem
+COPY docker/pep-letsencrypt-yr1.pem /opt/pep-letsencrypt-yr1.pem
+COPY docker/pep-letsencrypt-root-yr-cross.pem /opt/pep-letsencrypt-root-yr-cross.pem
 COPY docker/brightdata-proxy-ca.crt /opt/brightdata-proxy-ca.crt
 RUN openssl verify -CAfile /etc/ssl/certs/ca-certificates.crt /opt/pep-intermediate.pem \
-    && cat /etc/ssl/certs/ca-certificates.crt /opt/pep-intermediate.pem > /opt/pep-ca-bundle.pem \
+    && openssl verify -CAfile /etc/ssl/certs/ca-certificates.crt /opt/pep-letsencrypt-root-yr-cross.pem \
+    && openssl verify -CAfile /etc/ssl/certs/ca-certificates.crt \
+       -untrusted /opt/pep-letsencrypt-root-yr-cross.pem /opt/pep-letsencrypt-yr1.pem \
+    && cat /etc/ssl/certs/ca-certificates.crt /opt/pep-intermediate.pem \
+       /opt/pep-letsencrypt-yr1.pem /opt/pep-letsencrypt-root-yr-cross.pem > /opt/pep-ca-bundle.pem \
     && groupadd --gid 1000 scraper \
     && useradd --uid 1000 --gid scraper --create-home scraper \
     && mkdir -p /app/data /opt/camoufox-cache \

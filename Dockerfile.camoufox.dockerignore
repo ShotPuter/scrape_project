@@ -3,6 +3,8 @@
 !docker/
 !docker/camoufox-requirements.txt
 !docker/pep-sectigo-intermediate.pem
+!docker/pep-letsencrypt-yr1.pem
+!docker/pep-letsencrypt-root-yr-cross.pem
 !docker/brightdata-proxy-ca.crt
 !config.py
 !src/
