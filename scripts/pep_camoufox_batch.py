@@ -116,26 +116,52 @@ async def download_once(page, element, endpoint: str, timeout_ms: int, *, expect
         rejected.cancel()
 
 
+def validate_results_url(actual_url, requested_url):
+    target, actual = urlsplit(safe_url(requested_url)), urlsplit(safe_url(actual_url))
+    if (actual.netloc, actual.path) != (target.netloc, target.path):
+        raise ValueError("Navigation left consultation results")
+    expected, observed = parse_qs(target.query), parse_qs(actual.query)
+    for key in ("numeroDocumento", "tipoPersonaId"):
+        if key in expected and observed.get(key) != expected[key]:
+            raise ValueError("Navigation returned results for a different identity")
+
+
 async def navigate_results(page, url: str, request_seconds: float, diagnostics=None):
-    """Wait for parsed result HTML without waiting for deferred third-party scripts."""
-    async with asyncio.timeout(request_seconds):
-        response = await page.goto(url, wait_until="commit", timeout=int(request_seconds * 1000))
-        if diagnostics is not None:
-            diagnostics["landing_http_status"] = response.status if response else None
-        if not response or response.status != 200:
-            raise ValueError(f"Landing HTTP {response.status if response else 'missing'}")
-        await page.wait_for_function(
-            "() => document.readyState !== 'loading' && !!document.querySelector('table.table tbody')",
-            timeout=int(request_seconds * 1000),
-        )
-        target, actual = urlsplit(safe_url(url)), urlsplit(safe_url(page.url))
-        if (actual.netloc, actual.path) != (target.netloc, target.path):
-            raise ValueError("Navigation left consultation results")
-        expected, observed = parse_qs(target.query), parse_qs(actual.query)
-        for key in ("numeroDocumento", "tipoPersonaId"):
-            if key in expected and observed.get(key) != expected[key]:
-                raise ValueError("Navigation returned results for a different identity")
-        return response
+    """Use timer polling, independent of background-tab animation frames."""
+    response = None
+    if diagnostics is not None:
+        diagnostics["landing_http_status"] = None
+    try:
+        async with asyncio.timeout(request_seconds):
+            response = await page.goto(url, wait_until="commit", timeout=int(request_seconds * 1000))
+            if diagnostics is not None:
+                diagnostics["landing_http_status"] = response.status if response else None
+            if not response or response.status != 200:
+                raise ValueError(f"Landing HTTP {response.status if response else 'missing'}")
+            validate_results_url(page.url, url)
+            await page.wait_for_function(
+                "() => document.readyState !== 'loading' && !!document.querySelector('table.table tbody')",
+                polling=250,
+                timeout=int(request_seconds * 1000),
+            )
+            validate_results_url(page.url, url)
+            return response
+    except (TimeoutError, BrowserTimeout):
+        # A suspended waiter or a just-arrived document must not discard valid HTML.
+        # Read URL + HTML atomically and require a committed HTTP 200 and valid results.
+        if response is not None and response.status == 200:
+            with suppress(Exception):
+                async with asyncio.timeout(3):
+                    snapshot = await page.evaluate(
+                        "() => ({url:location.href, ready:document.readyState,html:document.documentElement.outerHTML})"
+                    )
+                    if snapshot["ready"] in {"interactive", "complete"}:
+                        validate_results_url(snapshot["url"], url)
+                        parse_results(snapshot["html"], snapshot["url"])
+                        if diagnostics is not None:
+                            diagnostics["navigation_wait_fallback"] = True
+                        return response
+        raise
 
 
 async def run(

@@ -102,3 +102,14 @@ Finished in 108.69 seconds: four completed links, 13 PDFs with verified hashes,
 one browser recovery, zero failed links or download timeouts. This reproduces
 the lock/timeout failure mode; it does not establish the exact stall location
 of the server run without its worker activity snapshots.
+
+## Ready-table timeout fallback — 2026-11-06
+
+Run `pep-webshare-20261106T143807203452Z`: two real browsers, three tabs each,
+four links. After one real table became ready, the test deliberately raised a
+waiter timeout. The fallback atomically read and validated its URL, readyState
+and parsed results, then continued native downloading. Finished in 90.24 seconds:
+four completed links, 13 PDFs with verified hashes, one
+`navigation_wait_fallback`, no failed links or download timeouts. Timer polling
+was enabled for all pages. This validates handling of a timed-out waiter with
+ready HTML; it does not prove that every server timeout was caused by RAF.
