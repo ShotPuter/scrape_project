@@ -236,6 +236,12 @@ class AggregateReport:
             "resumed_links": len(self.resumed_jobs),
             "tabs_per_browser": self.tabs,
             "tab_count": len(workers) * self.tabs,
+            "opening_tabs": sum(
+                tab["status"] == "running"
+                and (tab.get("activity") or {}).get("stage") in {"browser_start", "page_creation_wait", "page_creation"}
+                for worker in workers
+                for tab in worker["tabs"]
+            ),
             "tab_restarts": sum(worker["tab_restarts"] for worker in workers),
             "browser_restarts": sum(worker["browser_restarts"] for worker in workers),
             "browser_recoveries": sum(worker["browser_recoveries"] for worker in workers),
@@ -427,7 +433,6 @@ async def run_parallel(
         aggregate.database.stage(initial["jobs"])
         await asyncio.to_thread(aggregate.database.flush, force=True, metadata=initial)
     launch_lock = asyncio.Lock()
-    page_creation_lock = asyncio.Lock()
     if not sqlite_state:
         atomic_write_json(output / "report.json", aggregate.snapshot())
     aggregate.log.summary("run_started", aggregate.snapshot(), worker_count=len(groups), log_interval=log_interval)
@@ -478,6 +483,8 @@ async def run_parallel(
     async def worker(index, group):
         nonlocal finished_workers, start_notified
         folder = output / f"worker-{index}"
+        # Serialize page creation only within this browser, not across the fleet.
+        page_creation_lock = asyncio.Lock()
         assigned_proxy = proxy.for_worker(index) if proxy else None
         state = {"status": "running", "jobs": [], "tabs": [], "pdf_count": 0, "archive_count": 0}
         tab_states = {}
@@ -791,6 +798,7 @@ async def run_parallel(
                                     notice.update(event="download_started", ready_browsers=len(ready_workers))
                                     await aggregate.notify(notice, final=False)
                             activity("tabs_running")
+                            await asyncio.sleep(0.1 * (index - 1))
                             rotation_reason = None
                             cycle_claimed = 0
                             # Stagger rotations so the fleet does not drain simultaneously.
@@ -803,7 +811,7 @@ async def run_parallel(
                     ready_workers.discard(index)
                     if not retry_proxy:
                         tab_reasons = {tab.get("stop_reason") for tab in tab_states.values()}
-                        lost_target = bool(tab_reasons & {"page_closed", "page_crashed"})
+                        lost_target = bool(tab_reasons & {"page_closed", "page_crashed", "page_creation_timeout"})
                         refusal = any(
                             reason
                             and (

@@ -434,6 +434,7 @@ def fake_browsers(monkeypatch):
 async def test_twenty_browsers_sixty_tabs_global_queue_and_progress(monkeypatch, tmp_path, fake_browsers):
     active, maximum = 0, 0
     assignments, context_users = [], {}
+    creation_locks = {}
     all_tabs_started = asyncio.Event()
 
     async def fake_run(
@@ -443,6 +444,7 @@ async def test_twenty_browsers_sixty_tabs_global_queue_and_progress(monkeypatch,
         active += 1
         maximum = max(maximum, active)
         context_users.setdefault(context_override, []).append(proxy["username"])
+        creation_locks.setdefault(context_override, set()).add(kwargs["page_creation_lock"])
         if active == 60:
             all_tabs_started.set()
         await asyncio.wait_for(all_tabs_started.wait(), timeout=5)
@@ -484,6 +486,8 @@ async def test_twenty_browsers_sixty_tabs_global_queue_and_progress(monkeypatch,
     assert len(fake_browsers) == len(context_users) == 20
     assert all(len(users) == 3 and len(set(users)) == 1 for users in context_users.values())
     assert len({users[0] for users in context_users.values()}) == 20
+    assert all(len(locks) == 1 for locks in creation_locks.values())
+    assert len(set().union(*creation_locks.values())) == 20
     assert sorted(assignments) == list(range(1, 101))
     assert result["job_counts"] == {"completed": 100}
     assert result["pdf_count"] == 100

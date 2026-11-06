@@ -26,6 +26,18 @@ from src.sites.pep.source import DOWNLOAD_PATH, LEGACY_PATH, RESULT_PATH, parse_
 from src.utils.atomic import atomic_write_json
 
 
+class PageCreationTimeout(BrowserError):
+    """A stalled new_page handshake; requires replacing its browser context."""
+
+
+async def create_page(context, seconds):
+    try:
+        async with asyncio.timeout(seconds):
+            return await context.new_page()
+    except TimeoutError as exc:
+        raise PageCreationTimeout(f"BrowserContext.new_page did not finish within {seconds:g}s") from exc
+
+
 @asynccontextmanager
 async def borrowed_context(context):
     """The browser owner closes the context after all its tabs finish."""
@@ -211,13 +223,23 @@ async def run(
 
     def target_failure(error):
         message = str(error).lower()
-        return type(error).__name__ == "TargetClosedError" or any(
-            part in message for part in ("target crashed", "target page, context or browser has been closed")
+        return (
+            isinstance(error, PageCreationTimeout)
+            or type(error).__name__ == "TargetClosedError"
+            or any(part in message for part in ("target crashed", "target page, context or browser has been closed"))
         )
 
     def stop_target(error):
         if not report.get("stop_reason"):
-            report["stop_reason"] = "page_crashed" if "target crashed" in str(error).lower() else "page_closed"
+            report["stop_reason"] = (
+                "page_creation_timeout"
+                if isinstance(error, PageCreationTimeout)
+                else "page_crashed"
+                if "target crashed" in str(error).lower()
+                else "page_closed"
+            )
+        if isinstance(error, PageCreationTimeout):
+            stop_event.set()
         log.emit("target_unavailable", reason=report["stop_reason"], error=redact(error)[:800])
         checkpoint()
 
@@ -261,11 +283,16 @@ async def run(
                 )
             ) as context,
         ):
+            activity("page_creation_wait")
             if page_creation_lock is None:
-                page = await context.new_page()
+                activity("page_creation")
+                page = await create_page(context, min(30, request_seconds))
             else:
                 async with page_creation_lock:
-                    page = await context.new_page()
+                    if stop_event.is_set():
+                        raise BrowserError("BrowserContext.new_page: Target page, context or browser has been closed")
+                    activity("page_creation")
+                    page = await create_page(context, min(30, request_seconds))
                     await asyncio.sleep(0.1)
             if proxy and context_override is None:
                 activity("proxy_preflight")

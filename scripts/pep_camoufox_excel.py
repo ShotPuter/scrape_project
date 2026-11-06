@@ -111,6 +111,7 @@ class ProgressReporter:
             f"Готовы сейчас: {report.get('ready_browsers', report.get('proxy_observed_browsers', 0))}"
             f" / {report.get('worker_count', 1)}"
             f" · Вкладок настроено: {report.get('tab_count', 1)}\n"
+            f"Вкладок открывается: {report.get('opening_tabs', 0)}\n"
             f"Прокси IP: {len(report.get('proxy_egress_ips', []))}"
             f" · Замен вкладок: {report.get('tab_restarts', 0)}\n\n"
             f"Перезапусков браузеров: {report.get('browser_restarts', 0)}"

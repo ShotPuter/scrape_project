@@ -90,3 +90,15 @@ whole-browser recovery, no failed links or timeouts. SQLite retained every
 unique link and all SHA-256 values matched the saved files. Final live browser
 count was zero after expected cleanup. Telegram was disabled for this test.
 This validates recovery, not stability of 40 browsers × five tabs on the server.
+
+## Stalled page creation — 2026-11-06
+
+Run `pep-webshare-20261106T102650209846Z`: two real Webshare browsers, three tabs
+each, four links. One context's `new_page` was replaced by a non-returning
+coroutine; its test creation timeout was shortened to 0.2 seconds. Independent
+per-browser locks allowed the healthy context to keep working. The stalled
+context was replaced after the bounded timeout and five-second recovery pause.
+Finished in 108.69 seconds: four completed links, 13 PDFs with verified hashes,
+one browser recovery, zero failed links or download timeouts. This reproduces
+the lock/timeout failure mode; it does not establish the exact stall location
+of the server run without its worker activity snapshots.
