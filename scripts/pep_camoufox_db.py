@@ -10,7 +10,7 @@ import time
 from contextlib import closing, contextmanager
 from pathlib import Path
 
-from scripts.pep_camoufox_export import write_export
+from scripts.pep_camoufox_export import deduplicate_documents, write_export
 from src.utils.atomic import atomic_write_json
 
 
@@ -54,7 +54,8 @@ class StateDB:
             self._stage(jobs)
 
     def _stage(self, jobs):
-        for job in jobs:
+        for incoming in jobs:
+            job = {**incoming, "documents": deduplicate_documents(incoming.get("documents", []))}
             payload = json.dumps(job, ensure_ascii=False, separators=(",", ":"))
             if payload != self.saved.get(job["url"]):
                 self.pending[job["url"]] = (job["n"], job["status"], payload)
@@ -81,7 +82,9 @@ class StateDB:
                     )
                     db.execute("DELETE FROM documents WHERE url=?", (url,))
                     db.executemany(
-                        "INSERT INTO documents(url,id,status,local_path,payload) VALUES(?,?,?,?,?)",
+                        """INSERT INTO documents(url,id,status,local_path,payload) VALUES(?,?,?,?,?)
+                        ON CONFLICT(url,id) DO UPDATE SET status=excluded.status,
+                        local_path=excluded.local_path,payload=excluded.payload""",
                         [
                             (url, str(doc["id"]), doc["status"], doc.get("local_path"), json.dumps(doc, ensure_ascii=False))
                             for doc in json.loads(payload).get("documents", [])

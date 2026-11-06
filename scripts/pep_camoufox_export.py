@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 from pathlib import Path
 
@@ -11,11 +12,37 @@ from src.sites.pep.workbook import LINK_COLUMN, read_rows
 from src.utils.atomic import atomic_write_json
 
 
+def deduplicate_documents(documents: list[dict]) -> list[dict]:
+    """One declaration per ID; retain source variants and prefer a saved PDF."""
+    identifiers = [str(doc["id"]) if doc.get("id") is not None else ("row", index) for index, doc in enumerate(documents)]
+    if len(identifiers) == len(set(identifiers)):
+        return documents
+    merged = {}
+    ranks = {"downloaded": 5, "unavailable_http_404": 4, "failed": 3, "timeout": 3, "running": 2, "pending": 1}
+    for doc, key in zip(documents, identifiers, strict=True):
+        if key not in merged:
+            merged[key] = copy.deepcopy(doc)
+            continue
+        old = merged[key]
+        sources = []
+        for variant in (old, doc):
+            sources.extend(
+                copy.deepcopy(
+                    variant.get("source_rows", [{name: value for name, value in variant.items() if name != "source_rows"}])
+                )
+            )
+        winner, other = (doc, old) if ranks.get(doc.get("status"), 0) > ranks.get(old.get("status"), 0) else (old, doc)
+        merged[key] = {**copy.deepcopy(other), **copy.deepcopy(winner), "source_rows": sources}
+        if winner.get("status") == "downloaded":
+            merged[key]["error"] = winner.get("error")
+    return list(merged.values())
+
+
 def build_export(report: dict) -> list[dict]:
     records = []
     for job in report["jobs"]:
         declarations = []
-        for doc in job["documents"]:
+        for doc in deduplicate_documents(job["documents"]):
             pdfs = []
             if doc["status"] == "downloaded":
                 files = doc.get("files") or ([doc] if doc.get("local_path") else [])
@@ -34,6 +61,7 @@ def build_export(report: dict) -> list[dict]:
                     "download_status": doc["status"],
                     "pdfs": pdfs,
                     "error": doc.get("error"),
+                    **({"source_rows": doc["source_rows"]} if doc.get("source_rows") else {}),
                 }
             )
         records.append(

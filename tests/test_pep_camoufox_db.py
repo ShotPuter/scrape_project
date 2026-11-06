@@ -66,9 +66,43 @@ def test_document_status_paths_and_resume_without_json(tmp_path):
 def test_transaction_rolls_back_and_keeps_batch_on_failure(tmp_path):
     store = StateDB(tmp_path / "state.sqlite3")
     record = job(1)
-    record["documents"] = [{"id": "1", "status": "timeout"}] * 2
+    record["n"] = None  # A genuine NOT NULL failure must still roll back the whole transaction.
     store.stage([record])
     with pytest.raises(sqlite3.IntegrityError):
         store.flush(force=True)
     assert read_report(store.path)["jobs"] == []
     assert len(store.pending) == 1
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_duplicate_document_does_not_abort_batch_or_replace_downloaded_pdf(tmp_path, reverse):
+    store = StateDB(tmp_path / "state.sqlite3")
+    records = [job(i) for i in range(1, 501)]
+    duplicates = [
+        {
+            "id": "123",
+            "status": "downloaded",
+            "local_path": "pdf/123.pdf",
+            "publication_date": "2020-01-01",
+            "files": [{"local_path": "pdf/123.pdf", "sha256": "test-hash"}],
+        },
+        {"id": 123, "status": "pending", "publication_date": "2020-01-02"},
+    ]
+    if reverse:
+        duplicates.reverse()
+    records[255]["documents"] = duplicates
+    store.stage(records)
+    assert store.flush() == 500
+    saved = read_report(store.path)["jobs"]
+    assert len(saved) == 500
+    canonical = saved[255]["documents"]
+    assert len(canonical) == 1
+    assert canonical[0]["status"] == "downloaded"
+    assert canonical[0]["local_path"] == "pdf/123.pdf"
+    assert {row["publication_date"] for row in canonical[0]["source_rows"]} == {"2020-01-01", "2020-01-02"}
+    assert len(records[255]["documents"]) == 2  # Caller state is not mutated.
+    with store.connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 1
+        assert db.execute("SELECT status FROM documents").fetchone()[0] == "downloaded"
+    exported = build_export({"jobs": saved})[255]["declarations"]
+    assert len(exported) == 1 and len(exported[0]["source_rows"]) == 2

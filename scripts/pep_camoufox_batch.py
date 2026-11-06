@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 from camoufox.async_api import AsyncCamoufox
 from playwright.async_api import Error as BrowserError, TimeoutError as BrowserTimeout
 
+from scripts.pep_camoufox_export import deduplicate_documents
 from scripts.pep_camoufox_logging import EventLog
 from scripts.pep_camoufox_pilot import CA_BUNDLE, DEFAULT_SAMPLE, ROOT, install_intermediate, install_proxy_ca
 from scripts.pep_camoufox_retry import reuse_document
@@ -333,6 +334,7 @@ async def run(
                         activity("discovery", job=job["n"])
                         job["navigation_stage"] = "results_ready"
                         documents, next_url = parse_results(await page.content(), page.url)
+                        documents = deduplicate_documents(documents)
                         documents = [doc for doc in documents if str(doc["id"]) not in seen_docs]
                         for doc in documents:
                             doc.update(status="pending", attempts=0)

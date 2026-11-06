@@ -303,6 +303,7 @@ class AggregateReport:
         await self.notify(combined, final=False)
 
     async def finish(self, status: str | None = None) -> dict:
+        persistence_error = None
         async with self.lock:
             if status is None:
                 statuses = {worker["status"] for worker in self.workers.values()}
@@ -327,12 +328,21 @@ class AggregateReport:
                 if doc["status"] not in {"downloaded", "unavailable_http_404"}
             ]
             combined["incomplete_document_counts"] = dict(Counter(doc["status"] for doc in incomplete))
-            if self.database is None:
-                atomic_write_json(self.output / "incomplete-documents.json", incomplete)
-            await asyncio.to_thread(self.persist, combined)
+            try:
+                if self.database is None:
+                    atomic_write_json(self.output / "incomplete-documents.json", incomplete)
+                await asyncio.to_thread(self.persist, combined)
+            except Exception as exc:
+                persistence_error = exc
+                message = self.log.clean(str(exc))[:300]
+                combined["status"] = "error"
+                combined["stop_reason"] = f"state_write_failed:{type(exc).__name__}: {message}"
+                combined["persistence_error"] = {"type": type(exc).__name__, "message": message}
             self.log.summary("run_finished", combined, workers=combined["workers"], resources=combined["resources"])
             self.log.close()
         await self.notify(combined, final=True)
+        if persistence_error is not None:
+            raise persistence_error
         return combined
 
 

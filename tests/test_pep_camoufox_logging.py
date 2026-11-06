@@ -175,3 +175,24 @@ async def test_global_export_is_throttled_but_final_report_is_complete(tmp_path)
     assert calls == [1, 100]
     saved = json.loads((tmp_path / "report.json").read_text())
     assert len(saved["jobs"]) == 100 and saved["job_counts"] == {"completed": 100}
+
+
+@pytest.mark.asyncio
+async def test_failed_final_state_write_still_sends_failure_notification(tmp_path):
+    notifications = []
+
+    async def notify(report, *, final):
+        notifications.append((report, final))
+
+    aggregate = parallel.AggregateReport([], [], tmp_path, notify)
+
+    def fail(report):
+        raise RuntimeError("State write failed")
+
+    aggregate.persist = fail
+    with pytest.raises(RuntimeError, match="State write failed"):
+        await aggregate.finish("error")
+    assert len(notifications) == 1
+    report, final = notifications[0]
+    assert final and report["status"] == "error"
+    assert "state_write_failed" in report["stop_reason"]

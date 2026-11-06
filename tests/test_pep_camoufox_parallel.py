@@ -557,7 +557,8 @@ async def test_webshare_chooses_distinct_addresses_and_decodes_auth(monkeypatch)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("legacy", [False, True])
-async def test_actual_tabs_share_context_but_keep_downloads_separate(monkeypatch, tmp_path, legacy):
+@pytest.mark.parametrize("duplicate_rows", [False, True])
+async def test_actual_tabs_share_context_but_keep_downloads_separate(monkeypatch, tmp_path, legacy, duplicate_rows):
     original_sleep = asyncio.sleep
     pages, contexts_closed = [], []
     claimed = iter(sample(6))
@@ -619,7 +620,7 @@ async def test_actual_tabs_share_context_but_keep_downloads_separate(monkeypatch
                 "requires_captcha": not legacy,
                 "download_url": "https://www.funcionpublica.gov.co" + batch.LEGACY_PATH + "?action=download",
             }
-        ], None
+        ] * (2 if duplicate_rows else 1), None
 
     async def download(page, element, endpoint, timeout_ms, **kwargs):
         # An empty pageerror must not break the event callback or PDF processing.
