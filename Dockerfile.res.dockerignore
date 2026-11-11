@@ -1,0 +1,8 @@
+*
+!Dockerfile.res
+!docker/
+!docker/res-requirements.txt
+!src/
+!src/**
+**/__pycache__
+**/*.py[cod]

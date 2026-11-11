@@ -19,6 +19,7 @@
 !scripts/pep_camoufox_retry.py
 !scripts/pep_camoufox_resume.py
 !scripts/pep_camoufox_db.py
+!scripts/pep_camoufox_audit.py
 !scripts/pep_camoufox_pause.py
 **/__pycache__
 **/*.py[cod]

@@ -23,10 +23,10 @@ from typing import Any
 
 from config import settings
 from src import __version__
-from src.client.seprec_client import SeprecClient
+from src.sites.seprec.client import SeprecClient
 from src.models.publication import STATUS_FAILED
 from src.services.proxy_bootstrap import count_fresh_proxies, proxy_collector, wait_for_proxies
-from src.services.scraper import SeprecScraper
+from src.sites.seprec.scraper import SeprecScraper
 from src.storage.discard_store import DiscardStore
 from src.storage.file_storage import FileStorage
 from src.utils.atomic import atomic_write_json

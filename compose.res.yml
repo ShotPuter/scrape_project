@@ -1,0 +1,50 @@
+services:
+  res:
+    image: chile-res:local
+    build:
+      context: .
+      dockerfile: Dockerfile.res
+    init: true
+    restart: "no"
+    shm_size: ${RES_SHM_SIZE:-2gb}
+    mem_limit: ${RES_MEMORY_LIMIT:-12g}
+    cpus: ${RES_CPUS:-6}
+    pids_limit: ${RES_PIDS_LIMIT:-4096}
+    stop_signal: SIGINT
+    stop_grace_period: 1m
+    environment:
+      WEBSHARE_API_TOKEN: ${WEBSHARE_API_TOKEN:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      RES_TELEGRAM_INTERVAL_MINUTES: ${RES_TELEGRAM_INTERVAL_MINUTES:-5}
+    volumes:
+      - type: bind
+        source: ${RES_DATA_DIR:-./data}
+        target: /app/data
+        bind:
+          create_host_path: false
+    command:
+      - search
+      - --output
+      - data/dequienes-companies-2025
+      - --profile
+      - data/res-search-profile
+      - --limit
+      - "${RES_LIMIT:-100}"
+      - --run-id
+      - "${RES_SEARCH_RUN_ID:-res-companies-100}"
+      - --browsers
+      - "${RES_BROWSERS:-5}"
+      - --tabs-per-browser
+      - "${RES_TABS_PER_BROWSER:-2}"
+      - --rate-per-minute
+      - "${RES_RATE_PER_MINUTE:-6}"
+      - --checkpoint-interval
+      - "${RES_CHECKPOINT_INTERVAL:-15}"
+      - --proxy-provider
+      - webshare
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

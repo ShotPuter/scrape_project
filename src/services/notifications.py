@@ -14,6 +14,7 @@ import aiohttp
 
 from config import settings
 from src.services.run_statistics import read_json, statistics
+from src.services.telegram import send_telegram
 from src.utils.atomic import atomic_write_json
 
 logger = logging.getLogger(__name__)
@@ -33,20 +34,6 @@ def should_notify(report: dict, state: dict, now: float, interval: float) -> boo
     return status == "RUNNING" and now - state.get("sent_at", 0) >= interval
 
 
-async def send_telegram(session: aiohttp.ClientSession, token: str, chat_id: str, text: str) -> None:
-    # Never propagate a token-bearing URL or Telegram response into logs.
-    try:
-        async with session.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text[:4000]},
-        ) as response:
-            result = await response.json()
-            if response.status != 200 or not result.get("ok"):
-                raise RuntimeError("Telegram rejected notification; check credentials and chat access")
-    except (aiohttp.ClientError, TimeoutError, ValueError):
-        raise RuntimeError("Telegram notification unavailable") from None
-
-
 async def watch(directory: Path, interval: float) -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -60,7 +47,9 @@ async def watch(directory: Path, interval: float) -> None:
             if startup_pending:
                 try:
                     await send_telegram(
-                        session, token, chat_id,
+                        session,
+                        token,
+                        chat_id,
                         "✅ Сервис уведомлений запущен. Telegram работает.\n"
                         f"Статистика будет приходить каждые {interval / 60:g} мин. и при завершении запуска.\n"
                         "Если скрапер ещё не запущен, ожидаю его статистику.",

@@ -1,5 +1,8 @@
 # SEPREC Gazette Scraper
 
+Project map (including the separate PEP integration): [docs/project-index.md](docs/project-index.md).
+PEP stability test (native Chrome / nodriver, SQLite resume): [docs/pep-stability.md](docs/pep-stability.md).
+
 An async Python scraper for Bolivia's Gaceta Electrónica de Comercio. It pulls publication and company metadata from the SEPREC API, saves the original PDFs, renders a PDF for publications that only have text, and keeps an incremental CSV index so reruns don't start from zero.
 
 > **Proxies.** The scraper rotates free public proxies, and that has a cost: they are slow, they die often, and a run can crawl while the pool is being checked or refilled. If you need steady speed, use a paid proxy service. For a small run (one year, one category) `PROXY_MODE=direct` is usually enough and skips proxies entirely.
@@ -468,3 +471,18 @@ tests/                      Regression suite
 Dockerfile                  Python 3.11 slim runtime image
 docker-compose.yml          One-shot scraper service
 ```
+
+## Chile: DeQuienes → RES
+
+Начальная интерактивная ветка на Camoufox: `python -m src.sites.dequienes`.
+Настройка, подтверждённые ограничения входа и команды: [docs/dequienes.md](docs/dequienes.md).
+Этапы 1–3 (настройки, постоянные очереди, публичный сбор): [docs/dequienes-pipeline.md](docs/dequienes-pipeline.md).
+
+Прямой поиск RES без DeQuienes: [запуск и очередь CVE](docs/res-search.md).
+Скачивание PDF по очереди CVE: `bash scripts/res_download.sh --limit 10`;
+параметры и продолжение сбора описаны в том же руководстве.
+Для поиска и PDF доступны `--browsers 5 --tabs-per-browser 2` (10 обработчиков
+с общим лимитом); промежуточные отчёты обновляются также каждые 15 секунд.
+Серверный запуск с Webshare: [Docker и продолжение сбора RES](docs/res-server.md).
+Telegram уведомляет о запуске, готовности браузеров, прогрессе каждые 5 минут
+и завершении; интервал задаётся `RES_TELEGRAM_INTERVAL_MINUTES` (например, 10).

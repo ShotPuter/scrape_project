@@ -1,0 +1,4 @@
+# Experimental optional launcher; UC is GPLv3, nodriver is AGPLv3.
+-r requirements-browser.txt
+undetected-chromedriver==3.5.5
+selenium==4.52.0

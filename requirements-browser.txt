@@ -1,0 +1,3 @@
+# Optional persistent nodriver backend; core Playwright is in requirements.txt.
+# nodriver is AGPLv3; review licensing before distribution/production integration.
+nodriver==0.50.99
