@@ -47,6 +47,8 @@ services:
       - "${RES_CHECKPOINT_INTERVAL:-15}"
       - --proxy-provider
       - webshare
+      - --collect-proxy-provider
+      - "${RES_COLLECT_PROXY_PROVIDER:-inherit}"
     logging:
       driver: json-file
       options:

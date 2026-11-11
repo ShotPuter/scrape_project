@@ -29,6 +29,7 @@ def read_state(path):
 
 async def collect(args, store, provider):
     public_id = args.run_id + "-public"
+    profile = getattr(args, "collection_profile", None) or args.profile.with_name(args.profile.name + "-public")
     report = {
         "run_id": public_id,
         "target": args.limit,
@@ -39,6 +40,7 @@ async def collect(args, store, provider):
         "state": "running",
         "companies": 0,
         "phase": "preparing_browser",
+        "profile": str(profile),
     }
 
     def refresh():
@@ -54,7 +56,7 @@ async def collect(args, store, provider):
     def observer(_store, _run_id, routes, ready):
         report["proxy_routes"] = routes
         if ready:
-            report["phase"] = "browser_proxy_verified"
+            report["phase"] = "browser_proxy_verified" if provider == "webshare" else "browser_ready"
             notifier.browser_ready(0)
 
     def phase_observer(details):
@@ -65,7 +67,7 @@ async def collect(args, store, provider):
 
     public_args = argparse.Namespace(
         output=args.output,
-        profile=args.profile.with_name(args.profile.name + "-public"),
+        profile=profile,
         config=None,
         action="collect",
         year=args.year,
@@ -138,9 +140,20 @@ async def run_locked(args):
         state.update(state="running", phase="collect")
         state.pop("error", None)
         provider = proxy_provider(args)
+        collection_choice = getattr(args, "collect_proxy_provider", "inherit")
+        collect_provider = (
+            provider
+            if collection_choice == "inherit"
+            else proxy_provider(argparse.Namespace(proxy_provider=collection_choice))
+        )
+        state["proxy_providers"] = {"collect": collect_provider, "res": provider}
         atomic_write_json(path, state)
         if not state["company_ids"]:
-            if await collect(args, store, provider):
+            name = args.profile.name + "-public"
+            if collect_provider != provider:
+                name += "-" + collect_provider
+            collection_args = argparse.Namespace(**{**vars(args), "collection_profile": args.profile.with_name(name)})
+            if await collect(collection_args, store, collect_provider):
                 state["state"] = "stopped"
                 return 1
             # Freeze the selected company set so later public discoveries cannot change a resumed search.
@@ -190,6 +203,12 @@ def main():
     parser.add_argument("--run-id", default="res-companies-100")
     parser.add_argument("--collect-workers", type=int, default=4, help="Concurrent public HTTP workers")
     parser.add_argument("--collect-rate-per-minute", type=float, default=60)
+    parser.add_argument(
+        "--collect-proxy-provider",
+        choices=["inherit", "auto", "direct", "webshare"],
+        default="inherit",
+        help="Route for DeQuienes only; inherit keeps the RES proxy provider",
+    )
     parser.add_argument("--rate-per-minute", type=float, default=6)
     parser.add_argument("--timeout", type=int, default=60)
     parser.add_argument("--captcha-wait", type=int, default=30)

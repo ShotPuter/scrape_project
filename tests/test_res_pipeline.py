@@ -238,3 +238,39 @@ async def test_bootstrap_exception_in_task_group_is_blocked_with_reason_not_inte
     state = json.loads((args.output / "pipelines" / "fresh-test.json").read_text())
     assert state["state"] == "blocked"
     assert "HTTP 403" in state["error"]["summary"]
+
+
+@pytest.mark.parametrize("choice, expected", [("inherit", "webshare"), ("direct", "direct")])
+async def test_collection_route_is_explicit_and_does_not_change_res_or_pdf(tmp_path, monkeypatch, choice, expected):
+    monkeypatch.setattr("dotenv.load_dotenv", lambda: None)
+    args = options(tmp_path, proxy_provider="webshare", collect_proxy_provider=choice)
+    calls = []
+
+    async def public(public_args):
+        calls.append("public")
+        assert public_args.proxy_provider == expected
+        assert public_args.profile.name == "search-public" + ("-direct" if choice == "direct" else "")
+        store = QueueStore(public_args.output / "companies.sqlite3")
+        insert_companies(store, 3)
+        store.close()
+        return 0
+
+    async def search(search_args):
+        calls.append("res")
+        assert search_args.proxy_provider == "webshare"
+        assert search_args.profile == args.profile
+        return 0
+
+    async def pdf(pdf_args):
+        calls.append("pdf")
+        assert pdf_args.proxy_provider == "webshare"
+        assert pdf_args.profile == args.profile
+        return 0
+
+    monkeypatch.setattr(pipeline, "run_public", public)
+    monkeypatch.setattr(pipeline.search, "run", search)
+    monkeypatch.setattr(pipeline.download, "run", pdf)
+    assert await pipeline.run(args) == 0
+    assert calls == ["public", "res", "pdf"]
+    state = json.loads((args.output / "pipelines" / "fresh-test.json").read_text())
+    assert state["proxy_providers"] == {"collect": expected, "res": "webshare"}
