@@ -217,3 +217,24 @@ def test_company_target_is_scoped_to_selected_month(tmp_path):
         assert company_keys(store, selection_months(2024, [])) == []
     finally:
         store.close()
+
+
+async def test_bootstrap_exception_in_task_group_is_blocked_with_reason_not_interrupted(tmp_path, monkeypatch):
+    from src.sites.dequienes.hybrid import BootstrapFailure
+
+    async def fail(public):
+        public.on_collection_phase({"phase": "automatic_browser_check", "last_http_status": 403})
+        raise BootstrapFailure("DeQuienes sitemap HTTP 403", state="blocked")
+
+    monkeypatch.setattr(pipeline, "run_public", fail)
+    args = options(tmp_path)
+    with pytest.raises(ExceptionGroup):
+        await pipeline.run(args)
+    saved = json.loads((args.output / "public_collection" / "fresh-test-public.json").read_text())
+    assert saved["state"] == "blocked"
+    assert saved["phase"] == "automatic_browser_check"
+    assert saved["last_http_status"] == 403
+    assert "DeQuienes sitemap HTTP 403" in saved["stop_reason"]
+    state = json.loads((args.output / "pipelines" / "fresh-test.json").read_text())
+    assert state["state"] == "blocked"
+    assert "HTTP 403" in state["error"]["summary"]

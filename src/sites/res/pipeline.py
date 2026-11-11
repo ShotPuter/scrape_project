@@ -18,6 +18,7 @@ from src.sites.res.proxies import proxy_provider
 from src.sites.res.runtime import add_browser_arguments, checkpoints, progress_snapshot, validate_runtime
 from src.sites.res.telegram import RunNotifications
 from src.utils.atomic import atomic_write_json
+from src.utils.error_details import exception_details, failure_state
 
 
 def read_state(path):
@@ -37,6 +38,7 @@ async def collect(args, store, provider):
         "proxy_routes": [],
         "state": "running",
         "companies": 0,
+        "phase": "preparing_browser",
     }
 
     def refresh():
@@ -52,7 +54,14 @@ async def collect(args, store, provider):
     def observer(_store, _run_id, routes, ready):
         report["proxy_routes"] = routes
         if ready:
+            report["phase"] = "browser_proxy_verified"
             notifier.browser_ready(0)
+
+    def phase_observer(details):
+        report["bootstrap"] = details
+        for key in ("phase", "last_http_status", "last_url", "diagnostics"):
+            if key in details:
+                report[key] = details[key]
 
     public_args = argparse.Namespace(
         output=args.output,
@@ -74,6 +83,7 @@ async def collect(args, store, provider):
         max_attempts=args.max_attempts,
         retry_errors=args.retry_errors,
         on_collection_progress=observer,
+        on_collection_phase=phase_observer,
     )
     try:
         save()
@@ -86,6 +96,12 @@ async def collect(args, store, provider):
         if not enough:
             report["stop_reason"] = f"Collected {report['companies']}/{args.limit} unique companies; collection incomplete"
         return 0 if enough else (code or 1)
+    except BaseException as exc:
+        report["state"] = failure_state(exc)
+        report["error"] = exception_details(exc)
+        report["stop_reason"] = report["error"]["summary"]
+        print(f"Public collection {report['state']}: {report['stop_reason']}", flush=True)
+        raise
     finally:
         if report["state"] == "running":
             report["state"] = "interrupted"
@@ -156,7 +172,7 @@ async def run_locked(args):
         state.update(phase="finished", state="stopped" if code else "completed", download_exit_code=pdf_code)
         return code
     except BaseException as exc:
-        state.update(state="interrupted", error=type(exc).__name__)
+        state.update(state=failure_state(exc), error=exception_details(exc))
         raise
     finally:
         if save_state:
@@ -199,7 +215,10 @@ def main():
     except KeyboardInterrupt:
         raise SystemExit(130) from None
     except Exception as exc:
-        print(f"RES pipeline stopped: {type(exc).__name__}; progress saved in {args.output}", flush=True)
+        details = exception_details(exc)
+        print(f"RES pipeline stopped: {details['summary']}; progress saved in {args.output}", flush=True)
+        for cause in details["causes"][:3]:
+            print(f"Cause: {cause['type']}: {cause['message']}", flush=True)
         raise SystemExit(1) from None
 
 

@@ -33,6 +33,13 @@ class Page:
         self.url = ""
         self.visited = []
         self.closed = False
+        self.listeners = []
+
+    def on(self, event, callback):
+        self.listeners.append(callback)
+
+    def remove_listener(self, event, callback):
+        self.listeners.remove(callback)
 
     async def goto(self, url, **kwargs):
         await asyncio.sleep(0)
@@ -263,7 +270,9 @@ async def test_hybrid_pipeline_resumes_queue_without_browser_tabs(tmp_path, monk
     factory, sessions = factory_for(response)
     original = hybrid.HybridClient
     monkeypatch.setattr(
-        hybrid, "HybridClient", lambda context, stage, request_gate: original(context, stage, gate, session_factory=factory)
+        hybrid,
+        "HybridClient",
+        lambda context, stage, request_gate, **kwargs: original(context, stage, gate, session_factory=factory, **kwargs),
     )
     args = argparse.Namespace(
         output=tmp_path,
@@ -334,3 +343,110 @@ async def test_bootstrap_retries_user_agent_during_automatic_navigation():
     factory, _ = factory_for(lambda generation, url: (200, article(), {}))
     async with HybridClient(context, StageSettings(), gate, session_factory=factory):
         assert context.pages[0].calls == 2
+
+
+def timeout_event():
+    class Event:
+        async def __aenter__(self):
+            raise TimeoutError("Automatic check timed out")
+
+        async def __aexit__(self, *args):
+            pass
+
+    return Event()
+
+
+async def test_homepage_fallback_does_not_require_a_search_input():
+    class FallbackPage(Page):
+        async def goto(self, url, **kwargs):
+            self.url = url
+            self.visited.append(url)
+            return SimpleNamespace(status=403 if len(self.visited) == 1 else 200, text=self.text)
+
+        def expect_response(self, *args, **kwargs):
+            return timeout_event()
+
+        def locator(self, *args):
+            pytest.fail("Homepage inputs are irrelevant to sitemap session preparation")
+
+    context = Context()
+    page = FallbackPage()
+
+    async def new_page():
+        return page
+
+    context.new_page = new_page
+    factory, _ = factory_for(lambda generation, url: (200, article(), {}))
+    async with HybridClient(context, StageSettings(), gate, session_factory=factory):
+        assert page.visited == [INDEX, "https://dequienes.cl/", INDEX]
+
+
+async def test_fast_automatic_reload_before_goto_returns_is_not_missed():
+    class FastPage(Page):
+        async def goto(self, url, **kwargs):
+            self.url = url
+            self.visited.append(url)
+            response = SimpleNamespace(status=200, url=url, text=self.text)
+            for callback in list(self.listeners):
+                callback(response)
+            return SimpleNamespace(status=403)
+
+        def expect_response(self, *args, **kwargs):
+            pytest.fail("The completed reload was already observed during goto")
+
+    context = Context()
+    page = FastPage()
+
+    async def new_page():
+        return page
+
+    context.new_page = new_page
+    factory, _ = factory_for(lambda generation, url: (200, article(), {}))
+    async with HybridClient(context, StageSettings(), gate, session_factory=factory):
+        assert page.visited == [INDEX]
+        assert page.listeners == []
+
+
+async def test_blocked_bootstrap_saves_metadata_html_and_screenshot(tmp_path):
+    from src.sites.dequienes.hybrid import BootstrapFailure
+
+    class BlockedPage(Page):
+        async def goto(self, url, **kwargs):
+            self.url = url
+            self.visited.append(url)
+            return SimpleNamespace(status=403)
+
+        def expect_response(self, *args, **kwargs):
+            return timeout_event()
+
+        async def content(self):
+            return "<title>Just a moment...</title>"
+
+        async def screenshot(self, *, path, **kwargs):
+            write_test_image(path)
+
+    context = Context()
+    page = BlockedPage()
+
+    async def new_page():
+        return page
+
+    context.new_page = new_page
+    client = HybridClient(context, StageSettings(), gate, diagnostics_dir=tmp_path)
+    with pytest.raises(BootstrapFailure) as error:
+        async with client:
+            pytest.fail("Blocked bootstrap must not start HTTP collection")
+    assert error.value.state == "blocked"
+    failure = json.loads((tmp_path / "failure.json").read_text())
+    assert failure["failure"]["state"] == "blocked"
+    assert failure["last_http_status"] == 403
+    assert failure["http_requests"] == 0
+    assert "HTTP 403" in failure["failure"]["message"]
+    assert (tmp_path / "page.html").is_file() and (tmp_path / "page.png").is_file()
+    assert page.closed
+
+
+def write_test_image(path):
+    from pathlib import Path
+
+    Path(path).write_bytes(b"test-image")

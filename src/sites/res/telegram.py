@@ -74,6 +74,12 @@ def format_message(snapshot):
     )
     if snapshot.get("stop_reason"):
         text += f"\nПричина остановки: {snapshot['stop_reason']}"
+    if snapshot.get("phase"):
+        text += f"\nШаг: {snapshot['phase']}"
+    if snapshot.get("last_http_status") is not None:
+        text += f"\nПоследний HTTP: {snapshot['last_http_status']}"
+    if snapshot.get("diagnostics"):
+        text += f"\nДиагностика: {snapshot['diagnostics']}"
     return text
 
 
@@ -136,6 +142,9 @@ class RunNotifications:
             "elapsed_seconds": round(self.clock() - self.started, 2),
             "state": self.report["state"],
             "stop_reason": reason[:400],
+            "phase": self.report.get("phase"),
+            "last_http_status": self.report.get("last_http_status"),
+            "diagnostics": self.report.get("diagnostics"),
         }
 
     def publish(self, event):

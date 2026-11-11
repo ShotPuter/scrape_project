@@ -320,6 +320,8 @@ async def run_public(args) -> int:
                         context,
                         settings.public,
                         worker.request_gate,
+                        on_progress=getattr(args, "on_collection_phase", None),
+                        diagnostics_dir=settings.output / "diagnostics" / run_id,
                         **({"proxy_url": proxy_url} if proxy_url is not None else {}),
                     )
                     try:
