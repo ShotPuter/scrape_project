@@ -276,6 +276,27 @@ def test_all_document_limit_and_invalid_limits():
             runner.document_limit(value)
 
 
+def test_search_run_download_selection_includes_public_and_account_cves(tmp_path):
+    store = QueueStore(tmp_path / "companies.sqlite3")
+    try:
+        seed(store, ("PUBLIC0001", "ACCOUNT0001", "OTHER0001"))
+        with store.transaction():
+            for key in ["selected", "other"]:
+                store.db.execute("INSERT INTO companies VALUES (?,?,?,?,?)", (key, key, key, None, "name_candidate"))
+            url = "https://dequienes.cl/diario-oficial/2025/01/02/company"
+            store.db.execute("INSERT INTO publications(source_url,month) VALUES (?,?)", (url, "2025-01"))
+            store.db.execute("INSERT INTO document_sources VALUES (?,?,?,?)", ("PUBLIC0001", url, "selected", "RES link"))
+            store.db.execute("INSERT INTO document_sources VALUES (?,?,?,?)", ("OTHER0001", url, "other", "RES link"))
+            store.db.execute("INSERT INTO account_document_sources VALUES (?,?,?)", ("ACCOUNT0001", "selected", url))
+        store.seed_res_jobs(["selected"])
+        run = store.start_run("res_company_lookup", 1)
+        store.claim(run, "worker")
+        found = runner.selected_cves(store, argparse.Namespace(cve=None, from_search_run=run))
+        assert found == ["ACCOUNT0001", "PUBLIC0001"]
+    finally:
+        store.close()
+
+
 async def test_download_all_is_restricted_to_the_source_search_run(tmp_path):
     store = QueueStore(tmp_path / "companies.sqlite3")
     seed(store, (CVE, "OTHER0001"))

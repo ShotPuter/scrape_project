@@ -11,6 +11,7 @@ from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import quote
 
 from src.sites.dequienes.extraction import extract_candidates
 from src.sites.dequienes.queue import LostLease, QueueStore
@@ -40,6 +41,7 @@ def settings_from_args(args) -> PipelineSettings:
         ("rate_per_minute", "rate_per_minute"),
         ("max_in_flight", "max_in_flight"),
         ("max_attempts", "max_attempts"),
+        ("proxy_provider", "proxy_mode"),
         ("transport", "transport"),
         ("session_refreshes", "session_refreshes"),
     ]:
@@ -94,7 +96,7 @@ def _export_snapshot(store: QueueStore, output: Path):
 
 
 class PublicWorker:
-    def __init__(self, store, settings, run_id, months):
+    def __init__(self, store, settings, run_id, months, *, company_target=None):
         self.store, self.settings, self.run_id, self.months = store, settings, run_id, months
         self.failures = 0
         self.completed = 0
@@ -103,6 +105,10 @@ class PublicWorker:
         self.owner = uuid.uuid4().hex
         self.exports = asyncio.Lock()
         self.http = None
+        self.company_target = company_target
+
+    def target_reached(self):
+        return self.company_target is not None and len(company_keys(self.store, self.months)) >= self.company_target
 
     def browser_args(self, *, attempts=1):
         stage = self.settings.public
@@ -175,6 +181,8 @@ class PublicWorker:
         stage = self.settings.public
         try:
             while not self.stop.is_set():
+                if self.target_reached():
+                    break
                 job = self.store.claim(
                     self.run_id,
                     self.owner,
@@ -201,6 +209,29 @@ def read_saved_html(path: str) -> str:
     return source.read_text(encoding="utf-8")
 
 
+def company_keys(store, months=None):
+    if months is None:
+        return [row[0] for row in store.db.execute("SELECT company_id FROM companies ORDER BY company_id")]
+    if not months:
+        return []
+    return [
+        row[0]
+        for row in store.db.execute(
+            "SELECT DISTINCT s.company_id FROM company_sources s JOIN publications p ON p.source_url=s.source_url "
+            f"WHERE p.month IN ({','.join('?' for _ in months)}) ORDER BY s.company_id",
+            months,
+        )
+    ]
+
+
+def selection_months(year, months):
+    if months:
+        return [f"{year:04d}-{int(m):02d}" if m.isdecimal() else m for m in months]
+    if year is not None:
+        return [f"{year:04d}-{m:02d}" for m in range(1, 13)]
+    return None
+
+
 async def run_public(args) -> int:
     from src.sites.dequienes import companies
 
@@ -224,6 +255,11 @@ async def run_public(args) -> int:
         print(f"Public run: {run_id}", flush=True)
         if settings.public.max_items == 0:
             return 0
+        target = getattr(args, "company_target", None)
+        if target is not None and (type(target) is not int or target < 1):
+            raise ValueError("company-target must be a positive integer")
+        if target is not None and len(company_keys(store, selection_months(settings.year, settings.months))) >= target:
+            return 0
         if imports:
             from src.sites.dequienes.companies import parse_company
 
@@ -244,21 +280,48 @@ async def run_public(args) -> int:
         from camoufox.async_api import AsyncCamoufox
 
         selection = SimpleNamespace(year=settings.year, month=settings.months, all_months=settings.all_months)
-        worker = PublicWorker(store, settings, run_id, None)
+        worker = PublicWorker(store, settings, run_id, None, company_target=target)
+        from src.sites.res.proxies import ProxyRoutes, proxy_provider
+
+        routes = ProxyRoutes([settings.profile], proxy_provider(SimpleNamespace(proxy_provider=settings.public.proxy_mode)))
+        observer = getattr(args, "on_collection_progress", None)
+        if observer is not None:
+            observer(store, run_id, routes.public, False)
         browser_args = worker.browser_args(attempts=settings.public.max_attempts)
         # A separate profile lock permits independent processes to share the queue database.
         with companies.exclusive_profile(settings.profile):
+            proxy = await routes.for_browser(0)
             async with AsyncCamoufox(
                 headless="virtual",
                 os="linux",
                 locale="es-CL",
                 persistent_context=True,
                 user_data_dir=str(settings.profile.resolve()),
+                **({"proxy": proxy} if proxy is not None else {}),
             ) as context:
+                # Keep a tab alive while the preflight tab is closed.
+                if proxy is not None:
+                    if not context.pages:
+                        await context.new_page()
+                    await routes.verify(context, 0)
+                if observer is not None:
+                    observer(store, run_id, routes.public, True)
                 if settings.public.transport == "hybrid":
                     from src.sites.dequienes.hybrid import HybridClient
 
-                    client = HybridClient(context, settings.public, worker.request_gate)
+                    proxy_url = (
+                        None
+                        if proxy is None
+                        else proxy["server"].replace(
+                            "://", f"://{quote(proxy['username'], safe='')}:{quote(proxy['password'], safe='')}@", 1
+                        )
+                    )
+                    client = HybridClient(
+                        context,
+                        settings.public,
+                        worker.request_gate,
+                        **({"proxy_url": proxy_url} if proxy_url is not None else {}),
+                    )
                     try:
                         async with client:
                             worker.http = client

@@ -295,6 +295,8 @@ def main() -> None:
     parser.add_argument("--all-months", action="store_true", default=None)
     parser.add_argument("--year", type=int)
     parser.add_argument("--limit", type=int, help="Maximum distinct public jobs; 0 does no work, omitted is unlimited")
+    parser.add_argument("--company-target", type=int, help="Stop once the DB contains this many unique companies")
+    parser.add_argument("--proxy-provider", choices=["direct", "auto", "webshare"])
     parser.add_argument("--max-companies", type=int, help="Account-stage run limit, reserved for its worker")
     parser.add_argument("--max-documents", type=int, help="RES-stage run limit, reserved for its worker")
     parser.add_argument("--output", type=Path)

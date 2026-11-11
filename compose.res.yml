@@ -24,7 +24,11 @@ services:
         bind:
           create_host_path: false
     command:
-      - search
+      - pipeline
+      - --year
+      - "${RES_YEAR:-2025}"
+      - --month
+      - "${RES_MONTH:-1}"
       - --output
       - data/dequienes-companies-2025
       - --profile

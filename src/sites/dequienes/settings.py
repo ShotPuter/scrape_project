@@ -41,8 +41,8 @@ class StageSettings:
             raise ValueError("transport must be browser or hybrid")
         if type(self.session_refreshes) is not int or self.session_refreshes < 0:
             raise ValueError("session_refreshes must be a non-negative integer")
-        if self.proxy_mode != "direct":
-            raise ValueError("Only direct routing is implemented in stages 1–3; proxy support is a later stage")
+        if self.proxy_mode not in {"direct", "auto", "webshare"}:
+            raise ValueError("proxy_mode must be direct, auto or webshare")
 
 
 @dataclass(frozen=True)

@@ -32,4 +32,4 @@ FROM assets-${CAMOUFOX_ASSETS} AS final
 COPY src ./src
 STOPSIGNAL SIGINT
 ENTRYPOINT ["python", "-u", "-m", "src.sites.res.server"]
-CMD ["search", "--limit", "100", "--browsers", "5", "--tabs-per-browser", "2", "--proxy-provider", "webshare"]
+CMD ["pipeline", "--limit", "100", "--browsers", "5", "--tabs-per-browser", "2", "--proxy-provider", "webshare"]

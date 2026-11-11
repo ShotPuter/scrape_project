@@ -128,6 +128,69 @@ async def test_one_browser_page_and_parallel_http_without_cookie_logs(capsys):
     assert "do-not-log" not in capsys.readouterr().out
 
 
+async def test_public_webshare_browser_and_http_use_the_same_proxy(tmp_path, monkeypatch):
+    import sys
+
+    from src.sites.dequienes import hybrid
+    from src.sites.dequienes.pipeline import run_public
+    from src.sites.dequienes.queue import QueueStore
+    from src.sites.res.proxies import ProxyRoutes
+
+    proxy = {"server": "http://192.0.2.10:8000", "username": "test@user", "password": "test:password"}
+    browsers, requests = [], []
+
+    def browser(**kwargs):
+        browsers.append(kwargs)
+        return Context()
+
+    async def for_browser(self, index):
+        return proxy
+
+    async def verify(self, context, index):
+        pass
+
+    urls = [URL + str(i) for i in range(3)]
+
+    def handler(url):
+        if url == INDEX:
+            return 200, INDEX_XML, {}
+        if url == MONTH:
+            entries = "".join(f"<url><loc>{u}</loc></url>" for u in urls)
+            return 200, f'<urlset xmlns="{NS}">{entries}</urlset>', {}
+        return 200, article(urls.index(url)), {}
+
+    def factory(**kwargs):
+        requests.append(kwargs)
+        return Session(handler)
+
+    original = hybrid.HybridClient
+    monkeypatch.setitem(sys.modules, "camoufox.async_api", SimpleNamespace(AsyncCamoufox=browser))
+    monkeypatch.setattr(ProxyRoutes, "for_browser", for_browser)
+    monkeypatch.setattr(ProxyRoutes, "verify", verify)
+    monkeypatch.setattr(QueueStore, "request_delay", lambda *args: 0)
+    monkeypatch.setattr(hybrid, "HybridClient", lambda *a, **k: original(*a, **k, session_factory=factory))
+    args = argparse.Namespace(
+        output=tmp_path,
+        profile=tmp_path / "profile",
+        proxy_provider="webshare",
+        transport="hybrid",
+        company_target=2,
+        workers=1,
+        delay=0,
+        year=2025,
+        month=["1"],
+    )
+    assert await run_public(args) == 0
+    assert browsers[0]["proxy"] == proxy
+    assert requests[0]["proxy"] == "http://test%40user:test%3Apassword@192.0.2.10:8000"
+    store = QueueStore(tmp_path / "companies.sqlite3")
+    try:
+        assert store.status()["companies"] == 2
+        assert store.status()["queues"]["public_discovery"] == {"completed": 2, "pending": 1}
+    finally:
+        store.close()
+
+
 async def test_concurrent_403_refreshes_session_once():
     context = Context()
     factory, sessions = factory_for(

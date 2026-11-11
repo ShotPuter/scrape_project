@@ -52,16 +52,20 @@ def format_message(snapshot):
     processed = sum(counts.get(status, 0) for status in terminal)
     errors = sum(counts.get(status, 0) for status in ("failed", "blocked", "captcha_required", "retry_wait"))
     target = snapshot["target"] if snapshot["target"] is not None else "все найденные"
+    stages = {"search": "поиск компаний", "download": "скачивание PDF", "collect": "сбор компаний из DeQuienes"}
+    if snapshot["stage"] == "collect":
+        processed = snapshot.get("companies", 0)
+    document_label = {"search": "Найдено CVE", "download": "PDF сохранено", "collect": "Компаний в БД"}
     text = (
         f"{headings[event]}\n"
-        f"Этап: {'поиск компаний' if snapshot['stage'] == 'search' else 'скачивание PDF'}\n"
+        f"Этап: {stages[snapshot['stage']]}\n"
         f"Запуск: {snapshot['run_id']}\n"
         f"Обработано: {processed}/{target}; выбрано: {snapshot['claimed']}\n"
         f"Успешно: {counts.get('completed', 0)}; без записей: {counts.get('not_found', 0)}\n"
         f"Без CVE: {counts.get('no_cve_found', 0)}; неоднозначно: {counts.get('ambiguous_match', 0)}\n"
         f"Активны: {counts.get('running', 0)}; ошибки/ожидание повтора: {errors}\n"
         f"CAPTCHA: {counts.get('captcha_required', 0)}\n"
-        f"{'Найдено CVE' if snapshot['stage'] == 'search' else 'PDF сохранено'}: {snapshot['documents']}\n"
+        f"{document_label[snapshot['stage']]}: {snapshot['documents']}\n"
         f"Подготовлено браузеров: {snapshot['ready_browsers']}/{snapshot['browsers']}; "
         f"вкладок на браузер: {snapshot['tabs_per_browser']}\n"
         f"Прокси: {snapshot['proxy_provider']}; проверено: {snapshot['verified_proxies']}\n"
@@ -88,7 +92,7 @@ class RunNotifications:
         self.ready = set()
         self.queue = asyncio.Queue()
         self.sender = self.timer = self.session = None
-        directory = "res_searches" if stage == "search" else "res_downloads"
+        directory = {"search": "res_searches", "download": "res_downloads", "collect": "public_collection"}[stage]
         self.path = args.output / directory / f"{report['run_id']}.telegram.jsonl"
         self.state = {
             "enabled": bool(self.token and self.chat),
@@ -116,7 +120,14 @@ class RunNotifications:
             "target": self.report["target"],
             "claimed": progress.get("claimed", 0),
             "statuses": statuses,
-            "documents": len(self.report.get("cves", [])) if self.stage == "search" else statuses.get("completed", 0),
+            "documents": (
+                self.report.get("companies", 0)
+                if self.stage == "collect"
+                else len(self.report.get("cves", []))
+                if self.stage == "search"
+                else statuses.get("completed", 0)
+            ),
+            "companies": self.report.get("companies", 0),
             "browsers": self.report["browsers"],
             "tabs_per_browser": self.report["tabs_per_browser"],
             "ready_browsers": len(self.ready),

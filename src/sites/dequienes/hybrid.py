@@ -36,9 +36,10 @@ def is_challenge(text: str) -> bool:
 
 
 class HybridClient:
-    def __init__(self, context, stage, request_gate, *, session_factory=None):
+    def __init__(self, context, stage, request_gate, *, session_factory=None, proxy_url=None):
         self.context, self.stage, self.request_gate = context, stage, request_gate
         self.session_factory = session_factory
+        self.proxy_url = proxy_url
         self.page = None
         self.session = None
         self.sessions = []
@@ -130,6 +131,7 @@ class HybridClient:
             max_clients=self.stage.tabs_per_browser,
             trust_env=False,
             verify=True,
+            **({"proxy": self.proxy_url} if self.proxy_url is not None else {}),
         )
         self.sessions.append(session)
         # Session credentials stay in memory and are only sent to validated archive URLs.

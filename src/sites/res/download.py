@@ -56,7 +56,10 @@ def selected_cves(store, args):
     found = {
         row[0]
         for row in store.db.execute(
-            "SELECT DISTINCT s.cve FROM res_document_sources s JOIN jobs j "
+            "WITH sources AS (SELECT cve,company_id FROM res_document_sources "
+            "UNION SELECT cve,company_id FROM document_sources "
+            "UNION SELECT cve,company_id FROM account_document_sources) "
+            "SELECT DISTINCT s.cve FROM sources s JOIN jobs j "
             "ON j.job_key=s.company_id AND j.queue='res_company_lookup' "
             "JOIN run_jobs r ON r.job_id=j.id WHERE r.run_id=?",
             (source_run,),
