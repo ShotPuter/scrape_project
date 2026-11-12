@@ -171,6 +171,20 @@ async def test_browser_download_correlates_verification_and_cleans_temp_file(tmp
     assert page.deleted
 
 
+async def test_opt_in_audio_solver_still_requires_verified_pdf(tmp_path):
+    called = []
+
+    async def solver(page, **kwargs):
+        called.append(page)
+
+    page = Page(tmp_path, payload={"d": {"ErrorMessage": "Captcha inválido"}})
+    with pytest.raises(SearchIssue) as error:
+        await download_certificate(page, CVE, tmp_path, captcha_solver=solver)
+    assert error.value.status == "captcha_required"
+    assert called == [page]
+    assert not list(tmp_path.rglob("*.pdf"))
+
+
 def arguments(tmp_path, **kwargs):
     return argparse.Namespace(
         output=tmp_path,

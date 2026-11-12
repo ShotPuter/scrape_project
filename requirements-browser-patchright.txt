@@ -1,0 +1,2 @@
+# RES/DeQuienes: Chrome + virtual display (install xvfb and xauth with the OS package manager).
+patchright==1.64.3

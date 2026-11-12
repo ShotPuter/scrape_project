@@ -115,7 +115,14 @@ class HybridClient:
         await self.request_gate()
         self.metrics["browser_navigations"] += 1
         self.progress("browser_navigation", last_url=safe_message(url), last_http_status=None)
-        response = await self.page.goto(url, wait_until="domcontentloaded", timeout=self.stage.timeout_seconds * 1000)
+        if self.stage.browser_engine == "patchright":
+            from src.sites.dequienes.navigation import navigate
+
+            response = await navigate(
+                self.page, url, timeout_ms=self.stage.timeout_seconds * 1000, on_progress=self.progress
+            )
+        else:
+            response = await self.page.goto(url, wait_until="domcontentloaded", timeout=self.stage.timeout_seconds * 1000)
         self.progress("browser_response", last_http_status=response.status if response else 0)
         return response
 
@@ -140,6 +147,8 @@ class HybridClient:
         try:
             response = await self._navigate(url)
             if response and response.status in {403, 503}:
+                if self.stage.browser_engine == "patchright":
+                    return None
                 self.progress("automatic_browser_check")
                 print("Hybrid: waiting for the automatic browser check to finish.", flush=True)
                 if arrived:
@@ -210,7 +219,7 @@ class HybridClient:
             factory = self.session_factory
         self.progress("creating_http_session")
         session = factory(
-            impersonate="firefox",
+            impersonate="chrome" if self.stage.browser_engine == "patchright" else "firefox",
             headers={"User-Agent": user_agent, "Accept-Language": "es-CL,es;q=0.9"},
             timeout=self.stage.timeout_seconds,
             max_clients=self.stage.tabs_per_browser,

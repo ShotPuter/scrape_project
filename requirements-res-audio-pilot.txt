@@ -1,0 +1,8 @@
+# Isolated Python 3.12+ experiment; do not replace the production environment.
+botonomus==0.4.1
+patchright==1.64.3
+faster-whisper==1.2.1
+av==14.2.0
+huggingface-hub==0.36.0
+python-dotenv>=1.0,<2
+beautifulsoup4>=4.12,<5

@@ -34,7 +34,8 @@ async def collect(args, store, provider):
         "run_id": public_id,
         "target": args.limit,
         "browsers": 1,
-        "tabs_per_browser": 1,
+        "tabs_per_browser": args.collect_workers,
+        "browser_engine": getattr(args, "collect_browser_engine", getattr(args, "browser_engine", "patchright")),
         "proxy_provider": provider,
         "proxy_routes": [],
         "state": "running",
@@ -77,7 +78,8 @@ async def collect(args, store, provider):
         run_id=public_id,
         workers=args.collect_workers,
         max_in_flight=args.collect_workers,
-        transport="hybrid",
+        transport=getattr(args, "collect_transport", "browser"),
+        browser_engine=getattr(args, "collect_browser_engine", getattr(args, "browser_engine", "patchright")),
         proxy_provider=provider,
         rate_per_minute=args.collect_rate_per_minute,
         delay=0.3,
@@ -201,7 +203,9 @@ def main():
     parser.add_argument("--month", action="append", type=month_value, default=None)
     parser.add_argument("--limit", type=int, default=100, help="Unique companies to discover and check")
     parser.add_argument("--run-id", default="res-companies-100")
-    parser.add_argument("--collect-workers", type=int, default=4, help="Concurrent public HTTP workers")
+    parser.add_argument("--collect-browser-engine", choices=["patchright", "camoufox"], default="patchright")
+    parser.add_argument("--collect-transport", choices=["browser", "hybrid"], default="browser")
+    parser.add_argument("--collect-workers", type=int, default=4, help="Concurrent public browser tabs or HTTP workers")
     parser.add_argument("--collect-rate-per-minute", type=float, default=60)
     parser.add_argument(
         "--collect-proxy-provider",
@@ -216,6 +220,7 @@ def main():
     parser.add_argument("--retry-errors", action="store_true")
     parser.add_argument("--headed", action="store_true")
     add_browser_arguments(parser)
+    parser.set_defaults(proxy_provider="webshare")
     args = parser.parse_args()
     args.month = args.month or ["1"]
     try:

@@ -23,6 +23,7 @@ class StageSettings:
     proxy_mode: str = "direct"
     transport: str = "browser"
     session_refreshes: int = 2
+    browser_engine: str = "patchright"
 
     def __post_init__(self):
         for name in ("browsers", "tabs_per_browser", "max_in_flight", "max_attempts"):
@@ -37,6 +38,8 @@ class StageSettings:
                 raise ValueError(f"{name} must be finite")
             if value < 0 or (name in {"rate_per_minute", "timeout_seconds", "lease_seconds"} and value == 0):
                 raise ValueError(f"Invalid {name}")
+        if self.browser_engine not in {"patchright", "camoufox"}:
+            raise ValueError("browser_engine must be patchright or camoufox")
         if self.transport not in {"browser", "hybrid"}:
             raise ValueError("transport must be browser or hybrid")
         if type(self.session_refreshes) is not int or self.session_refreshes < 0:
@@ -52,8 +55,8 @@ class PipelineSettings:
     all_months: bool = False
     output: Path = Path("data/dequienes-companies")
     profile: Path = Path("data/dequienes-companies-profile")
-    public: StageSettings = field(default_factory=lambda: StageSettings(tabs_per_browser=4, transport="hybrid"))
-    account: StageSettings = field(default_factory=lambda: StageSettings(max_in_flight=1))
+    public: StageSettings = field(default_factory=lambda: StageSettings(tabs_per_browser=4))
+    account: StageSettings = field(default_factory=lambda: StageSettings(max_in_flight=1, browser_engine="camoufox"))
     res: StageSettings = field(default_factory=lambda: StageSettings(max_in_flight=1))
 
     def __post_init__(self):

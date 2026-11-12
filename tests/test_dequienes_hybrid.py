@@ -124,7 +124,7 @@ def factory_for(handler):
 async def test_one_browser_page_and_parallel_http_without_cookie_logs(capsys):
     context = Context()
     factory, sessions = factory_for(lambda generation, url: (200, article(), {}))
-    async with HybridClient(context, StageSettings(), gate, session_factory=factory) as client:
+    async with HybridClient(context, StageSettings(browser_engine="camoufox"), gate, session_factory=factory) as client:
         texts = await asyncio.gather(*(client.get_html(URL + str(i)) for i in range(4)))
         assert len(texts) == 4
         assert len(context.pages) == 1
@@ -181,6 +181,7 @@ async def test_public_webshare_browser_and_http_use_the_same_proxy(tmp_path, mon
         profile=tmp_path / "profile",
         proxy_provider="webshare",
         transport="hybrid",
+        browser_engine="camoufox",
         company_target=2,
         workers=1,
         delay=0,
@@ -203,7 +204,7 @@ async def test_concurrent_403_refreshes_session_once():
     factory, sessions = factory_for(
         lambda generation, url: (403, "blocked", {}) if generation == 1 else (200, article(), {})
     )
-    async with HybridClient(context, StageSettings(), gate, session_factory=factory) as client:
+    async with HybridClient(context, StageSettings(browser_engine="camoufox"), gate, session_factory=factory) as client:
         await asyncio.gather(client.get_html(URL), client.get_html(URL + "2"))
         assert len(sessions) == 2
         assert client.metrics["session_refreshes"] == 1
@@ -214,7 +215,7 @@ async def test_concurrent_403_refreshes_session_once():
 
 async def test_429_is_not_a_reason_to_rotate_browser_session():
     factory, sessions = factory_for(lambda generation, url: (429, "", {"Retry-After": "120"}))
-    async with HybridClient(Context(), StageSettings(), gate, session_factory=factory) as client:
+    async with HybridClient(Context(), StageSettings(browser_engine="camoufox"), gate, session_factory=factory) as client:
         with pytest.raises(HTTPFailure) as error:
             await client.get_html(URL)
         assert error.value.retry_after == 120
@@ -224,7 +225,9 @@ async def test_429_is_not_a_reason_to_rotate_browser_session():
 
 async def test_403_refresh_budget_is_bounded():
     factory, sessions = factory_for(lambda generation, url: (403, "blocked", {}))
-    async with HybridClient(Context(), StageSettings(session_refreshes=1), gate, session_factory=factory) as client:
+    async with HybridClient(
+        Context(), StageSettings(session_refreshes=1, browser_engine="camoufox"), gate, session_factory=factory
+    ) as client:
         for _ in range(2):
             with pytest.raises(ValueError, match="403"):
                 await client.get_html(URL)
@@ -234,7 +237,7 @@ async def test_403_refresh_budget_is_bounded():
 
 async def test_stream_limit_and_untrusted_url_rejection():
     factory, sessions = factory_for(lambda generation, url: (200, b"x" * (MAX_RESPONSE_BYTES + 1), {}))
-    async with HybridClient(Context(), StageSettings(), gate, session_factory=factory) as client:
+    async with HybridClient(Context(), StageSettings(browser_engine="camoufox"), gate, session_factory=factory) as client:
         with pytest.raises(ValueError, match="10 MiB"):
             await client.get_html(URL)
         count = len(sessions[0].requests)
@@ -283,6 +286,7 @@ async def test_hybrid_pipeline_resumes_queue_without_browser_tabs(tmp_path, monk
         delay=0,
         workers=4,
         transport="hybrid",
+        browser_engine="camoufox",
     )
     assert await run_public(args) == 0
     first = json.loads((tmp_path / "queues.json").read_text())
@@ -318,7 +322,7 @@ async def test_initial_browser_challenge_is_allowed_to_finish():
 
     context = ChallengeContext()
     factory, _ = factory_for(lambda generation, url: (200, article(), {}))
-    async with HybridClient(context, StageSettings(), gate, session_factory=factory) as client:
+    async with HybridClient(context, StageSettings(browser_engine="camoufox"), gate, session_factory=factory) as client:
         assert client.metrics["browser_navigations"] == 1
         assert context.pages[0].visited == [INDEX]
 
@@ -341,7 +345,7 @@ async def test_bootstrap_retries_user_agent_during_automatic_navigation():
 
     context = NavigatingContext()
     factory, _ = factory_for(lambda generation, url: (200, article(), {}))
-    async with HybridClient(context, StageSettings(), gate, session_factory=factory):
+    async with HybridClient(context, StageSettings(browser_engine="camoufox"), gate, session_factory=factory):
         assert context.pages[0].calls == 2
 
 
@@ -377,7 +381,7 @@ async def test_homepage_fallback_does_not_require_a_search_input():
 
     context.new_page = new_page
     factory, _ = factory_for(lambda generation, url: (200, article(), {}))
-    async with HybridClient(context, StageSettings(), gate, session_factory=factory):
+    async with HybridClient(context, StageSettings(browser_engine="camoufox"), gate, session_factory=factory):
         assert page.visited == [INDEX, "https://dequienes.cl/", INDEX]
 
 
@@ -402,7 +406,7 @@ async def test_fast_automatic_reload_before_goto_returns_is_not_missed():
 
     context.new_page = new_page
     factory, _ = factory_for(lambda generation, url: (200, article(), {}))
-    async with HybridClient(context, StageSettings(), gate, session_factory=factory):
+    async with HybridClient(context, StageSettings(browser_engine="camoufox"), gate, session_factory=factory):
         assert page.visited == [INDEX]
         assert page.listeners == []
 
@@ -432,7 +436,7 @@ async def test_blocked_bootstrap_saves_metadata_html_and_screenshot(tmp_path):
         return page
 
     context.new_page = new_page
-    client = HybridClient(context, StageSettings(), gate, diagnostics_dir=tmp_path)
+    client = HybridClient(context, StageSettings(browser_engine="camoufox"), gate, diagnostics_dir=tmp_path)
     with pytest.raises(BootstrapFailure) as error:
         async with client:
             pytest.fail("Blocked bootstrap must not start HTTP collection")

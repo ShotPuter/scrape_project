@@ -33,7 +33,7 @@ async def solve_checkbox(page, *, timeout_ms=60000, captcha_seconds=30):
         raise SearchIssue("captcha_required", "CAPTCHA checkbox was not available") from exc
 
 
-async def lookup(page, company, *, timeout_ms=60000, captcha_seconds=30):
+async def lookup(page, company, *, timeout_ms=60000, captcha_seconds=30, captcha_solver=None, response_reader=None):
     query = company.get("rut") or company["company_name"]
     result = {**company, "query": query, "source_url": FORM_URL, "events": []}
     response = await page.goto(FORM_URL, wait_until="domcontentloaded", timeout=timeout_ms)
@@ -45,7 +45,7 @@ async def lookup(page, company, *, timeout_ms=60000, captcha_seconds=30):
     await page.locator("#ddlTipoRegistro").select_option("1")
     await page.locator("#ddlTipoBusqueda").select_option("1" if company.get("rut") else "2")
     await page.locator("#txtRut" if company.get("rut") else "#txtRSocial").fill(query)
-    await solve_checkbox(page, timeout_ms=timeout_ms, captcha_seconds=captcha_seconds)
+    await (captcha_solver or solve_checkbox)(page, timeout_ms=timeout_ms, captcha_seconds=captcha_seconds)
 
     def is_response(candidate, path):
         parts = urlsplit(candidate.url)
@@ -60,14 +60,14 @@ async def lookup(page, company, *, timeout_ms=60000, captcha_seconds=30):
             raise SearchIssue(
                 "blocked" if search_response.status in {403, 429} else "retry_wait", f"Search HTTP {search_response.status}"
             )
-        search_link(await search_response.json())
+        search_link(await (response_reader(search_response) if response_reader else search_response.json()))
     details_response = await details_event.value
     if details_response.status != 200:
         raise SearchIssue(
             "blocked" if details_response.status in {403, 429} else "retry_wait",
             f"Action list HTTP {details_response.status}",
         )
-    actions = parse_actions(await details_response.json())
+    actions = parse_actions(await (response_reader(details_response) if response_reader else details_response.json()))
     status, matched = match_actions(actions, company)
     result.update(status=status, events=matched, res_cves=sorted({e["cve"] for e in matched if e["cve"]}))
     if status == "ambiguous_match":

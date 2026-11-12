@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from src.sites.dequienes.companies import exclusive_profile
 from src.sites.res.proxies import ProxyRoutes, ProxySetupError
+from src.utils.error_details import safe_message
 
 
 @dataclass(frozen=True)
@@ -38,7 +39,8 @@ def browser_layout(args):
 
 
 def add_browser_arguments(parser):
-    parser.add_argument("--browsers", type=int, default=1, help="Independent Camoufox browsers")
+    parser.add_argument("--browser-engine", choices=["patchright", "camoufox"], default="patchright")
+    parser.add_argument("--browsers", type=int, default=1, help="Independent browser instances")
     parser.add_argument("--tabs-per-browser", type=int, help="Worker tabs per browser (default: 1)")
     parser.add_argument("--workers", type=int, help="Legacy alias for --tabs-per-browser")
     parser.add_argument("--checkpoint-interval", type=float, default=15, help="Seconds between progress snapshots")
@@ -69,8 +71,15 @@ class BrowserStartError(RuntimeError):
 class BrowserPool:
     """Lazy, independent persistent contexts. Tabs remain alive until pool shutdown."""
 
-    def __init__(self, profile, layout, *, headed=False, pdf=False, proxy_provider="direct", on_ready=None):
+    def __init__(
+        self, profile, layout, *, headed=False, pdf=False, proxy_provider="direct", on_ready=None, engine="camoufox"
+    ):
         self.layout, self.headed, self.pdf = layout, headed, pdf
+        self.engine = engine
+        if engine not in {"patchright", "camoufox"}:
+            raise ValueError("Unknown browser engine")
+        if engine == "patchright":
+            profile = profile.with_name(profile.name + "-patchright")
         self.on_ready = on_ready
         # Browser 1 keeps the old profile path; other slots have stable sibling profiles.
         self.profiles = [profile] + [
@@ -103,22 +112,13 @@ class BrowserPool:
             if browser not in self.pages:
                 profile = self.profiles[browser]
                 try:
-                    from camoufox.async_api import AsyncCamoufox
+                    from src.sites.res.engines import launch_context
 
                     self.stack.enter_context(exclusive_profile(profile))
                     proxy = await self.routes.for_browser(browser)
-                    options = {
-                        "headless": False if self.headed else "virtual",
-                        "os": "linux",
-                        "locale": "es-CL",
-                        "persistent_context": True,
-                        "user_data_dir": str(profile.resolve()),
-                    }
-                    if self.pdf:
-                        options.update(accept_downloads=True, firefox_user_prefs={"pdfjs.disabled": True})
-                    if proxy is not None:
-                        options["proxy"] = proxy
-                    context = await self.stack.enter_async_context(AsyncCamoufox(**options))
+                    context = await self.stack.enter_async_context(
+                        launch_context(profile, proxy=proxy, engine=self.engine, headed=self.headed, pdf=self.pdf)
+                    )
                     for extra in list(context.pages)[1:]:
                         await extra.close()
                     pages = [context.pages[0] if context.pages else await context.new_page()]
@@ -135,8 +135,8 @@ class BrowserPool:
                     error = BrowserStartError(
                         f"RES browser {browser + 1}: {exc}"
                         if isinstance(exc, ProxySetupError)
-                        else f"Cannot start RES browser {browser + 1}; close other processes using profile {profile} "
-                        f"and check Camoufox ({type(exc).__name__})"
+                        else f"Cannot start RES browser {browser + 1} ({self.engine}): "
+                        f"{type(exc).__name__}: {safe_message(exc)}"
                     )
                     self.errors[browser] = error
                     raise error from exc

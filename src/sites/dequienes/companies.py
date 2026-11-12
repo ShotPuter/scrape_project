@@ -175,7 +175,12 @@ async def fetch(page, url: str, args, *, sitemap_index: bool | None = None):
             gate = getattr(args, "request_gate", None)
             if gate:
                 await gate()
-            response = await page.goto(source_url(url), wait_until="domcontentloaded", timeout=args.timeout * 1000)
+            if getattr(args, "browser_engine", "camoufox") == "patchright":
+                from src.sites.dequienes.navigation import navigate
+
+                response = await navigate(page, source_url(url), timeout_ms=args.timeout * 1000)
+            else:
+                response = await page.goto(source_url(url), wait_until="domcontentloaded", timeout=args.timeout * 1000)
             source_url(page.url)
             if not response or response.status != 200:
                 raise ValueError(f"HTTP {response.status if response else 'no response'}")
@@ -301,6 +306,7 @@ def main() -> None:
     parser.add_argument("--max-documents", type=int, help="RES-stage run limit, reserved for its worker")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--profile", type=Path)
+    parser.add_argument("--browser-engine", choices=["patchright", "camoufox"])
     parser.add_argument("--workers", type=int, help="Concurrent HTTP workers or browser tabs (default: 4)")
     parser.add_argument("--max-in-flight", type=int, help="Public running-job cap shared through the database")
     parser.add_argument("--rate-per-minute", type=float, help="Public navigation rate shared through the database")

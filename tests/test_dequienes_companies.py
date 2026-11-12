@@ -141,6 +141,7 @@ async def test_run_resumes_without_revisiting_collected_publications(tmp_path, m
         timeout=10,
         workers=4,
         transport="browser",
+        browser_engine="camoufox",
     )
     assert await companies.run(args) == 0
     assert visited == [ARTICLE]

@@ -14,3 +14,15 @@ def test_container_entrypoint_forwards_flags_and_stage(monkeypatch, stage):
     server.main()
     assert forwarded[:4] == ["--output", "data/example", "--browsers", "5"]
     assert forwarded[4:] == (["--action", stage] if stage in {"status", "export"} else [])
+
+
+def test_benchmark_entrypoint_forwards_flags_and_exit_code(monkeypatch):
+    from src.sites.res import benchmark
+
+    seen = []
+    monkeypatch.setattr(benchmark, "main", lambda args: seen.extend(args) or 2)
+    monkeypatch.setattr(sys, "argv", ["server", "benchmark", "--limit", "150", "--browsers", "2"])
+    with pytest.raises(SystemExit) as stopped:
+        server.main()
+    assert stopped.value.code == 2
+    assert seen == ["--limit", "150", "--browsers", "2"]

@@ -5,6 +5,8 @@ services:
       context: .
       dockerfile: Dockerfile.res
     init: true
+    security_opt:
+      - seccomp=docker/chrome-seccomp.json
     restart: "no"
     shm_size: ${RES_SHM_SIZE:-2gb}
     mem_limit: ${RES_MEMORY_LIMIT:-12g}
@@ -13,10 +15,15 @@ services:
     stop_signal: SIGINT
     stop_grace_period: 1m
     environment:
+      BRIGHTDATA_PROXY_SERVER: ${BRIGHTDATA_PROXY_SERVER:-http://brd.superproxy.io:44445}
+      BRIGHTDATA_PROXY_USERNAME: ${BRIGHTDATA_PROXY_USERNAME:-}
+      BRIGHTDATA_PROXY_PASSWORD: ${BRIGHTDATA_PROXY_PASSWORD:-}
       WEBSHARE_API_TOKEN: ${WEBSHARE_API_TOKEN:-}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
       RES_TELEGRAM_INTERVAL_MINUTES: ${RES_TELEGRAM_INTERVAL_MINUTES:-5}
+      RES_AUDIO_THREADS: ${RES_AUDIO_THREADS:-2}
+      RES_RETRY_ERRORS: ${RES_RETRY_ERRORS:-0}
     volumes:
       - type: bind
         source: ${RES_DATA_DIR:-./data}
@@ -24,31 +31,39 @@ services:
         bind:
           create_host_path: false
     command:
-      - pipeline
+      - benchmark
       - --year
       - "${RES_YEAR:-2025}"
       - --month
       - "${RES_MONTH:-1}"
-      - --output
-      - data/dequienes-companies-2025
-      - --profile
-      - data/res-search-profile
       - --limit
       - "${RES_LIMIT:-100}"
       - --run-id
-      - "${RES_SEARCH_RUN_ID:-res-companies-100}"
+      - "${RES_RUN_ID:-res-2025-01-100}"
+      - --output
+      - data/res-benchmark
       - --browsers
-      - "${RES_BROWSERS:-5}"
-      - --tabs-per-browser
-      - "${RES_TABS_PER_BROWSER:-2}"
-      - --rate-per-minute
-      - "${RES_RATE_PER_MINUTE:-6}"
-      - --checkpoint-interval
-      - "${RES_CHECKPOINT_INTERVAL:-15}"
+      - "${RES_BROWSERS:-2}"
       - --proxy-provider
-      - webshare
-      - --collect-proxy-provider
-      - "${RES_COLLECT_PROXY_PROVIDER:-inherit}"
+      - "${RES_PROXY_PROVIDER:-brightdata}"
+      - --max-documents
+      - "${RES_MAX_DOCUMENTS:-0}"
+      - --proxy-sessions
+      - "${RES_PROXY_SESSIONS:-0}"
+      - --tokens-per-proxy
+      - "${RES_TOKENS_PER_PROXY:-20}"
+      - --company-attempts
+      - "${RES_COMPANY_ATTEMPTS:-2}"
+      - --max-failures
+      - "${RES_MAX_FAILURES:-20}"
+      - --timeout
+      - "${RES_TIMEOUT:-40}"
+      - --delay
+      - "${RES_DELAY:-3}"
+      - --checkpoint-seconds
+      - "${RES_CHECKPOINT_INTERVAL:-15}"
+      - --telegram-minutes
+      - "${RES_TELEGRAM_INTERVAL_MINUTES:-5}"
     logging:
       driver: json-file
       options:

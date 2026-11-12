@@ -2,6 +2,10 @@
 !Dockerfile.res
 !docker/
 !docker/res-requirements.txt
+!docker/brightdata-proxy-ca.crt
+!scripts/
+!scripts/res_free_pilot.py
+!scripts/res_audio_pilot.py
 !src/
 !src/**
 **/__pycache__

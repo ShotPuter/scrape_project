@@ -22,7 +22,7 @@ def certificate_link(payload):
         raise SearchIssue("retry_wait", "Unexpected certificate URL") from exc
 
 
-async def download_certificate(page, cve, output, *, timeout_ms=60000, captcha_seconds=30):
+async def download_certificate(page, cve, output, *, timeout_ms=60000, captcha_seconds=30, captcha_solver=None):
     cve = validate_cve(cve)
     response = await page.goto(RES_URL, wait_until="domcontentloaded", timeout=timeout_ms)
     if not response or response.status != 200:
@@ -31,7 +31,7 @@ async def download_certificate(page, cve, output, *, timeout_ms=60000, captcha_s
     if res_url(page.url) != RES_URL:
         raise SearchIssue("blocked", "Unexpected verifier form redirect")
     await page.locator("#boxer_content_txtCve").fill(cve)
-    await solve_checkbox(page, timeout_ms=timeout_ms, captcha_seconds=captcha_seconds)
+    await (captcha_solver or solve_checkbox)(page, timeout_ms=timeout_ms, captcha_seconds=captcha_seconds)
 
     def is_verification(candidate):
         parts = urlsplit(candidate.url)

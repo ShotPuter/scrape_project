@@ -16,7 +16,7 @@ from urllib.parse import quote
 from src.sites.dequienes.extraction import extract_candidates
 from src.sites.dequienes.queue import LostLease, QueueStore
 from src.sites.dequienes.settings import PipelineSettings, read_settings
-from src.utils.atomic import atomic_text_writer, atomic_write_json
+from src.utils.atomic import atomic_text_writer, atomic_write_json, atomic_write_text
 
 
 def settings_from_args(args) -> PipelineSettings:
@@ -43,6 +43,7 @@ def settings_from_args(args) -> PipelineSettings:
         ("max_attempts", "max_attempts"),
         ("proxy_provider", "proxy_mode"),
         ("transport", "transport"),
+        ("browser_engine", "browser_engine"),
         ("session_refreshes", "session_refreshes"),
     ]:
         value = getattr(args, arg, None)
@@ -118,6 +119,7 @@ class PublicWorker:
             output=self.settings.output,
             fetch_attempts=attempts,
             request_gate=self.request_gate,
+            browser_engine=stage.browser_engine,
         )
 
     async def request_gate(self):
@@ -277,7 +279,7 @@ async def run_public(args) -> int:
                     job, companies.parse_company(html, job["key"]), extract_candidates(html, job["key"])
                 )
             return 0
-        from camoufox.async_api import AsyncCamoufox
+        from src.sites.res.engines import launch_context
 
         selection = SimpleNamespace(year=settings.year, month=settings.months, all_months=settings.all_months)
         worker = PublicWorker(store, settings, run_id, None, company_target=target)
@@ -291,14 +293,8 @@ async def run_public(args) -> int:
         # A separate profile lock permits independent processes to share the queue database.
         with companies.exclusive_profile(settings.profile):
             proxy = await routes.for_browser(0)
-            async with AsyncCamoufox(
-                headless="virtual",
-                os="linux",
-                locale="es-CL",
-                persistent_context=True,
-                user_data_dir=str(settings.profile.resolve()),
-                **({"proxy": proxy} if proxy is not None else {}),
-            ) as context:
+            browser_profile = settings.profile.with_name(settings.profile.name + "-" + settings.public.browser_engine)
+            async with launch_context(browser_profile, proxy=proxy, engine=settings.public.browser_engine) as context:
                 # Keep a tab alive while the preflight tab is closed.
                 if proxy is not None:
                     if not context.pages:
@@ -336,6 +332,38 @@ async def run_public(args) -> int:
                         atomic_write_json(settings.output / "hybrid_report.json", {"run_id": run_id, **client.metrics})
                 else:
                     page = await context.new_page()
+                    if settings.public.browser_engine == "patchright":
+                        from src.sites.dequienes.navigation import navigate
+
+                        phase_observer = getattr(args, "on_collection_phase", None)
+
+                        def browser_progress(phase, **details):
+                            if phase_observer:
+                                phase_observer({"phase": phase, **details})
+
+                        browser_progress("automatic_browser_check")
+                        response = await navigate(
+                            page,
+                            companies.BASE + "/",
+                            timeout_ms=settings.public.timeout_seconds * 1000,
+                            on_progress=browser_progress,
+                        )
+                        from src.sites.dequienes.hybrid import BootstrapFailure, is_challenge
+
+                        if not response or response.status != 200 or is_challenge(await response.text()):
+                            diagnostics = settings.output / "diagnostics" / run_id
+                            diagnostics.mkdir(parents=True, exist_ok=True)
+                            with suppress(Exception):
+                                atomic_write_text(diagnostics / "page.html", (await page.content())[: 1024 * 1024])
+                                await page.screenshot(path=str(diagnostics / "page.png"), timeout=5000)
+                            status = response.status if response else 0
+                            browser_progress(
+                                "automatic_browser_check", last_http_status=status, diagnostics=str(diagnostics)
+                            )
+                            raise BootstrapFailure(
+                                f"DeQuienes browser session check did not complete (HTTP {status})", state="blocked"
+                            )
+                        browser_progress("session_ready", last_http_status=response.status)
 
                     async def browser_sitemap(url, *, index):
                         return await companies.fetch(page, url, browser_args, sitemap_index=index)

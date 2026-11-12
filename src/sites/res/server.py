@@ -9,7 +9,9 @@ import sys
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, add_help=False)
-    parser.add_argument("stage", choices=["pipeline", "collect", "search", "download", "status", "export", "telegram-test"])
+    parser.add_argument(
+        "stage", choices=["benchmark", "pipeline", "collect", "search", "download", "status", "export", "telegram-test"]
+    )
     args, remainder = parser.parse_known_args()
     if args.stage == "telegram-test":
         if remainder:
@@ -17,6 +19,10 @@ def main():
         from src.sites.res.telegram import test_delivery
 
         raise SystemExit(asyncio.run(test_delivery()))
+    if args.stage == "benchmark":
+        from src.sites.res.benchmark import main as benchmark_main
+
+        raise SystemExit(benchmark_main(remainder))
     if args.stage == "pipeline":
         from src.sites.res.pipeline import main as worker_main
     elif args.stage == "collect":

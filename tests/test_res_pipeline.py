@@ -60,7 +60,8 @@ async def test_empty_directory_collects_then_searches_then_downloads_all_and_res
     async def collect(public):
         calls.append("collect")
         assert public.limit is None and public.company_target == 3
-        assert public.transport == "hybrid"
+        assert public.transport == "browser"
+        assert public.browser_engine == "patchright"
         assert public.proxy_provider == "direct"
         store = QueueStore(public.output / "companies.sqlite3")
         assert store.status()["companies"] == 0

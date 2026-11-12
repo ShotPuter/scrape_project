@@ -109,9 +109,17 @@ async def run(args):
             reset = store.retry_stage_jobs("certificate_download", run_id=args.run_id, keys=keys)
             print(f"Reset certificate error jobs: {reset}", flush=True)
         provider = proxy_provider(args)
-        pool = BrowserPool(args.profile, layout, headed=args.headed, pdf=True, proxy_provider=provider)
+        pool = BrowserPool(
+            args.profile,
+            layout,
+            headed=args.headed,
+            pdf=True,
+            proxy_provider=provider,
+            engine=getattr(args, "browser_engine", "camoufox"),
+        )
         report = {
             "run_id": run_id,
+            "browser_engine": pool.engine,
             "target": args.limit,
             "from_search_run": getattr(args, "from_search_run", None),
             "workers": layout.workers,

@@ -30,6 +30,7 @@ from src.sites.res.runtime import (
 from src.sites.res.source import FORM_URL, SearchIssue
 from src.sites.res.telegram import RunNotifications
 from src.utils.atomic import atomic_text_writer, atomic_write_json
+from src.utils.error_details import safe_message
 
 
 def save_report(store, output, report, *, from_queue=False):
@@ -99,9 +100,16 @@ async def run(args):
             print(f"Reset RES error jobs: {store.retry_res_jobs(args.run_id)}", flush=True)
         store.seed_res_jobs(args.company_id, args.max_attempts)
         provider = proxy_provider(args)
-        pool = BrowserPool(args.profile, layout, headed=args.headed, proxy_provider=provider)
+        pool = BrowserPool(
+            args.profile,
+            layout,
+            headed=args.headed,
+            proxy_provider=provider,
+            engine=getattr(args, "browser_engine", "camoufox"),
+        )
         report = {
             "run_id": run_id,
+            "browser_engine": pool.engine,
             "target": args.limit,
             "browsers": layout.browsers,
             "tabs_per_browser": layout.tabs_per_browser,
@@ -175,7 +183,7 @@ async def run(args):
                             "source_url": FORM_URL,
                             "events": [],
                             "status": "retry_wait",
-                            "error": f"{type(exc).__name__}: no confirmed search result",
+                            "error": safe_message(f"{type(exc).__name__}: {exc}"),
                         }
                     result["elapsed_seconds"] = round(monotonic() - started, 2)
                     result["worker"] = owner
