@@ -25,6 +25,7 @@ import aiohttp
 from scripts import res_free_pilot as pilot
 from src.services.telegram import send_telegram
 from src.sites.res.open_data import select_companies
+from src.sites.res.tracking import TrackingStore, import_run
 from src.utils.atomic import atomic_write_json
 from src.utils.error_details import safe_message
 
@@ -37,6 +38,8 @@ ERRORS = {
     "proxy_auth_failed",
     "documents_failed",
     "retry_wait",
+    "partial",
+    "missing_pdf",
 }
 
 
@@ -80,8 +83,14 @@ def prepare_queues(args, root, selection):
         directory = root / "workers" / f"w{index:02d}"
         directory.mkdir(parents=True, exist_ok=True)
         assigned = [c for c in selection if worker_index(c["company_id"], args.browsers) == index]
+        tracking = getattr(args, "tracking_store", None)
+        if tracking:
+            tracking.restore_worker(directory, assigned)
         state = pilot.load_state(directory / "state.json")
         previous = latest_results(directory)
+        if tracking:
+            for row in tracking.rows():
+                previous[row["company_id"]] = {**previous.get(row["company_id"], {}), **row}
         pending = []
         for company in assigned:
             complete = pilot.cached_company_result(company, state, args, directory)
@@ -110,6 +119,12 @@ def child_command(args, directory, count):
         "0",
         "--output",
         str(directory),
+        "--tracking-db",
+        str(getattr(args, "tracking_db", None) or args.output / "tracking.sqlite3"),
+        "--tracking-run-id",
+        args.run_id,
+        "--tracking-worker",
+        directory.name,
         "--profile",
         str(directory / "profile"),
         "--engine",
@@ -162,6 +177,13 @@ def collect_rows(args, root, companies):
             if saved:
                 documents.append({**saved, "local_path": str((directory / saved["local_path"]).relative_to(root))})
         row["documents"] = documents
+        selected = row["cves"][: args.max_documents] if args.max_documents else row["cves"]
+        available = {doc["cve"] for doc in documents}
+        if selected and set(selected).issubset(available):
+            row["status"] = "downloaded"
+            row.pop("error", None)
+        elif row["status"] == "downloaded":
+            row["status"] = "partial" if available else "missing_pdf"
         rows.append(row)
     return rows
 
@@ -291,6 +313,22 @@ def final_message(args, summary):
 
 
 async def execute(args, root):
+    path = getattr(args, "tracking_db", None) or args.output / "tracking.sqlite3"
+    args.tracking_store = TrackingStore(path, args.run_id)
+    try:
+        return await _execute(args, root)
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        args.tracking_store.run_status("interrupted")
+        raise
+    except Exception:
+        args.tracking_store.run_status("failed")
+        raise
+    finally:
+        args.tracking_store.close()
+        del args.tracking_store
+
+
+async def _execute(args, root):
     started = time.monotonic()
     invocation = {
         "run_id": args.run_id,
@@ -321,7 +359,10 @@ async def execute(args, root):
     invocation["selection_reused"] = bool(previous)
     companies = selection["companies"]
     write_database(root / "companies.sqlite3", companies)
+    import_run(args.tracking_store, root, max_documents=args.max_documents)
     queues, baseline = prepare_queues(args, root, companies)
+    # Files restored from the shared ledger are cache hits, including a new run folder.
+    invocation["prior_pdfs"] = [str(p.relative_to(root)) for p in root.glob("workers/w*/pdf/**/*.pdf")]
     if queues:
         required = (
             ("BRIGHTDATA_PROXY_USERNAME", "BRIGHTDATA_PROXY_PASSWORD")
@@ -339,6 +380,7 @@ async def execute(args, root):
     for signum in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(signum, stop.set)
     invocation["state"] = "running"
+    args.tracking_store.run_status("running")
 
     async def launch(index, directory, count):
         log = directory / f"worker-{invocation['invocation_id']}.log"
@@ -436,6 +478,7 @@ async def execute(args, root):
     invocation["elapsed_seconds"] = round(time.monotonic() - started, 3)
     invocation["finished_at"] = datetime.now(UTC).isoformat()
     invocation["state"] = "interrupted" if interrupted else "finished"
+    import_run(args.tracking_store, root, max_documents=args.max_documents)
     summary = statistics_report(args, root, companies, invocation)
     # Include final cache/PDF integrity checks in the wall-clock measurement.
     summary["elapsed_seconds"] = round(time.monotonic() - started, 3)
@@ -447,6 +490,10 @@ async def execute(args, root):
     incomplete = any(r["status"] not in {"downloaded", "not_found", "no_cve_found"} for r in summary["rows"])
     if incomplete and not interrupted:
         summary["state"] = "partial"
+    for row in summary["rows"]:
+        args.tracking_store.company_status(row["company_id"], row["status"], row.get("error"))
+    args.tracking_store.run_status(summary["state"])
+    summary["tracking_database"] = str(args.tracking_store.path)
     export(root, summary)
     atomic_write_json(root / f"benchmark-{invocation['invocation_id']}.json", summary)
     atomic_write_json(root / "progress.json", {k: v for k, v in summary.items() if k != "rows"})
@@ -485,6 +532,7 @@ def parse_args(argv=None):
     )
     parser.add_argument("--refresh", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--output", type=Path, default=Path("data/res-benchmark"))
+    parser.add_argument("--tracking-db", type=Path, help="Shared SQLite ledger; default <output>/tracking.sqlite3")
     parser.add_argument("--run-id", default="res-2025-01-100")
     args = parser.parse_args(argv)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,100}", args.run_id):

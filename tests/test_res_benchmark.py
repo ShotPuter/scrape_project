@@ -134,7 +134,7 @@ async def test_isolated_workers_combine_outputs_and_restart_without_new_work(tmp
     second_id = next(
         f"slot-{i}" for i in range(1, 30) if bench.worker_index(f"slot-{i}", 2) != bench.worker_index(first["company_id"], 2)
     )
-    companies = [first, {**COMPANY, "company_id": second_id, "company_name": "Company B"}]
+    companies = [first, {**COMPANY, "company_id": second_id, "company_name": "Company B", "rut": "78081198-6"}]
     config = {key: getattr(args, key) for key in ("year", "month", "limit", "browsers")}
     atomic_write_json(root / "selection.json", {"config": config, "companies": companies})
     monkeypatch.setenv("BRIGHTDATA_PROXY_USERNAME", "fake")
@@ -250,3 +250,30 @@ def test_setup_failure_sends_sanitized_telegram_notification(tmp_path, monkeypat
     text = sender.call_args.args[1]
     assert "⛔" in text and "private-password" not in text
     assert json.loads((tmp_path / "failure/progress.json").read_text())["state"] == "failed"
+
+
+async def test_new_batch_reuses_sqlite_files_without_counting_them_as_downloads(tmp_path, monkeypatch):
+    args = args_for(tmp_path)
+    root = tmp_path / args.run_id
+    directory = seed_state(root, [CVE])
+    saved = pilot.persist_pdf(directory, CVE, PDF, LINK)
+    original = directory / saved["local_path"]
+    config = {key: getattr(args, key) for key in ("year", "month", "limit", "browsers")}
+    atomic_write_json(root / "selection.json", {"config": config, "companies": [COMPANY]})
+    assert await bench.execute(args, root) == 0
+    before = original.stat().st_mtime_ns
+    args.run_id = "new-batch"
+    new_root = tmp_path / args.run_id
+    new_root.mkdir()
+    atomic_write_json(new_root / "selection.json", {"config": config, "companies": [COMPANY]})
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("SQLite has the search and PDF; no browser or source request should run")
+
+    monkeypatch.setattr(bench.asyncio, "create_subprocess_exec", forbidden)
+    monkeypatch.setattr(bench, "select_companies", forbidden)
+    assert await bench.execute(args, new_root) == 0
+    result = json.loads((new_root / "summary.json").read_text())
+    assert result["pdf_count"] == 1 and result["new_pdfs"] == 0
+    assert result["skipped_companies"] == 1 and result["rows"][0]["documents"][0]["reused"] is True
+    assert original.stat().st_mtime_ns == before

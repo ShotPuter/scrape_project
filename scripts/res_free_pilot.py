@@ -518,14 +518,29 @@ def document_summary(saved: dict) -> dict:
 
 
 async def ensure_document(cascade, http, cve, company_id, state, args, output, counters):
+    tracking = getattr(args, "tracking_store", None)
+    try:
+        return await _ensure_document(cascade, http, cve, company_id, state, args, output, counters)
+    except Exception as exc:
+        if tracking:
+            tracking.document_status(cve, getattr(exc, "status", "failed"), company_id, error=safe_message(exc))
+        raise
+
+
+async def _ensure_document(cascade, http, cve, company_id, state, args, output, counters):
     """Cached codigo -> free GET; otherwise one browser token and one verify POST."""
+    tracking = getattr(args, "tracking_store", None)
     reused = cached_pdf(output, cve)
     if reused:
+        if tracking:
+            tracking.file_result(reused, output, company_id)
         counters["reused"] += 1
         return document_summary(reused)
     record = state["cves"].get(cve)
     if record:
         try:
+            if tracking:
+                tracking.document_status(cve, "downloading", company_id, record=record)
             data = measured(counters, "download", http_flow.download, http, record["link"])
         except SearchIssue as exc:
             if exc.status in {"blocked", "proxy_failed", "proxy_ip_mismatch"}:
@@ -535,17 +550,27 @@ async def ensure_document(cascade, http, cve, company_id, state, args, output, c
             save_state(args.state_path, state)
         else:
             saved = persist_pdf(output, cve, data, record["link"])
+            if tracking:
+                tracking.file_result(saved, output, company_id)
             counters["downloaded"] += 1
             return document_summary(saved)
 
+    if tracking:
+        tracking.document_status(cve, "verifying", company_id)
     token = await cascade.mint(RES_URL)
     cve, codigo, link = measured(counters, "verify", http_flow.verify, http, cve, token)
     state["cves"][cve] = {"cve": cve, "codigo": codigo, "link": link, "company_id": company_id, "verified_at": time.time()}
     save_state(args.state_path, state)
+    if tracking:
+        tracking.document_status(cve, "verified", company_id, record=state["cves"][cve])
     counters["codigos"] += 1
     say(f"  codigo saved for {cve}")
+    if tracking:
+        tracking.document_status(cve, "downloading", company_id)
     data = measured(counters, "download", http_flow.download, http, link)
     saved = persist_pdf(output, cve, data, link)
+    if tracking:
+        tracking.file_result(saved, output, company_id)
     counters["downloaded"] += 1
     return document_summary(saved)
 
@@ -580,12 +605,17 @@ def cached_company_result(company, state, args, output):
 
 async def process_company(cascade, http, company, state, args, output, counters):
     company_id = company["company_id"]
+    tracking = getattr(args, "tracking_store", None)
     cached = state["companies"].get(company_id)
     if cached and not args.refresh and "cves" in cached:
         cves = cached["cves"]
         status = cached.get("status", "completed")
         say(f"  cached search: {status}, {len(cves)} CVE(s), no CAPTCHA")
+        if tracking:
+            tracking.search_result(company_id, cached)
     else:
+        if tracking:
+            tracking.company_status(company_id, "searching")
         token = await cascade.mint(FORM_URL)
         link = measured(
             counters, "search", http_flow.search, http, token=token, rut=company.get("rut"), name=company["company_name"]
@@ -601,6 +631,8 @@ async def process_company(cascade, http, company, state, args, output, counters)
             "searched_at": time.time(),
         }
         save_state(args.state_path, state)
+        if tracking:
+            tracking.search_result(company_id, state["companies"][company_id], matched)
     result = {
         "company_id": company_id,
         "company_name": company["company_name"],
@@ -612,6 +644,8 @@ async def process_company(cascade, http, company, state, args, output, counters)
         result["status"] = status
         return result
     selected = cves[: args.max_documents] if args.max_documents else cves
+    if tracking and selected:
+        tracking.company_status(company_id, "downloading")
     for cve in selected:
         if args.http_only and cve not in state["cves"]:
             continue
@@ -625,7 +659,19 @@ async def process_company(cascade, http, company, state, args, output, counters)
             continue
         result["documents"].append(document)
     downloaded = [doc for doc in result["documents"] if doc.get("status") in DOWNLOADED]
-    result["status"] = "downloaded" if downloaded else (status if not result["documents"] else "documents_failed")
+    result["status"] = (
+        "downloaded"
+        if selected and len(downloaded) == len(selected)
+        else "partial"
+        if downloaded
+        else (status if not result["documents"] else "documents_failed")
+    )
+    if result["status"] in {"partial", "documents_failed"}:
+        result["error"] = "; ".join(
+            f"{doc['cve']}: {doc.get('error') or doc['status']}"
+            for doc in result["documents"]
+            if doc.get("status") not in DOWNLOADED
+        )
     return result
 
 
@@ -714,13 +760,17 @@ async def drain(cascade, http, queue, deferred, state, args, counters, report, s
     challenge_streak = 0
 
     def checkpoint_attempt(company, attempt, result):
+        seconds = round(time.monotonic() - attempt_started, 3)
+        if getattr(args, "tracking_store", None):
+            args.tracking_store.finish_attempt(attempt_id, result, seconds)
         report.setdefault("attempts", []).append(
             {
                 "company_id": company["company_id"],
                 "company_name": company["company_name"],
                 "attempt": attempt,
+                "attempt_id": attempt_id,
                 "proxy_index": stats["index"],
-                "seconds": round(time.monotonic() - attempt_started, 3),
+                "seconds": seconds,
                 "result": result,
             }
         )
@@ -743,6 +793,11 @@ async def drain(cascade, http, queue, deferred, state, args, counters, report, s
             return
         company, attempts = queue.popleft()
         attempt_started = time.monotonic()
+        attempt_id = (
+            args.tracking_store.begin_attempt(company["company_id"], attempts + 1)
+            if getattr(args, "tracking_store", None)
+            else None
+        )
         say(f"[{stats['index'] + 1}] {company['company_name']} (try {attempts + 1}/{args.company_attempts})")
         result = None
         try:
@@ -751,6 +806,10 @@ async def drain(cascade, http, queue, deferred, state, args, counters, report, s
             if exc.status != "proxy_exhausted":
                 checkpoint_attempt(company, attempts + 1, failure_result(company, exc, cascade))
             if exc.status == "proxy_exhausted":
+                if getattr(args, "tracking_store", None):
+                    args.tracking_store.finish_attempt(
+                        attempt_id, failure_result(company, exc, cascade), time.monotonic() - attempt_started
+                    )
                 queue.appendleft((company, attempts))
                 stats["status"] = "budget"
                 return
@@ -958,6 +1017,12 @@ async def run(args):
     args.state_path = args.state or args.output / "state.json"
     state = load_state(args.state_path)
     run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    if getattr(args, "tracking_db", None):
+        from src.sites.res.tracking import TrackingStore
+
+        args.tracking_store = TrackingStore(
+            args.tracking_db, args.tracking_run_id, worker=args.tracking_worker, invocation=run_id
+        )
     counters = Counter()
     token_records = []
     report = {
@@ -1064,6 +1129,9 @@ def parse_args(argv=None):
     parser.add_argument("--max-documents", type=int, default=3, help="Documents per company; 0 means all")
     parser.add_argument("--output", type=Path, default=Path("data/res-free-pilot"))
     parser.add_argument("--state", type=Path, help="Codigo cache; defaults to <output>/state.json")
+    parser.add_argument("--tracking-db", type=Path)
+    parser.add_argument("--tracking-run-id")
+    parser.add_argument("--tracking-worker")
     parser.add_argument("--profile", type=Path, default=Path("data/res-free-pilot/profile"))
     parser.add_argument("--profile-slots", type=int, default=4, help="Browser profile directories reused across proxies")
     parser.add_argument("--engine", choices=("camoufox", "patchright"), default="camoufox")
@@ -1106,6 +1174,9 @@ def main(argv=None):
     except KeyboardInterrupt:
         say("interrupted; the codigo cache is already on disk")
         return 130
+    finally:
+        if getattr(args, "tracking_store", None):
+            args.tracking_store.close()
 
 
 if __name__ == "__main__":

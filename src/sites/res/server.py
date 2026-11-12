@@ -10,9 +10,14 @@ import sys
 def main():
     parser = argparse.ArgumentParser(description=__doc__, add_help=False)
     parser.add_argument(
-        "stage", choices=["benchmark", "pipeline", "collect", "search", "download", "status", "export", "telegram-test"]
+        "stage",
+        choices=["track", "benchmark", "pipeline", "collect", "search", "download", "status", "export", "telegram-test"],
     )
     args, remainder = parser.parse_known_args()
+    if args.stage == "track":
+        from src.sites.res.tracking import main as tracking_main
+
+        raise SystemExit(tracking_main(remainder))
     if args.stage == "telegram-test":
         if remainder:
             parser.error("telegram-test takes no additional options")
