@@ -56,6 +56,10 @@ services:
       - "${RES_COMPANY_ATTEMPTS:-2}"
       - --max-failures
       - "${RES_MAX_FAILURES:-20}"
+      - --error-cooldown-minutes
+      - "${RES_ERROR_COOLDOWN_MINUTES:-10}"
+      - --max-cooldowns
+      - "${RES_MAX_COOLDOWNS:-3}"
       - --timeout
       - "${RES_TIMEOUT:-40}"
       - --delay

@@ -6,6 +6,8 @@ PageMethods, so the rest of the pipeline runs without a browser, profiles or Xvf
 
 from __future__ import annotations
 
+import hashlib
+import html
 import json
 import re
 import time
@@ -15,6 +17,7 @@ import httpx
 
 from src.sites.dequienes.source import RES_URL, res_url, validate_cve
 from src.sites.res.source import DETAILS_PATH, FORM_URL, HOST, SEARCH_PATH, SearchIssue, parse_actions, search_link
+from src.utils.error_details import safe_message
 
 VERIFY_URL = RES_URL
 VERIFY_PATH = "/VerificarCertificados.aspx/Busqueda"
@@ -23,6 +26,26 @@ REFERERS = {SEARCH_PATH: FORM_URL, DETAILS_PATH: f"https://{HOST}/Busqueda/Actua
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0"
 CODIGO_PATTERN = re.compile(r"[0-9A-Fa-f]{2}(?:-[0-9A-Fa-f]{2}){15}")
 TRANSIENT_HTTP = {502, 503, 504}
+
+
+class DownloadIssue(SearchIssue):
+    def __init__(self, status, reason, response):
+        super().__init__(status, reason)
+        self.body_sample = response.content[:65536]
+        text = self.body_sample.decode("utf-8", errors="replace")
+        title = re.search(r"<title\b[^>]*>(.*?)</title>", text, re.I | re.S)
+        self.diagnostic = {
+            "http_status": response.status_code,
+            "content_type": response.headers.get("content-type", ""),
+            "path": response.request.url.path,
+            "location_path": urlsplit(response.headers.get("location", "")).path,
+            "title": safe_message(html.unescape(re.sub(r"<[^>]+>", "", title[1])))[:200] if title else None,
+            "server": response.headers.get("server"),
+            "cf_mitigated": response.headers.get("cf-mitigated"),
+            "body_bytes": len(response.content),
+            "body_sha256": hashlib.sha256(response.content).hexdigest(),
+            "sample_truncated": len(response.content) > len(self.body_sample),
+        }
 
 
 def new_session(timeout=30.0, proxy=None, verify=True) -> httpx.Client:
@@ -147,8 +170,8 @@ def download(session: httpx.Client, link: str) -> bytes:
             if response.status_code in TRANSIENT_HTTP
             else "retry_wait"
         )
-        raise SearchIssue(status, f"Certificate HTTP {response.status_code}")
+        raise DownloadIssue(status, f"Certificate HTTP {response.status_code}", response)
     content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
     if content_type != "application/pdf":
-        raise SearchIssue("retry_wait", f"Certificate content-type is {content_type or 'absent'}")
+        raise DownloadIssue("download_failed", f"Certificate content-type is {content_type or 'absent'}", response)
     return response.content

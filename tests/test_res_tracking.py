@@ -208,3 +208,40 @@ def test_relative_benchmark_path_can_be_imported(tmp_path, monkeypatch):
         assert store.db.execute("SELECT count(*) FROM attempts").fetchone()[0] == 1
     finally:
         store.close()
+
+
+async def test_confirmed_stale_link_is_cleared_in_sqlite_even_if_new_captcha_fails(tmp_path, monkeypatch):
+    from collections import Counter
+
+    from src.sites.res.source import SearchIssue
+
+    root, worker, saved = fixture_run(tmp_path)
+    (worker / saved["local_path"]).unlink()
+    store = TrackingStore(tmp_path / "tracking.sqlite3", "sample")
+    import_run(store, root)
+    args = pilot.parse_args(["--output", str(worker), "--audio-model", ""])
+    args.state_path, args.tracking_store = worker / "state.json", store
+    state = pilot.load_state(args.state_path)
+    original_record = dict(state["cves"][CVE])
+
+    class Declined:
+        async def mint(self, *args, **kwargs):
+            raise SearchIssue("captcha_required", "Google declined the audio challenge")
+
+    def expired(*args):
+        raise SearchIssue("retry_wait", "Certificate HTTP 302")
+
+    monkeypatch.setattr(pilot.http_flow, "download", expired)
+    try:
+        with pytest.raises(SearchIssue, match="Google declined"):
+            await pilot.ensure_document(Declined(), None, CVE, COMPANY["company_id"], state, args, worker, Counter())
+        row = store.db.execute("SELECT codigo,download_url FROM documents WHERE cve=?", (CVE,)).fetchone()
+        assert row["codigo"] is None and row["download_url"] is None
+        assert CVE not in state["cves"]
+        # An older JSON checkpoint must not resurrect the invalidated link.
+        state["cves"][CVE] = original_record
+        pilot.save_state(args.state_path, state)
+        import_run(store, root)
+        assert store.db.execute("SELECT codigo FROM documents WHERE cve=?", (CVE,)).fetchone()[0] is None
+    finally:
+        store.close()

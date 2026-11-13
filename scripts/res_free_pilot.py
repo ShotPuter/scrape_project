@@ -21,8 +21,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
+import hashlib
 import ipaddress
 import json
+import math
 import os
 import sqlite3
 import ssl
@@ -39,13 +41,13 @@ from dotenv import load_dotenv
 
 from src.proxy.sources.webshare import WebshareError, load_webshare_candidates
 from src.sites.dequienes.source import RES_URL, validate_cve
-from src.sites.res import http_flow
+from src.sites.res import cooldown, http_flow
 from src.sites.res.audio import LocalAudioSolver
 from src.sites.res.engines import launch_context
 from src.sites.res.pdf import cached_pdf, persist_pdf
 from src.sites.res.source import FORM_URL, HOST, SearchIssue, match_actions
 from src.sites.res.vlm_grid import LocalGridSolver, bframe
-from src.utils.atomic import atomic_write_json
+from src.utils.atomic import atomic_write_bytes, atomic_write_json
 from src.utils.error_details import safe_message
 from src.utils.proxy_url import normalize_proxy_url
 
@@ -519,12 +521,36 @@ def document_summary(saved: dict) -> dict:
 
 async def ensure_document(cascade, http, cve, company_id, state, args, output, counters):
     tracking = getattr(args, "tracking_store", None)
+    prior_events = getattr(cascade, "events", None)
     try:
         return await _ensure_document(cascade, http, cve, company_id, state, args, output, counters)
     except Exception as exc:
+        if getattr(cascade, "events", None) is not prior_events:
+            exc.captcha_stages = list(cascade.events)
+            audio = getattr(cascade, "audio", None)
+            exc.audio_events = list(audio.events[getattr(cascade, "audio_event_start", 0) :]) if audio else []
+        if isinstance(exc, http_flow.DownloadIssue):
+            try:
+                exc.diagnostic_path = save_download_diagnostic(output, cve, company_id, exc)
+            except OSError:
+                say("Could not save certificate response diagnostics; original failure preserved")
         if tracking:
-            tracking.document_status(cve, getattr(exc, "status", "failed"), company_id, error=safe_message(exc))
+            error = safe_message(exc)
+            if getattr(exc, "diagnostic_path", None):
+                error += "; diagnostics: " + exc.diagnostic_path
+            tracking.document_status(cve, getattr(exc, "status", "failed"), company_id, error=error)
         raise
+
+
+def save_download_diagnostic(output, cve, company_id, issue):
+    directory = output / "diagnostics"
+    directory.mkdir(exist_ok=True, mode=0o700)
+    key = hashlib.sha256(cve.encode()).hexdigest()[:16] + "-" + datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    sample = directory / (key + ".body")
+    atomic_write_bytes(sample, issue.body_sample)
+    metadata = directory / (key + ".json")
+    atomic_write_json(metadata, {**issue.diagnostic, "cve": cve, "company_id": company_id, "body_sample": sample.name})
+    return str(metadata)
 
 
 async def _ensure_document(cascade, http, cve, company_id, state, args, output, counters):
@@ -543,11 +569,19 @@ async def _ensure_document(cascade, http, cve, company_id, state, args, output, 
                 tracking.document_status(cve, "downloading", company_id, record=record)
             data = measured(counters, "download", http_flow.download, http, record["link"])
         except SearchIssue as exc:
-            if exc.status in {"blocked", "proxy_failed", "proxy_ip_mismatch"}:
+            if exc.status != "retry_wait" or not str(exc).startswith("Certificate HTTP 302"):
                 raise
             say(f"  cached codigo for {cve} is stale ({safe_message(exc)}); re-verifying")
             state["cves"].pop(cve, None)
             save_state(args.state_path, state)
+            if tracking:
+                tracking.document_status(
+                    cve,
+                    "expired_codigo",
+                    company_id,
+                    error=safe_message(exc),
+                    record={"codigo": None, "link": None, "verified_at": None},
+                )
         else:
             saved = persist_pdf(output, cve, data, record["link"])
             if tracking:
@@ -647,13 +681,24 @@ async def process_company(cascade, http, company, state, args, output, counters)
     if tracking and selected:
         tracking.company_status(company_id, "downloading")
     for cve in selected:
+        if getattr(args, "tracking_store", None) and cooldown.must_yield(args, {}):
+            raise SearchIssue("cooldown", "Batch cooldown: document remains queued")
         if args.http_only and cve not in state["cves"]:
             continue
         try:
             document = await ensure_document(cascade, http, cve, company_id, state, args, output, counters)
         except SearchIssue as exc:
             counters["document_failures"] += 1
-            result["documents"].append({"cve": cve, "status": exc.status, "error": safe_message(exc)})
+            result["documents"].append(
+                {
+                    "cve": cve,
+                    "status": exc.status,
+                    "error": safe_message(exc),
+                    "diagnostic": getattr(exc, "diagnostic_path", None),
+                    "stages": getattr(exc, "captcha_stages", []),
+                    "audio_events": getattr(exc, "audio_events", []),
+                }
+            )
             if exc.status in {"blocked", "proxy_exhausted", "proxy_failed"}:
                 raise
             continue
@@ -747,12 +792,28 @@ def failure_result(company, exc, cascade):
         "rut": company.get("rut"),
         "status": getattr(exc, "status", "failed"),
         "error": safe_message(exc),
+        "diagnostic": getattr(exc, "diagnostic_path", None),
         "stages": list(cascade.events) if cascade is not None else [],
         "audio_events": list(cascade.audio.events[getattr(cascade, "audio_event_start", 0) :])
         if getattr(cascade, "audio", None) is not None
         else [],
         "documents": [],
     }
+
+
+def failure_limit_stop(runtime, args, report):
+    if runtime["stop"]:
+        return True
+    if runtime["failures"] < args.max_failures:
+        return False
+    if getattr(args, "error_cooldown_minutes", 0) > 0 and getattr(args, "max_cooldowns", 0) > 0:
+        runtime["pause_requested"] = True
+        return True
+    runtime["stop"] = True
+    report.setdefault(
+        "stop_reason", {"code": "consecutive_failures", "count": runtime["failures"], "limit": args.max_failures}
+    )
+    return True
 
 
 async def drain(cascade, http, queue, deferred, state, args, counters, report, stats, outcomes, runtime):
@@ -788,6 +849,9 @@ async def drain(cascade, http, queue, deferred, state, args, counters, report, s
         if runtime["stop"]:
             stats["status"] = "stopped"
             return
+        if cooldown.must_yield(args, runtime):
+            stats["status"] = "cooldown"
+            return
         if not args.http_only and args.solves_per_proxy and cascade.minted >= args.solves_per_proxy:
             stats["status"] = "budget"
             return
@@ -803,15 +867,15 @@ async def drain(cascade, http, queue, deferred, state, args, counters, report, s
         try:
             result = await process_company(cascade, http, company, state, args, args.output, counters)
         except SearchIssue as exc:
-            if exc.status != "proxy_exhausted":
+            if exc.status not in {"proxy_exhausted", "cooldown"}:
                 checkpoint_attempt(company, attempts + 1, failure_result(company, exc, cascade))
-            if exc.status == "proxy_exhausted":
+            if exc.status in {"proxy_exhausted", "cooldown"}:
                 if getattr(args, "tracking_store", None):
                     args.tracking_store.finish_attempt(
                         attempt_id, failure_result(company, exc, cascade), time.monotonic() - attempt_started
                     )
                 queue.appendleft((company, attempts))
-                stats["status"] = "budget"
+                stats["status"] = "cooldown" if exc.status == "cooldown" else "budget"
                 return
             if (
                 exc.status in {"captcha_required", "proxy_failed", "proxy_ip_mismatch", "retry_wait"}
@@ -819,8 +883,8 @@ async def drain(cascade, http, queue, deferred, state, args, counters, report, s
             ):
                 deferred.append((company, attempts + 1))
                 runtime["failures"] += 1
-                if runtime["failures"] >= args.max_failures:
-                    runtime["stop"], stats["status"] = True, "stopped"
+                if failure_limit_stop(runtime, args, report):
+                    stats["status"] = "cooldown" if runtime.get("pause_requested") else "stopped"
                     return
                 stats["challenges"] += 1
                 say(f"  {exc.status}: requeued for a fresh proxy")
@@ -841,8 +905,8 @@ async def drain(cascade, http, queue, deferred, state, args, counters, report, s
             if document_challenge and attempts + 1 < args.company_attempts:
                 deferred.append((company, attempts + 1))
                 runtime["failures"] += 1
-                if runtime["failures"] >= args.max_failures:
-                    runtime["stop"], stats["status"] = True, "stopped"
+                if failure_limit_stop(runtime, args, report):
+                    stats["status"] = "cooldown" if runtime.get("pause_requested") else "stopped"
                     return
                 stats["challenges"] += 1
                 say("  captcha_required while verifying: requeued for a fresh proxy")
@@ -874,11 +938,14 @@ async def drain(cascade, http, queue, deferred, state, args, counters, report, s
             "proxy_failed",
             "proxy_ip_mismatch",
             "documents_failed",
+            "partial",
         }:
             runtime["failures"] += 1
-            if runtime["failures"] >= args.max_failures:
-                say(f"stopping after {runtime['failures']} consecutive failures; state is saved")
-                runtime["stop"] = True
+            if failure_limit_stop(runtime, args, report):
+                say(f"error threshold reached ({runtime['failures']}); progress saved")
+                if runtime.get("pause_requested"):
+                    stats["status"] = "cooldown"
+                    return
         else:
             runtime["failures"] = 0
         if result["status"] in {"captcha_required", "proxy_failed", "proxy_ip_mismatch", "failed"} or any(
@@ -922,6 +989,9 @@ async def scan(proxies, args, state, counters, report, audio, vlm_model, token_r
     for index, slot in enumerate(proxies):
         if not queue or runtime["stop"]:
             break
+        await cooldown.wait(args, runtime, report)
+        if runtime["stop"]:
+            break
         stats = new_stats(index, slot or ProxyEndpoint(None, None, "brightdata"))
         report["proxies"].append(stats)
         try:
@@ -943,18 +1013,22 @@ async def scan(proxies, args, state, counters, report, audio, vlm_model, token_r
             runtime["failures"] += 1
             if stats["status"] == "proxy_auth_failed":
                 runtime["stop"] = True
-        if runtime["failures"] >= args.max_failures:
-            runtime["stop"] = True
+                report["stop_reason"] = {"code": "proxy_auth_failed", "error": stats["error"]}
+        failure_limit_stop(runtime, args, report)
         if deferred:
             # Give every selected company its first attempt before spending routes on retries.
             queue.extend(deferred)
             deferred.clear()
+        if queue and not runtime["stop"] and index + 1 < len(proxies):
+            await cooldown.wait(args, runtime, report)
         say(
             f"proxy {index + 1}/{len(proxies)} {stats['label']}: {stats['status']}, "
             f"{stats['tokens']} token(s), {stats['companies']} company(ies)"
         )
 
     leftover = "stopped" if runtime["stop"] else "proxy_exhausted"
+    if queue and "stop_reason" not in report:
+        report["stop_reason"] = {"code": "proxy_budget_exhausted"}
     while queue:
         company, _ = queue.popleft()
         outcomes.setdefault(
@@ -964,7 +1038,7 @@ async def scan(proxies, args, state, counters, report, audio, vlm_model, token_r
                 "company_name": company["company_name"],
                 "rut": company.get("rut"),
                 "status": leftover,
-                "error": "No usable proxy remained before this company was processed",
+                "error": "Queue paused: " + report.get("stop_reason", {}).get("code", "unknown"),
                 "documents": [],
             },
         )
@@ -1106,7 +1180,9 @@ async def run(args):
         "skipped": counters["skipped"],
         "proxies": len(report["proxies"]),
         "usable_proxies": sum(
-            1 for item in report["proxies"] if item["status"] in {"done", "budget", "challenged", "downloaded", "reused"}
+            1
+            for item in report["proxies"]
+            if item["status"] in {"done", "budget", "challenged", "cooldown", "downloaded", "reused"}
         ),
     }
     report["tokens"] = token_records
@@ -1118,6 +1194,8 @@ async def run(args):
         f"{totals['usable_proxies']}/{totals['proxies']} usable proxies"
     )
     say(f"report: {args.output / f'report-{run_id}.json'}")
+    if report["companies"]:
+        return 2 if any(r["status"] not in {"downloaded", "not_found", "no_cve_found"} for r in report["companies"]) else 0
     return 0 if totals["downloaded"] or totals["reused"] else 1
 
 
@@ -1164,7 +1242,14 @@ def parse_args(argv=None):
     parser.add_argument("--audio-seconds", type=float, default=180.0)
     parser.add_argument("--refresh", action="store_true", help="Ignore cached company searches")
     parser.add_argument("--max-failures", type=int, default=20, help="Stop after this many consecutive failures")
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--error-cooldown-minutes", type=float, default=0, help="Pause after error threshold; 0 stops immediately"
+    )
+    parser.add_argument("--max-cooldowns", type=int, default=3, help="Maximum pauses before stopping the remaining queue")
+    args = parser.parse_args(argv)
+    if not math.isfinite(args.error_cooldown_minutes) or args.error_cooldown_minutes < 0 or args.max_cooldowns < 0:
+        parser.error("Cooldown duration and maximum pauses must be finite and non-negative")
+    return args
 
 
 def main(argv=None):

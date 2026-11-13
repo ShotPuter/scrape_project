@@ -156,6 +156,10 @@ def child_command(args, directory, count):
         "90",
         "--max-failures",
         str(args.max_failures),
+        "--error-cooldown-minutes",
+        str(args.error_cooldown_minutes),
+        "--max-cooldowns",
+        str(args.max_cooldowns),
     ]
 
 
@@ -182,8 +186,10 @@ def collect_rows(args, root, companies):
         if selected and set(selected).issubset(available):
             row["status"] = "downloaded"
             row.pop("error", None)
+        elif available:
+            row["status"] = "partial"
         elif row["status"] == "downloaded":
-            row["status"] = "partial" if available else "missing_pdf"
+            row["status"] = "missing_pdf"
         rows.append(row)
     return rows
 
@@ -223,6 +229,14 @@ def statistics_report(args, root, companies, invocation):
         "accepted_tokens": sum(len(report.get("tokens", [])) for report in current),
         "token_stages": dict(Counter(t["stage"] for report in current for t in report.get("tokens", []))),
         "proxy_session_statuses": dict(Counter(p["status"] for report in current for p in report.get("proxies", []))),
+        "worker_stop_reasons": [
+            {"output": report.get("output"), "reason": report["stop_reason"]}
+            for report in current
+            if report.get("stop_reason")
+        ],
+        "cooldown_cycles": getattr(args, "tracking_store", None).cooldown_state()["cycles"]
+        if getattr(args, "tracking_store", None)
+        else 0,
         "http_metrics": dict(http),
         "new_pdfs_per_minute": round(downloaded * 60 / elapsed, 3),
         "company_attempts_per_minute": round(len(attempts) * 60 / elapsed, 3),
@@ -287,6 +301,8 @@ async def notify(args, text):
 def progress_message(args, progress, total, active):
     seconds = max(0.001, progress["elapsed_seconds"])
     statuses = progress["statuses"]
+    control = progress.get("cooldown", {})
+    pause = "\nОбщая пауза: новые задачи ожидают возобновления" if control.get("active") else ""
     return (
         f"📊 RES {args.run_id} — прогресс\n"
         f"Обработано компаний: {sum(statuses.values())}/{total}\n"
@@ -294,8 +310,36 @@ def progress_message(args, progress, total, active):
         f"Попыток: {progress['attempts']}; ошибочных: {progress['error_attempts']}; "
         f"CAPTCHA: {progress['captcha_attempts']}\n"
         f"Подготовлено браузеров: {progress['ready_browsers']}; активных процессов: {active}\n"
-        f"Прошло: {seconds / 60:.1f} мин"
+        f"Прошло: {seconds / 60:.1f} мин{pause}"
     )
+
+
+def cooldown_message(args, event, control):
+    try:
+        payload = json.loads(event.get("error") or "{}")
+    except ValueError:
+        payload = {}
+    if event["status"] == "paused":
+        until = datetime.fromtimestamp(payload.get("cooldown_until", control["cooldown_until"]), UTC).strftime(
+            "%H:%M:%S UTC"
+        )
+        cycle = payload.get("cycles", control["cycles"])
+        return (
+            f"⏸ RES {args.run_id}: общая пауза до {until}. "
+            f"Серия ошибок; пауза {cycle}/{args.max_cooldowns}. Прогресс сохранён."
+        )
+    if event["status"] == "resumed":
+        return f"▶️ RES {args.run_id}: пауза завершена, сбор продолжается."
+    return f"⛔ RES {args.run_id}: достигнут лимит {args.max_cooldowns} пауз. Оставшаяся очередь сохранена."
+
+
+async def notify_cooldown_events(args, cursor):
+    store = args.tracking_store
+    control = store.cooldown_state()
+    for event in store.cooldown_events(cursor):
+        await notify(args, cooldown_message(args, event, control))
+        cursor = event["id"]
+    return cursor
 
 
 def final_message(args, summary):
@@ -303,11 +347,13 @@ def final_message(args, summary):
     unfinished = sum(
         count for status, count in summary["statuses"].items() if status not in {"downloaded", "not_found", "no_cve_found"}
     )
+    reasons = Counter(r["reason"]["code"] for r in summary.get("worker_stop_reasons", []))
+    stops = "\nОстановки процессов: " + ", ".join(f"{key}: {count}" for key, count in reasons.items()) if reasons else ""
     return (
         f"🏁 RES {args.run_id} — {state}\n"
         f"PDF у {summary['companies_with_pdf']}/{len(summary['rows'])} компаний; не завершено: {unfinished}\n"
         f"Всего PDF: {summary['pdf_count']}; новых: {summary['new_pdfs']}\n"
-        f"Скорость: {summary['new_pdfs_per_minute']:.2f} PDF/мин; прошло: {summary['elapsed_seconds'] / 60:.1f} мин\n"
+        f"Скорость: {summary['new_pdfs_per_minute']:.2f} PDF/мин; прошло: {summary['elapsed_seconds'] / 60:.1f} мин{stops}\n"
         f"Отчёт: {args.output / args.run_id / 'summary.json'}"
     )
 
@@ -360,6 +406,7 @@ async def _execute(args, root):
     companies = selection["companies"]
     write_database(root / "companies.sqlite3", companies)
     import_run(args.tracking_store, root, max_documents=args.max_documents)
+    args.tracking_store.prepare_cooldown(enabled=args.error_cooldown_minutes > 0 and args.max_cooldowns > 0)
     queues, baseline = prepare_queues(args, root, companies)
     # Files restored from the shared ledger are cache hits, including a new run folder.
     invocation["prior_pdfs"] = [str(p.relative_to(root)) for p in root.glob("workers/w*/pdf/**/*.pdf")]
@@ -402,6 +449,9 @@ async def _execute(args, root):
     tasks = [asyncio.create_task(launch(*queue)) for queue in queues]
     next_telegram = time.monotonic() + args.telegram_minutes * 60
     ready_sent = False
+    previous_events = args.tracking_store.cooldown_events()
+    cooldown_cursor = previous_events[-1]["id"] if previous_events else 0
+    inherited_pause = args.tracking_store.cooldown_state()["active"]
     try:
         while tasks and not all(task.done() for task in tasks):
             if stop.is_set():
@@ -441,6 +491,18 @@ async def _execute(args, root):
                 captcha_attempts=captcha_attempts,
                 ready_browsers=len(ready),
             )
+            control = args.tracking_store.cooldown_state()
+            progress["cooldown"] = control
+            if inherited_pause:
+                if control["active"]:
+                    await notify(args, cooldown_message(args, {"status": "paused"}, control))
+                inherited_pause = False
+            cooldown_cursor = await notify_cooldown_events(args, cooldown_cursor)
+            if control["active"]:
+                progress["state"] = "cooldown"
+                args.tracking_store.run_status("cooldown")
+            elif not control["halted"]:
+                args.tracking_store.run_status("running")
             atomic_write_json(root / "progress.json", progress)
             print(
                 f"RES progress: {sum(statuses.values())}/{len(companies)} companies; {docs} new PDFs; "
@@ -475,6 +537,7 @@ async def _execute(args, root):
     finally:
         for signum in (signal.SIGINT, signal.SIGTERM):
             loop.remove_signal_handler(signum)
+    await notify_cooldown_events(args, cooldown_cursor)
     invocation["elapsed_seconds"] = round(time.monotonic() - started, 3)
     invocation["finished_at"] = datetime.now(UTC).isoformat()
     invocation["state"] = "interrupted" if interrupted else "finished"
@@ -521,6 +584,8 @@ def parse_args(argv=None):
     parser.add_argument("--tokens-per-proxy", type=int, default=20)
     parser.add_argument("--company-attempts", type=int, default=2)
     parser.add_argument("--max-failures", type=int, default=20)
+    parser.add_argument("--error-cooldown-minutes", type=float, default=10)
+    parser.add_argument("--max-cooldowns", type=int, default=3)
     parser.add_argument("--audio-model", default="base")
     parser.add_argument("--timeout", type=float, default=40)
     parser.add_argument("--delay", type=float, default=3)
@@ -548,6 +613,8 @@ def parse_args(argv=None):
         parser.error("Timing values must be finite and positive")
     if not math.isfinite(args.delay) or args.delay < 0:
         parser.error("delay must be finite and non-negative")
+    if not math.isfinite(args.error_cooldown_minutes) or args.error_cooldown_minutes < 0 or args.max_cooldowns < 0:
+        parser.error("cooldown minutes and max-cooldowns must be finite and non-negative")
     return args
 
 

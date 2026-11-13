@@ -227,7 +227,10 @@ def test_download_rejects_html_instead_of_a_pdf() -> None:
     with ok({"/Certificados/Escritura.aspx": download}) as session, pytest.raises(http_flow.SearchIssue) as error:
         http_flow.download(session, DOCUMENT_LINK)
 
-    assert error.value.status == "retry_wait"
+    assert error.value.status == "download_failed"
+    assert error.value.diagnostic["http_status"] == 200
+    assert error.value.diagnostic["path"] == "/Certificados/Escritura.aspx"
+    assert CODIGO not in json.dumps(error.value.diagnostic)
 
 
 def test_prepare_maps_rate_limiting_to_blocked() -> None:
@@ -308,7 +311,20 @@ def test_connection_establishment_retry_sends_single_use_post_once(monkeypatch):
 
 def test_verify_rejects_a_document_link_for_a_different_cve():
     link = DOCUMENT_LINK.replace(CVE, "ACfJoaiSFQ8v")
-    with client(lambda _: httpx.Response(200, json=envelope({"Link": link}))) as session, pytest.raises(
-        http_flow.SearchIssue, match="different CVE"
+    with (
+        client(lambda _: httpx.Response(200, json=envelope({"Link": link}))) as session,
+        pytest.raises(http_flow.SearchIssue, match="different CVE"),
     ):
         http_flow.verify(session, CVE, "single-use")
+
+
+def test_unexpected_response_diagnostics_bound_the_body_sample():
+    body = b"<html><title>Temporary failure</title>" + b"x" * 100000
+    with (
+        client(lambda _: httpx.Response(200, headers={"content-type": "text/html"}, content=body)) as session,
+        pytest.raises(http_flow.DownloadIssue) as failed,
+    ):
+        http_flow.download(session, DOCUMENT_LINK)
+    assert len(failed.value.body_sample) == 65536
+    assert failed.value.diagnostic["sample_truncated"] is True
+    assert failed.value.diagnostic["body_bytes"] == len(body)

@@ -527,3 +527,102 @@ async def test_provider_authentication_refusal_stops_session_creation(tmp_path, 
     await pilot.scan([pilot.DIRECT] * 100, args, state_with(), Counter(), report, None, "", [])
     assert resolve.await_count == 1
     assert report["proxies"][0]["status"] == "proxy_auth_failed"
+
+
+async def test_unexpected_html_preserves_codigo_and_saves_private_diagnostic(tmp_path, monkeypatch):
+    import json
+
+    import httpx
+
+    args = make_args(tmp_path)
+    state = state_with({CVE: {"codigo": CODIGO, "link": LINK}})
+    cascade = FakeCascade()
+    response = httpx.Response(
+        200,
+        headers={"content-type": "text/html"},
+        content=b"<html><title>Temporary error</title></html>",
+        request=httpx.Request("GET", LINK),
+    )
+
+    def download(*args):
+        raise pilot.http_flow.DownloadIssue("download_failed", "Certificate content-type is text/html", response)
+
+    monkeypatch.setattr(pilot.http_flow, "download", download)
+    with pytest.raises(SearchIssue) as failed:
+        await pilot.ensure_document(cascade, None, CVE, None, state, args, tmp_path, Counter())
+    assert failed.value.status == "download_failed"
+    assert state["cves"][CVE]["codigo"] == CODIGO and cascade.calls == []
+    diagnostic = list((tmp_path / "diagnostics").glob("*.json"))
+    assert len(diagnostic) == 1
+    metadata = json.loads(diagnostic[0].read_text())
+    assert metadata["title"] == "Temporary error"
+    assert CODIGO not in diagnostic[0].read_text()
+    body = diagnostic[0].parent / metadata["body_sample"]
+    assert body.read_bytes() == response.content
+    assert body.stat().st_mode & 0o777 == 0o600
+
+
+async def test_failed_document_keeps_audio_stage_details(tmp_path):
+    from types import SimpleNamespace
+
+    args = make_args(tmp_path)
+    company = {"company_id": "example", "company_name": "Example", "rut": None}
+    state = state_with(companies={"example": {"status": "completed", "cves": [CVE]}})
+
+    class Declined:
+        events = []
+        audio_event_start = 0
+        audio = SimpleNamespace(events=[{"status": "audio_blocked"}])
+
+        async def mint(self, *args, **kwargs):
+            self.events = [{"stage": "audio", "status": "captcha_required", "error": "Google declined the audio challenge"}]
+            raise SearchIssue("captcha_required", "No stage accepted the challenge: native, audio")
+
+    result = await pilot.process_company(Declined(), None, company, state, args, tmp_path, Counter())
+    assert result["status"] == "documents_failed"
+    doc = result["documents"][0]
+    assert doc["stages"][0]["error"] == "Google declined the audio challenge"
+    assert doc["audio_events"] == [{"status": "audio_blocked"}]
+
+
+@pytest.mark.parametrize(
+    "status,expected", [("downloaded", 0), ("stopped", 2), ("documents_failed", 2), ("partial", 2), ("not_found", 0)]
+)
+async def test_worker_exit_code_reflects_partial_queue_even_when_a_pdf_was_saved(tmp_path, monkeypatch, status, expected):
+    from unittest.mock import AsyncMock
+
+    args = make_args(tmp_path, http_only=True)
+    monkeypatch.setattr(pilot, "load_dotenv", lambda *args: None)
+    monkeypatch.setattr(pilot, "load_proxy_endpoints", AsyncMock(return_value=[pilot.DIRECT]))
+
+    async def scan(proxies, args, state, counters, report, *other):
+        counters["downloaded"] = 1
+        report["companies"] = [{"company_id": "fixture", "status": status, "documents": []}]
+
+    monkeypatch.setattr(pilot, "scan", scan)
+    assert await pilot.run(args) == expected
+
+
+async def test_diagnostic_write_error_does_not_mask_the_original_download_failure(tmp_path, monkeypatch):
+    import httpx
+
+    args = make_args(tmp_path)
+    state = state_with({CVE: {"codigo": CODIGO, "link": LINK}})
+    cascade = FakeCascade()
+    response = httpx.Response(
+        200, headers={"content-type": "text/html"}, content=b"<html>Error</html>", request=httpx.Request("GET", LINK)
+    )
+    issue = pilot.http_flow.DownloadIssue("download_failed", "Certificate content-type is text/html", response)
+
+    def download(*args):
+        raise issue
+
+    def write(*args):
+        raise OSError("Read-only diagnostic directory")
+
+    monkeypatch.setattr(pilot.http_flow, "download", download)
+    monkeypatch.setattr(pilot, "save_download_diagnostic", write)
+    with pytest.raises(pilot.http_flow.DownloadIssue) as caught:
+        await pilot.ensure_document(cascade, None, CVE, None, state, args, tmp_path, Counter())
+    assert caught.value is issue
+    assert state["cves"][CVE]["codigo"] == CODIGO and cascade.calls == []

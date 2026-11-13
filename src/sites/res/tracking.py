@@ -69,11 +69,93 @@ class TrackingStore:
                 worker TEXT, stage TEXT NOT NULL, status TEXT NOT NULL, error TEXT, at REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS events_company ON events(company_id,at);
-            PRAGMA user_version=1;
+            CREATE INDEX IF NOT EXISTS events_run_stage ON events(run_id,stage,id);
+            CREATE TABLE IF NOT EXISTS run_controls (
+                run_id TEXT PRIMARY KEY REFERENCES runs(run_id), cooldown_until REAL NOT NULL DEFAULT 0,
+                cycles INTEGER NOT NULL DEFAULT 0, halted INTEGER NOT NULL DEFAULT 0, reason TEXT,
+                updated_at REAL NOT NULL
+            );
+            PRAGMA user_version=2;
         """)
 
     def close(self):
         self.db.close()
+
+    def prepare_cooldown(self, *, enabled=True):
+        """Preserve an active pause across restarts; give a new launch a fresh idle budget."""
+        now = time.time()
+        with self.db:
+            self.db.execute("INSERT OR IGNORE INTO run_controls(run_id,updated_at) VALUES (?,?)", (self.run_id, now))
+            self.db.execute(
+                "UPDATE run_controls SET cooldown_until=0,cycles=0,halted=0,reason=NULL,updated_at=? "
+                "WHERE run_id=? AND (cooldown_until<=? OR ?=0)",
+                (now, self.run_id, now, int(enabled)),
+            )
+
+    def cooldown_state(self):
+        row = self.db.execute("SELECT * FROM run_controls WHERE run_id=?", (self.run_id,)).fetchone()
+        result = dict(row) if row else {"cooldown_until": 0, "cycles": 0, "halted": 0, "reason": None}
+        result["active"] = result["cooldown_until"] > time.time() and not result["halted"]
+        return result
+
+    def cooldown_events(self, after=0):
+        return [
+            dict(row)
+            for row in self.db.execute(
+                "SELECT id,status,error,at FROM events WHERE run_id=? AND stage='cooldown' AND id>? ORDER BY id",
+                (self.run_id, after),
+            )
+        ]
+
+    def request_cooldown(self, seconds, max_cycles):
+        """Coalesce simultaneous requests: joining workers never extend the deadline."""
+        now = time.time()
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.db.execute("SELECT * FROM run_controls WHERE run_id=?", (self.run_id,)).fetchone()
+            if not row:
+                self.db.execute("INSERT INTO run_controls(run_id,updated_at) VALUES (?,?)", (self.run_id, now))
+                row = self.db.execute("SELECT * FROM run_controls WHERE run_id=?", (self.run_id,)).fetchone()
+            if row["halted"] or row["cooldown_until"] > now:
+                self.db.commit()
+                return self.cooldown_state()
+            exhausted = row["cycles"] >= max_cycles
+            until = 0 if exhausted else now + seconds
+            cycles = row["cycles"] if exhausted else row["cycles"] + 1
+            reason = "cooldown_limit_reached" if exhausted else "consecutive_failures"
+            self.db.execute(
+                "UPDATE run_controls SET cooldown_until=?,cycles=?,halted=?,reason=?,updated_at=? WHERE run_id=?",
+                (until, cycles, int(exhausted), reason, now, self.run_id),
+            )
+            self.db.execute(
+                "INSERT INTO events(run_id,worker,stage,status,error,at) VALUES (?,?,'cooldown',?,?,?)",
+                (
+                    self.run_id,
+                    self.worker,
+                    "exhausted" if exhausted else "paused",
+                    json.dumps({"reason": reason, "cooldown_until": until, "cycles": cycles, "limit": max_cycles}),
+                    now,
+                ),
+            )
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+        return self.cooldown_state()
+
+    def finish_cooldown(self):
+        now = time.time()
+        with self.db:
+            changed = self.db.execute(
+                "UPDATE run_controls SET cooldown_until=0,updated_at=? "
+                "WHERE run_id=? AND cooldown_until>0 AND cooldown_until<=? AND halted=0",
+                (now, self.run_id, now),
+            ).rowcount
+            if changed:
+                self.db.execute(
+                    "INSERT INTO events(run_id,worker,stage,status,at) VALUES (?,?,'cooldown','resumed',?)",
+                    (self.run_id, self.worker, now),
+                )
 
     def register_run(self, config, companies):
         now = time.time()
@@ -314,12 +396,15 @@ def import_run(store, root, *, max_documents=0):
                     store.db.execute(
                         "UPDATE documents SET codigo=?,download_url=?,verified_at=?,"
                         "status=CASE WHEN status='pending' THEN 'verified' ELSE status END WHERE cve=? "
-                        "AND (verified_at IS NULL OR verified_at<=?)",
+                        "AND (verified_at IS NULL OR verified_at<=?) "
+                        "AND NOT EXISTS (SELECT 1 FROM events e WHERE e.cve=documents.cve "
+                        "AND e.status='expired_codigo' AND e.at>=?)",
                         (
                             record.get("codigo"),
                             record.get("link"),
                             record.get("verified_at"),
                             cve,
+                            record.get("verified_at") or 0,
                             record.get("verified_at") or 0,
                         ),
                     )
@@ -469,6 +554,7 @@ def main(argv=None):
             result = {
                 "database": str(store.path),
                 "run_id": args.run_id,
+                "cooldown": store.cooldown_state(),
                 "companies": len(rows),
                 "statuses": {
                     status: sum(r["status"] == status for r in rows) for status in sorted({r["status"] for r in rows})
