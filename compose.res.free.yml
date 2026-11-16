@@ -23,6 +23,12 @@ services:
       - "${RES_FREE_BATCH_SIZE:-10}"
       - --sources
       - "${RES_FREE_SOURCES:-all}"
+      - --max-candidates
+      - "${RES_FREE_MAX_CANDIDATES:-0}"
+      - --source-records
+      - "${RES_FREE_SOURCE_RECORDS:-0}"
+      - --proxy-ports
+      - "${RES_FREE_PROXY_PORTS:-80,443}"
       - --max-documents
       - "${RES_MAX_DOCUMENTS:-0}"
       - --company-attempts

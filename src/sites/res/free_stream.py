@@ -14,6 +14,7 @@ import shutil
 import signal
 import time
 import uuid
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -24,6 +25,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from scripts import res_free_pilot as pilot
+from src.proxy.candidate_filter import filter_candidate_ips
 from src.proxy.reputation import (
     ReputationDenied,
     check_ip,
@@ -58,14 +60,16 @@ class BatchResult:
     error: str | None = None
 
 
-def endpoint_allowed(endpoint: str, exceptions: set[tuple[str, int]]) -> bool:
+def endpoint_allowed(endpoint: str, exceptions: set[tuple[str, int]], ports: set[int] | None = None) -> bool:
     """Match the host firewall policy before spending any network requests."""
     try:
         parts = urlsplit(endpoint)
         if parts.scheme not in {"http", "socks5", "socks5h"} or parts.username or parts.password:
             return False
         address = ipaddress.ip_address(validate_ip(parts.hostname or ""))
-        return address.version == 4 and (parts.port in {80, 443} or (str(address), parts.port) in exceptions)
+        return address.version == 4 and (
+            parts.port in (ports if ports is not None else {80, 443}) or (str(address), parts.port) in exceptions
+        )
     except ValueError:
         return False
 
@@ -82,12 +86,21 @@ def endpoint_exceptions(value: str) -> set[tuple[str, int]]:
     return result
 
 
+def proxy_ports(value: str) -> set[int]:
+    """Explicit application policy; does not grant corresponding host firewall access."""
+    ports = {int(item.strip()) for item in value.split(",") if item.strip()}
+    if not ports or any(port < 1 or port > 65535 for port in ports):
+        raise ValueError("Proxy ports must be a comma-separated list of ports 1..65535")
+    return ports
+
+
 class ProxyProducer:
     """Downloads only public list data; all target probing is HTTP, never a browser."""
 
     def __init__(self, args, root: Path, queue: FreeQueue, changed: asyncio.Event, stop: asyncio.Event):
         self.args, self.root, self.queue, self.changed, self.stop = args, root, queue, changed, stop
         self.exceptions = endpoint_exceptions(args.allowed_proxy_endpoints)
+        self.ports = proxy_ports(args.proxy_ports)
         self.stats: dict[str, Any] = {
             "checks": 0,
             "ready": 0,
@@ -112,30 +125,91 @@ class ProxyProducer:
             timeout=self.args.proxy_timeout,
             cache_dir=self.root / "source-cache",
             download_concurrency=3,
-            max_records=self.args.source_records,
+            max_records=self.args.source_records or None,
             max_response_bytes=16 * 1024 * 1024,
         )
-        candidates = [
-            (candidate.url, candidate.source)
-            for candidate in sorted(catalog.candidates, key=lambda row: row.priority)
-            if endpoint_allowed(candidate.url, self.exceptions)
-        ]
+        raw = [(candidate.url, candidate.source) for candidate in sorted(catalog.candidates, key=lambda row: row.priority)]
         if "free-proxy" in sources:
             try:
                 extra = await asyncio.wait_for(load_free_proxy_candidates(request_timeout=10), 35)
-                candidates.extend(
-                    (endpoint, "free-proxy") for endpoint in extra if endpoint_allowed(endpoint, self.exceptions)
-                )
+                raw.extend((endpoint, "free-proxy") for endpoint in extra)
             except Exception as error:
                 catalog.errors["free-proxy"] = type(error).__name__
-        self.queue.prune(unseen_for=86400)
-        self.queue.add_candidates(candidates[: self.args.max_candidates], capacity=self.args.max_candidates)
+        seen: set[str] = set()
+        local_rejected: Counter[str] = Counter()
+        ipv4_rows: list[tuple[str, str, str]] = []
+        for endpoint, source in raw:
+            if endpoint in seen:
+                local_rejected["duplicates"] += 1
+                continue
+            seen.add(endpoint)
+            try:
+                parts = urlsplit(endpoint)
+                if parts.scheme not in {"http", "socks5", "socks5h"} or parts.username or parts.password or not parts.port:
+                    local_rejected["unsupported_endpoint"] += 1
+                    continue
+                address = ipaddress.ip_address(parts.hostname or "")
+                if address.version != 4 or not address.is_global:
+                    local_rejected["non_public_ipv4"] += 1
+                    continue
+                try:
+                    validate_ip(str(address))
+                except ReputationDenied:
+                    local_rejected["blocked_networks"] += 1
+                    continue
+                ipv4_rows.append((endpoint, source, str(address)))
+            except ValueError:
+                local_rejected["invalid_endpoint"] += 1
         self.stats.update(
             source_counts=catalog.source_counts,
             source_errors=catalog.errors,
-            catalog_candidates=len(catalog.candidates),
-            port_eligible=len(candidates),
+            catalog_candidates=len(raw),
+            catalog_unique=len(seen),
+            local_rejected=dict(local_rejected),
+            prefilter_status="screening",
         )
+        # Download cached lists once; all IP membership tests are local and off-loop.
+        try:
+            screened, feed_rejected = await asyncio.to_thread(filter_candidate_ips, ipv4_rows)
+        except Exception:
+            self.stats["prefilter_status"] = "blocked"
+            raise
+        eligible = [
+            (endpoint, source) for endpoint, source in screened if endpoint_allowed(endpoint, self.exceptions, self.ports)
+        ]
+        rejected_ports = Counter(
+            str(urlsplit(endpoint).port)
+            for endpoint, _ in screened
+            if not endpoint_allowed(endpoint, self.exceptions, self.ports)
+        )
+        candidates = eligible[: self.args.max_candidates] if self.args.max_candidates else eligible
+        self.queue.prune(unseen_for=86400)
+        removed = self.queue.retain_candidates(endpoint for endpoint, _ in candidates)
+        inserted = self.queue.add_candidates(candidates, capacity=self.args.max_candidates)
+        self.stats.update(
+            feed_rejected=feed_rejected,
+            blacklist_passed=len(screened),
+            port_rejected=len(screened) - len(eligible),
+            rejected_ports=dict(rejected_ports.most_common(10)),
+            port_eligible=len(eligible),
+            selected_candidates=len(candidates),
+            capacity_rejected=len(eligible) - len(candidates),
+            queue_inserted=inserted,
+            queue_removed=removed,
+            prefilter_status="ready",
+        )
+        if self.notifications:
+            self.notifications.activity(
+                "catalog_filtered",
+                f"🧹 RES {self.args.run_id}: каталог отфильтрован\n"
+                f"Получено: {len(raw)}; уникальных endpoint: {len(seen)}\n"
+                f"Запрещённые сети (8 диапазонов): {local_rejected['blocked_networks']}; "
+                f"блоклисты: {sum(feed_rejected.values())}\n"
+                f"Прошло IP-фильтры: {len(screened)}; отклонено по портам: {len(screened) - len(eligible)}\n"
+                f"Частые исключённые порты: {dict(rejected_ports.most_common(5))}\n"
+                f"В выбранном пуле: {len(candidates)}; добавлено новых: {inserted}; лимит пула: "
+                f"{self.args.max_candidates or 'не задан'}",
+            )
         self.stats.pop("catalog_error", None)
         self.stats["catalog_refreshes"] += 1
         # Bound raw download cache independently from the small durable queue.
@@ -754,8 +828,8 @@ def parse_args(argv=None):
     parser.add_argument("--max-documents", type=int, default=0)
     parser.add_argument("--company-attempts", type=int, default=3)
     parser.add_argument("--sources", default="all")
-    parser.add_argument("--max-candidates", type=int, default=20000)
-    parser.add_argument("--source-records", type=int, default=10000)
+    parser.add_argument("--max-candidates", type=int, default=0, help="0 = no candidate pool truncation")
+    parser.add_argument("--source-records", type=int, default=0, help="0 = parse all records within source byte limit")
     parser.add_argument("--source-cache-mib", type=int, default=128)
     parser.add_argument("--catalog-seconds", type=float, default=600)
     parser.add_argument("--proxy-check-concurrency", type=int, default=12)
@@ -765,6 +839,7 @@ def parse_args(argv=None):
     parser.add_argument("--proxy-retry-seconds", type=float, default=300)
     parser.add_argument("--retry-seconds", type=float, default=30)
     parser.add_argument("--ready-capacity", type=int, default=20)
+    parser.add_argument("--proxy-ports", default=os.getenv("RES_FREE_PROXY_PORTS", "80,443"))
     parser.add_argument("--allowed-proxy-endpoints", default=os.getenv("RES_FREE_ALLOWED_PROXY_ENDPOINTS", ""))
     parser.add_argument("--worker-timeout", type=float, default=1800)
     parser.add_argument(
@@ -798,8 +873,6 @@ def parse_args(argv=None):
             for value in (
                 args.batch_size,
                 args.company_attempts,
-                args.max_candidates,
-                args.source_records,
                 args.source_cache_mib,
                 args.proxy_check_concurrency,
                 args.ready_capacity,
@@ -809,6 +882,8 @@ def parse_args(argv=None):
         )
         or args.proxy_check_concurrency > 64
         or args.ready_capacity < args.browsers
+        or args.max_candidates < 0
+        or args.source_records < 0
         or args.max_documents < 0
         or args.max_cooldowns < 0
     ):
@@ -832,6 +907,7 @@ def parse_args(argv=None):
     ):
         parser.error("Invalid timing bounds")
     resolve_sources(args.sources)
+    proxy_ports(args.proxy_ports)
     endpoint_exceptions(args.allowed_proxy_endpoints)
     args.refresh = False
     args.proxy_provider = "residential"

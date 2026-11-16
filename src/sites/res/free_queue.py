@@ -74,6 +74,9 @@ class FreeQueue:
             )
 
     def add_candidates(self, candidates: Iterable[tuple[str, str]], *, capacity: int) -> int:
+        """Insert candidates; capacity=0 preserves all admitted endpoints."""
+        if capacity < 0:
+            raise ValueError("Candidate capacity must be nonnegative")
         now = time.time()
         count = self.database.execute("SELECT COUNT(*) FROM free_proxies").fetchone()[0]
         remaining = max(0, capacity - count)
@@ -85,12 +88,25 @@ class FreeQueue:
                     self.database.execute(
                         "UPDATE free_proxies SET seen_at=?,source=? WHERE endpoint=?", (now, source, endpoint)
                     )
-                elif inserted < remaining:
+                elif capacity == 0 or inserted < remaining:
                     self.database.execute(
                         "INSERT INTO free_proxies(endpoint,source,seen_at) VALUES(?,?,?)", (endpoint, source, now)
                     )
                     inserted += 1
         return inserted
+
+    def retain_candidates(self, endpoints: Iterable[str]) -> int:
+        """Drop inactive candidates outside the newly screened shortlist; preserve live leases."""
+        with self.database:
+            self.database.execute("CREATE TEMP TABLE IF NOT EXISTS retained_candidates(endpoint TEXT PRIMARY KEY)")
+            self.database.execute("DELETE FROM retained_candidates")
+            self.database.executemany(
+                "INSERT OR IGNORE INTO retained_candidates VALUES(?)", ((value,) for value in endpoints)
+            )
+            return self.database.execute(
+                "DELETE FROM free_proxies WHERE state NOT IN ('leased','probing') AND NOT EXISTS "
+                "(SELECT 1 FROM retained_candidates r WHERE r.endpoint=free_proxies.endpoint)"
+            ).rowcount
 
     def claim_probe(self, *, fresh_for: float) -> dict[str, Any] | None:
         now = time.time()

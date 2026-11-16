@@ -378,3 +378,48 @@ async def test_proxy_statistics_distinguish_reputation_from_connection_failure(q
     assert producer.stats["checks"] == 1
     assert producer.stats[key] == 1
     assert producer.stats["ready"] == 0
+
+
+def test_unlimited_candidate_pool_and_refresh_preserve_active_jobs_and_exit_pauses(queue):
+    queue.add_candidates([(f"http://203.0.113.{index}:80", "fixture") for index in range(1, 40)], capacity=0)
+    assert queue.database.execute("SELECT COUNT(*) FROM free_proxies").fetchone()[0] == 39
+    queue.add_jobs([company(1)])
+    queue.finish_probe("http://203.0.113.1:80", exit_ip="198.51.100.1")
+    proxy, _ = queue.claim_batch("owner", 1)
+    queue.database.execute("INSERT INTO free_exit_cooldowns VALUES ('198.51.100.2',9999999999,'site_document_limit')")
+    queue.database.commit()
+    assert queue.retain_candidates([]) == 38
+    assert queue.database.execute("SELECT state FROM free_proxies").fetchone()[0] == "leased"
+    assert queue.database.execute("SELECT COUNT(*) FROM free_exit_cooldowns").fetchone()[0] == 1
+    assert queue.counts()["jobs"] == {"leased": 1}
+
+
+async def test_catalog_screens_lists_before_ports_and_has_no_default_pool_truncation(queue, tmp_path, monkeypatch):
+    from src.proxy.sources.catalog import CatalogLoadResult, ProxyCandidate
+
+    args = stream.parse_args(["--sources", "monosans", "--no-telegram"])
+    assert args.max_candidates == 0 and args.source_records == 0
+    candidates = [
+        ProxyCandidate(url=f"http://{host}:{port}", protocol="http", source="fixture")
+        for host, port in [("11.0.0.1", 80), ("11.0.0.2", 3128), ("12.0.0.1", 80), ("8.211.1.1", 80)]
+    ]
+    loader = AsyncMock(return_value=CatalogLoadResult(candidates=candidates))
+    monkeypatch.setattr(stream, "load_public_catalog", loader)
+    seen = []
+
+    def local_filter(rows):
+        seen.extend(rows)
+        return [(endpoint, source) for endpoint, source, host in rows if host != "12.0.0.1"], {"abuseipdb": 1}
+
+    monkeypatch.setattr(stream, "filter_candidate_ips", local_filter)
+    producer = stream.ProxyProducer(args, tmp_path, queue, asyncio.Event(), asyncio.Event())
+    await producer.refresh()
+    assert loader.call_args.kwargs["max_records"] is None
+    assert any(row[2] == "11.0.0.2" for row in seen)  # Nonstandard port is still IP screened first.
+    assert not any(row[2] == "8.211.1.1" for row in seen)
+    assert producer.stats["local_rejected"]["blocked_networks"] == 1
+    assert producer.stats["feed_rejected"] == {"abuseipdb": 1}
+    assert producer.stats["port_rejected"] == 1 and producer.stats["selected_candidates"] == 1
+    assert producer.stats["rejected_ports"] == {"3128": 1}
+    assert stream.endpoint_allowed("http://11.0.0.2:3128", set(), stream.proxy_ports("80,443,3128"))
+    assert not stream.endpoint_allowed("http://8.211.1.1:3128", set(), stream.proxy_ports("80,443,3128"))

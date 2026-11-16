@@ -407,7 +407,7 @@ async def load_public_catalog(
     max_cache_age_hours: float = 24,
     max_response_bytes: int = 32 * 1024 * 1024,
     download_concurrency: int = 3,
-    max_records: int = 100_000,
+    max_records: int | None = 100_000,
     source_overrides: Mapping[str, SourceDefinition] | None = None,
 ) -> CatalogLoadResult:
     """Load registered sources independently, preserving partial successes."""
@@ -415,7 +415,7 @@ async def load_public_catalog(
     unknown = [source for source in requested if source not in SOURCE_REGISTRY]
     if unknown:
         raise ValueError(f"Unknown proxy source(s): {', '.join(unknown)}")
-    if timeout <= 0 or download_concurrency < 1 or max_response_bytes < 1 or max_records < 1:
+    if timeout <= 0 or download_concurrency < 1 or max_response_bytes < 1 or (max_records is not None and max_records < 1):
         raise ValueError("Source timeout, concurrency, byte and record limits must be positive")
     result = CatalogLoadResult()
     definitions = {**SOURCE_REGISTRY, **(source_overrides or {})}

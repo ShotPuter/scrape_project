@@ -14,6 +14,7 @@ import json
 import os
 import sqlite3
 import time
+from collections.abc import Callable
 from contextlib import closing
 from datetime import datetime
 from functools import lru_cache
@@ -154,6 +155,21 @@ def _snapshot(source: str, key: str) -> str:
         raise
     except Exception:
         raise BlocklistUnavailable(f"{source} cache or configuration invalid; connection denied") from None
+
+
+def prepare_ipv4_checker(key: str) -> Callable[[ipaddress.IPv4Address], str | None]:
+    """Prepare immutable indexes once for a batch; return its matched source or None."""
+    prepared = {source: _parse(source, _snapshot(source, key))[0][4] for source in ("spamhaus_v4", "abuseipdb")}
+
+    def matches(address: ipaddress.IPv4Address) -> str | None:
+        number = int(address)
+        for source, indexes in prepared.items():
+            for prefix, networks in indexes.items():
+                if (number >> (32 - prefix)) << (32 - prefix) in networks:
+                    return source
+        return None
+
+    return matches
 
 
 def check_blocklists(value: str, key: str) -> None:

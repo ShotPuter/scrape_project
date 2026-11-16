@@ -1,4 +1,5 @@
 import concurrent.futures
+import ipaddress
 import json
 import time
 from datetime import UTC, datetime
@@ -226,3 +227,12 @@ def test_blocklist_outage_never_falls_back_to_check(monkeypatch):
     with pytest.raises(rep.ReputationDenied, match="snapshot unavailable"):
         rep.check_ip("11.0.1.1")
     lookup.assert_not_called()
+
+
+def test_prepared_batch_checker_reads_snapshots_once():
+    # Use the existing isolated fixture; only snapshot acquisition should touch SQLite.
+    checker = bl.prepare_ipv4_checker("private-test-key")
+    assert checker(ipaddress.IPv4Address("11.0.0.1")) == "spamhaus_v4"
+    assert checker(ipaddress.IPv4Address("12.0.0.1")) == "abuseipdb"
+    assert checker(ipaddress.IPv4Address("13.0.0.1")) is None
+    assert bl._download.call_count == 2
