@@ -375,6 +375,11 @@ async def test_current_browser_http_pair_must_match_even_after_dynamic_preflight
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, Mock
 
+    from src.proxy import reputation
+
+    # These fixtures test transport pairing, not the separately tested IP policy.
+    monkeypatch.setattr(reputation, "screen_proxy", AsyncMock(side_effect=lambda url: url))
+    monkeypatch.setattr(reputation, "check_ip", lambda ip: None)
     args = make_args(tmp_path)
     endpoint = pilot.ProxyEndpoint(
         "http://192.0.2.1:8080", {"server": "http://192.0.2.1:8080"}, "test", expected_ip="192.0.2.1", dynamic_ip=dynamic
@@ -459,7 +464,10 @@ def test_brightdata_runtime_environment_overrides_local_file(tmp_path, monkeypat
     import requests
 
     from scripts import res_audio_pilot
+    from src.proxy import reputation
 
+    # Deliberately fictional endpoint; no network/reputation lookup in this unit test.
+    monkeypatch.setattr(reputation, "check_proxy", lambda url: url)
     monkeypatch.setattr(
         res_audio_pilot,
         "dotenv_values",
@@ -626,3 +634,53 @@ async def test_diagnostic_write_error_does_not_mask_the_original_download_failur
         await pilot.ensure_document(cascade, None, CVE, None, state, args, tmp_path, Counter())
     assert caught.value is issue
     assert state["cves"][CVE]["codigo"] == CODIGO and cascade.calls == []
+
+
+@pytest.mark.parametrize("scheme", ["http", "socks5"])
+def test_file_proxy_protocol_matches_http_and_browser_transports(scheme):
+    endpoint = pilot.endpoint_from_url(f"{scheme}://user:secret@1.1.1.1:1080")
+    assert endpoint.url.startswith(scheme + "://")
+    assert endpoint.browser["server"] == f"{scheme}://1.1.1.1:1080"
+    assert endpoint.browser["username"] == "user"
+    assert "secret" not in repr(endpoint)
+
+
+async def test_captcha_budget_is_independent_of_short_http_timeout(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    args = make_args(tmp_path, timeout=7)
+    page = SimpleNamespace()
+    form = AsyncMock()
+    monkeypatch.setattr(pilot, "open_token_form", form)
+    monkeypatch.setattr(pilot, "read_token", AsyncMock(return_value="accepted-token"))
+    cascade = pilot.Cascade(page, args, "", None, Counter(), [])
+    cascade.run_stages = AsyncMock()
+    args.delay = 0
+    assert await cascade.mint(pilot.RES_URL) == "accepted-token"
+    form.assert_awaited_once_with(page, pilot.RES_URL, 130)
+    assert args.timeout == 7 and args.audio_seconds == 130
+
+
+@pytest.mark.parametrize("option", ["--captcha-timeout", "--audio-seconds"])
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])
+def test_invalid_captcha_budgets_rejected(option, value):
+    with pytest.raises(SystemExit):
+        pilot.parse_args([option, value])
+
+
+@pytest.mark.parametrize("scope,halted", [("run", True), ("proxy", False)])
+async def test_document_daily_limit_scope(tmp_path, monkeypatch, scope, halted):
+    from unittest.mock import Mock
+
+    args = make_args(tmp_path, site_limit_scope=scope)
+    tracker = Mock()
+    args.tracking_store = tracker
+
+    async def limited(*args):
+        raise SearchIssue("daily_limit", "Daily document quota")
+
+    monkeypatch.setattr(pilot, "_ensure_document", limited)
+    with pytest.raises(SearchIssue):
+        await pilot.ensure_document(FakeCascade(), None, CVE, "example", state_with(), args, tmp_path, Counter())
+    assert tracker.halt_daily_limit.called is halted

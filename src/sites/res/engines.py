@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import ipaddress
 import json
 import os
 import ssl
@@ -13,7 +14,11 @@ from contextlib import AsyncExitStack, asynccontextmanager
 
 
 @asynccontextmanager
-async def launch_context(profile, *, proxy=None, engine="patchright", headed=False, pdf=False, proxy_ca=None):
+async def launch_context(profile, *, proxy=None, engine="patchright", headed=False, pdf=False, proxy_ca=None, proxy_ip=None):
+    if proxy:
+        from src.proxy.reputation import screen_proxy
+
+        proxy = {**proxy, "server": await screen_proxy(proxy["server"])}
     profile.mkdir(parents=True, exist_ok=True, mode=0o700)
     ca_flag = None
     if proxy_ca is not None:
@@ -71,6 +76,9 @@ async def launch_context(profile, *, proxy=None, engine="patchright", headed=Fal
         }
         if proxy:
             options["proxy"] = proxy
+            # Reuse a verified egress when available. A second IP lookup would
+            # otherwise need the provider's CA and could observe another route.
+            options["geoip"] = str(ipaddress.ip_address(proxy_ip)) if proxy_ip else True
         if pdf:
             options.update(accept_downloads=True, firefox_user_prefs={"pdfjs.disabled": True})
         async with AsyncCamoufox(**options) as context:

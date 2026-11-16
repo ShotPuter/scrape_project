@@ -1,0 +1,13 @@
+# Installed on the host as /etc/scraper-docker-firewall.conf (root-owned).
+# Exact screened PUBLIC IPv4:port pairs only. Never copy incident IPs here.
+ALLOWED_PROXY_ENDPOINTS=""
+DOCKER_BRIDGE_INTERFACES="docker0 br-+"
+PROXY_THREAT_CACHE=/var/cache/scraper-threat-feeds
+PROXY_THREAT_REFRESH_HOURS=6
+PROXY_THREAT_MAX_AGE_HOURS=12
+# The distro Python 3 must be able to import this checkout's stdlib-only module.
+FIREWALL_PYTHON=/usr/bin/python3
+# By default, exact non-loopback IPv4 resolvers are read from the host's
+# /etc/resolv.conf and /run/systemd/resolve/resolv.conf (including VPC DNS).
+# Optional explicit list; an empty value disables this exception:
+# TRUSTED_DNS_SERVERS="your-exact-IPv4-resolver"

@@ -1,0 +1,11 @@
+[Unit]
+Description=Check scraper threat feed freshness twice an hour
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=30min
+Persistent=true
+Unit=scraper-threat-feeds.service
+
+[Install]
+WantedBy=timers.target

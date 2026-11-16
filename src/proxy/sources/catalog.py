@@ -407,7 +407,7 @@ async def load_public_catalog(
     max_cache_age_hours: float = 24,
     max_response_bytes: int = 32 * 1024 * 1024,
     download_concurrency: int = 3,
-    max_records: int = 10_000,
+    max_records: int = 100_000,
     source_overrides: Mapping[str, SourceDefinition] | None = None,
 ) -> CatalogLoadResult:
     """Load registered sources independently, preserving partial successes."""

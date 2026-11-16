@@ -92,7 +92,7 @@ class Settings:
     proxy_paid_file: Path = field(default_factory=lambda: BASE_DIR / "data" / "paid-proxies.txt")
     proxy_source_max_response_bytes: int = 32 * 1024 * 1024
     proxy_source_download_concurrency: int = 3
-    proxy_source_max_records: int = 10_000
+    proxy_source_max_records: int = 100_000
     proxy_catalog_cache_dir: Path = field(default_factory=lambda: BASE_DIR / "data" / "proxy-sources")
     proxy_source_cache_max_age_hours: float = 24
     proxy_sample_size: int = 0
@@ -131,7 +131,7 @@ class Settings:
     proxy_db_max_age_hours: float = 24
     proxy_db_refresh_seconds: float = 30
     proxy_verified_reuse_seconds: float = 300
-    proxy_autocollect: bool = True
+    proxy_autocollect: bool = False
     # Startup must stay bounded even when every candidate is slow or the collector hangs.
     proxy_warmup_timeout_seconds: float = 90
     proxy_startup_timeout_seconds: float = 180

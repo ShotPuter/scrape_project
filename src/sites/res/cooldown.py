@@ -22,6 +22,13 @@ def must_yield(args, runtime):
     return runtime.get("pause_requested", False) or control["active"] or control["halted"]
 
 
+def halt_reason(control, args):
+    code = control.get("reason") or "cooldown_limit_reached"
+    if code == "daily_document_limit":
+        return {"code": code}
+    return {"code": code, "count": control["cycles"], "limit": args.max_cooldowns}
+
+
 async def wait(args, runtime, report):
     tracker = getattr(args, "tracking_store", None)
     control = state(args, runtime)
@@ -41,7 +48,7 @@ async def wait(args, runtime, report):
             runtime["local_cooldown"] = control
     if control["halted"]:
         runtime["stop"] = True
-        report["stop_reason"] = {"code": "cooldown_limit_reached", "count": control["cycles"], "limit": args.max_cooldowns}
+        report["stop_reason"] = halt_reason(control, args)
         report["cooldown"] = control
         return
     entered = False
@@ -53,7 +60,7 @@ async def wait(args, runtime, report):
         control = state(args, runtime)
     if control["halted"]:
         runtime["stop"] = True
-        report["stop_reason"] = {"code": "cooldown_limit_reached", "count": control["cycles"], "limit": args.max_cooldowns}
+        report["stop_reason"] = halt_reason(control, args)
         report["cooldown"] = control
         return
     if entered:

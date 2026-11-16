@@ -245,3 +245,69 @@ async def test_confirmed_stale_link_is_cleared_in_sqlite_even_if_new_captcha_fai
         assert store.db.execute("SELECT codigo FROM documents WHERE cve=?", (CVE,)).fetchone()[0] is None
     finally:
         store.close()
+
+
+async def test_site_daily_limit_preserves_codigo_and_stops_other_workers(tmp_path, monkeypatch):
+    from collections import Counter
+    from contextlib import asynccontextmanager
+
+    import httpx
+
+    root, worker, saved = fixture_run(tmp_path)
+    (worker / saved["local_path"]).unlink()
+    store = TrackingStore(tmp_path / "tracking.sqlite3", "sample", worker="w00")
+    import_run(store, root)
+    other = {"company_id": "other", "company_name": "Other", "rut": None}
+    store.register_run({}, [other])
+    store.prepare_cooldown()
+    args = pilot.parse_args(["--output", str(worker), "--audio-model", ""])
+    args.state_path, args.tracking_store = worker / "state.json", store
+    state = pilot.load_state(args.state_path)
+    entered = []
+
+    class NoCaptcha:
+        minted = 0
+        events = []
+        audio = None
+
+        async def mint(self, *args, **kwargs):
+            pytest.fail("Daily quota must not trigger another CAPTCHA")
+
+    @asynccontextmanager
+    async def session(*args):
+        entered.append(1)
+        yield NoCaptcha(), None
+
+    response = httpx.Response(
+        200,
+        headers={"content-type": "text/html"},
+        request=httpx.Request("GET", LINK),
+        text="Estimado(a) usuario(a): No es posible generar más de 100 documentos diarios.",
+    )
+
+    def download(*args):
+        issue = pilot.http_flow.DownloadIssue(
+            "daily_limit", "RES daily document limit reached (100 documents/day)", response
+        )
+        issue.daily_limit = 100
+        raise issue
+
+    monkeypatch.setattr(pilot, "endpoint_session", session)
+    monkeypatch.setattr(pilot, "load_companies", lambda *args: [COMPANY, other])
+    monkeypatch.setattr(pilot.http_flow, "download", download)
+    report = {"run_id": "quota", "proxies": []}
+    try:
+        await pilot.scan([pilot.DIRECT] * 10, args, state, Counter(), report, None, "", [])
+        assert entered == [1]
+        assert report["stop_reason"]["code"] == "daily_document_limit"
+        assert [r["status"] for r in report["companies"]] == ["daily_limit", "stopped"]
+        assert state["cves"][CVE]["codigo"] == "valid"
+        assert store.db.execute("SELECT codigo FROM documents WHERE cve=?", (CVE,)).fetchone()[0] == "valid"
+        assert store.cooldown_state()["halted"] == 1 and store.cooldown_state()["cycles"] == 0
+        # Another worker sees the shared halt before any browser/proxy session is opened.
+        second = {"run_id": "other-worker", "proxies": []}
+        await pilot.scan([pilot.DIRECT] * 10, args, state, Counter(), second, None, "", [])
+        assert entered == [1]
+        assert second["stop_reason"]["code"] == "daily_document_limit"
+    finally:
+        store.close()

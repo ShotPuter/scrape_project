@@ -266,6 +266,9 @@ def _session_for(
     headers: Mapping[str, str] | None = None,
     impersonate: str = "chrome",
 ):
+    from src.proxy.reputation import check_proxy
+
+    proxy_url = check_proxy(proxy_url)
     headers = {**(headers or {}), "User-Agent": user_agent}
     if transport == "curl_cffi":
         return AsyncSession(
@@ -313,6 +316,9 @@ async def verify_stage1(
     session = None
     started = 0.0
     try:
+        from src.proxy.reputation import screen_proxy
+
+        proxy_url = await screen_proxy(proxy_url)
         session = _session_for(
             proxy_url, transport=transport, user_agent=user_agent, policy=policy, headers=headers, impersonate=impersonate
         )
@@ -403,6 +409,9 @@ async def verify_stage2(
         started = 0.0
         outcome: _AttemptOutcome
         try:
+            from src.proxy.reputation import screen_proxy
+
+            proxy_url = await screen_proxy(proxy_url)
             session = _session_for(
                 proxy_url,
                 transport=transport,

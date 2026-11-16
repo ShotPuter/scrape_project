@@ -1,0 +1,63 @@
+# Explicit opt-in overlay: docker compose --env-file .env.res -f compose.res.yml -f compose.res.free.yml up
+services:
+  res:
+    environment:
+      ALLOW_PUBLIC_PROXY_COLLECTION: "1"
+      PROXY_REPUTATION_MODE: ${PROXY_REPUTATION_MODE:-blocklist_only}
+      RES_FREE_ALLOWED_PROXY_ENDPOINTS: ${RES_FREE_ALLOWED_PROXY_ENDPOINTS:-}
+    command:
+      - free-stream
+      - --year
+      - "${RES_YEAR:-2025}"
+      - --month
+      - "${RES_MONTH:-1}"
+      - --limit
+      - "${RES_LIMIT:-100}"
+      - --run-id
+      - "${RES_RUN_ID:-res-free-2025-01-100}"
+      - --output
+      - data/res-benchmark
+      - --browsers
+      - "${RES_BROWSERS:-5}"
+      - --batch-size
+      - "${RES_FREE_BATCH_SIZE:-10}"
+      - --sources
+      - "${RES_FREE_SOURCES:-all}"
+      - --max-documents
+      - "${RES_MAX_DOCUMENTS:-0}"
+      - --company-attempts
+      - "${RES_COMPANY_ATTEMPTS:-3}"
+      - --tokens-per-proxy
+      - "${RES_TOKENS_PER_PROXY:-20}"
+      - --proxy-check-concurrency
+      - "${RES_FREE_CHECK_CONCURRENCY:-12}"
+      - --proxy-rate-per-minute
+      - "${RES_FREE_CHECK_RATE_PER_MINUTE:-120}"
+      - --ready-capacity
+      - "${RES_FREE_READY_CAPACITY:-20}"
+      - --proxy-retry-seconds
+      - "${RES_FREE_PROXY_RETRY_SECONDS:-300}"
+      - --catalog-seconds
+      - "${RES_FREE_CATALOG_SECONDS:-600}"
+      - --idle-minutes
+      - "${RES_FREE_IDLE_MINUTES:-0}"
+      - --worker-timeout
+      - "${RES_FREE_WORKER_TIMEOUT:-1800}"
+      - --max-failures
+      - "${RES_MAX_FAILURES:-20}"
+      - --error-cooldown-minutes
+      - "${RES_ERROR_COOLDOWN_MINUTES:-10}"
+      - --max-cooldowns
+      - "${RES_FREE_MAX_COOLDOWNS:-0}"
+      - --site-limit-hours
+      - "${RES_FREE_SITE_LIMIT_HOURS:-24}"
+      - --timeout
+      - "${RES_TIMEOUT:-40}"
+      - --captcha-timeout
+      - "${RES_CAPTCHA_TIMEOUT:-130}"
+      - --delay
+      - "${RES_DELAY:-3}"
+      - --checkpoint-seconds
+      - "${RES_CHECKPOINT_INTERVAL:-15}"
+      - --telegram-minutes
+      - "${RES_FREE_TELEGRAM_INTERVAL_MINUTES:-30}"

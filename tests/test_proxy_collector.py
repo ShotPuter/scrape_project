@@ -44,6 +44,13 @@ def _success_stats(latency_ms: float = 10.0) -> CheckStats:
     )
 
 
+@pytest.fixture(autouse=True)
+def explicit_manual_public_collection(monkeypatch):
+    # These mocked collector tests model an explicitly enabled manual run.
+    # Default-off behavior is covered by test_proxy_reputation separately.
+    monkeypatch.setenv("ALLOW_PUBLIC_PROXY_COLLECTION", "1")
+
+
 @pytest.mark.asyncio
 async def test_collect_replaces_database_and_clears_dead_list(tmp_path, monkeypatch):
     csv_path = tmp_path / "proxies.csv"

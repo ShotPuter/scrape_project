@@ -22,6 +22,7 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
        /usr/local/lib/python3.11/site-packages/fpgen
 USER scraper
 RUN python -c "from faster_whisper.utils import download_model; download_model('base', cache_dir='/opt/res-audio-models')"
+RUN timeout 600 python -c "from camoufox.geolocation import download_mmdb; download_mmdb()"
 FROM runtime AS assets-none
 
 FROM runtime AS assets-download

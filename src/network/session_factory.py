@@ -43,6 +43,9 @@ class SessionFactory:
         return self._curl_fallback
 
     def create(self, proxy: str | None = None, *, transport: str | None = None, user_agent: str | None = None):
+        from src.proxy.reputation import check_proxy
+
+        proxy = check_proxy(proxy)
         requested = (transport or self.transport).lower()
         headers = dict(self.headers)
         if user_agent:
@@ -65,6 +68,9 @@ class SessionFactory:
             return self.make_curl(proxy, headers=headers)
 
     def make_curl(self, proxy: str | None = None, *, headers: dict[str, str] | None = None) -> AsyncSession:
+        from src.proxy.reputation import check_proxy
+
+        proxy = check_proxy(proxy)
         extra: dict[str, Any] = {}
         if proxy:
             extra["proxy"] = proxy

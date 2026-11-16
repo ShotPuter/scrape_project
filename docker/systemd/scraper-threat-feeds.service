@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh scraper FireHOL set and Docker egress gate
+Requires=docker.service
+After=docker.service network-online.target scraper-docker-firewall.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/scraper-docker-firewall.conf
+WorkingDirectory=/opt/scraper_project
+ExecStart=/opt/scraper_project/scripts/update_docker_ipset.sh
+UMask=0077

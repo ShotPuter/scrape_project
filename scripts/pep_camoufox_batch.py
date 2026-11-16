@@ -47,6 +47,10 @@ async def borrowed_context(context):
 @asynccontextmanager
 async def browser_context(options: dict, launch_lock: asyncio.Lock | None = None):
     """Serialize native fingerprint initialization, then keep browsers running concurrently."""
+    if options.get("proxy"):
+        from src.proxy.reputation import screen_proxy
+
+        options = {**options, "proxy": {**options["proxy"], "server": await screen_proxy(options["proxy"]["server"])}}
     async with AsyncExitStack() as stack:
         if launch_lock is None:
             context = await stack.enter_async_context(AsyncCamoufox(**options))

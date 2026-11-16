@@ -54,10 +54,67 @@ SOURCE_REGISTRY = {
     ),
     "rix4uni": SourceDefinition((SourceFile(f"{RAW}/rix4uni/fresh-proxy-list/main/proxylist.json"),), 10),
     "relayglass": SourceDefinition((SourceFile(f"{RAW}/relayglass/free-proxy-list/main/all.json"),), 5),
+    # Text feeds keep protocol labels; an HTTPS-capable CONNECT proxy still
+    # uses the HTTP proxy transport (TLS is established to the destination).
+    "shiftytr": SourceDefinition(
+        (
+            *protocol_files("ShiftyTR/Proxy-List", "master", ("http.txt", "socks4.txt", "socks5.txt")),
+            SourceFile(f"{RAW}/ShiftyTR/Proxy-List/master/https.txt", "text", "http"),
+        ),
+        60,
+    ),
+    "roosterkid": SourceDefinition(
+        protocol_files("roosterkid/openproxylist", "main", ("HTTPS_RAW.txt", "SOCKS4_RAW.txt", "SOCKS5_RAW.txt")), 60
+    ),
+    "hideip": SourceDefinition(
+        (
+            *protocol_files("zloi-user/hideip.me", "main", ("http.txt", "socks4.txt", "socks5.txt")),
+            SourceFile(f"{RAW}/zloi-user/hideip.me/main/https.txt", "text", "http"),
+            SourceFile(f"{RAW}/zloi-user/hideip.me/main/connect.txt", "text", "http"),
+        ),
+        10,
+    ),
+    "clarketm": SourceDefinition((SourceFile(f"{RAW}/clarketm/proxy-list/master/proxy-list-raw.txt", "text"),), 1440),
+    "maximilianfeix": SourceDefinition(
+        (
+            *protocol_files("maximilianfeix/free-proxy-list", "main", ("http.txt", "socks4.txt", "socks5.txt")),
+            SourceFile(f"{RAW}/maximilianfeix/free-proxy-list/main/https.txt", "text", "http"),
+        ),
+        60,
+    ),
+    "mmpx12": SourceDefinition(
+        (
+            *protocol_files("mmpx12/proxy-list", "master", ("http.txt", "socks4.txt", "socks5.txt")),
+            SourceFile(f"{RAW}/mmpx12/proxy-list/master/https.txt", "text", "http"),
+        ),
+        60,
+    ),
+    "aliilapro": SourceDefinition(protocol_files("ALIILAPRO/Proxy", "main", ("http.txt", "socks4.txt", "socks5.txt")), 60),
+    "murongpig": SourceDefinition(
+        protocol_files("MuRongPIG/Proxy-Master", "main", ("http.txt", "socks4.txt", "socks5.txt")), 60
+    ),
+    "zaeem20": SourceDefinition(
+        (
+            *protocol_files("Zaeem20/FREE_PROXIES_LIST", "master", ("http.txt", "socks4.txt", "socks5.txt")),
+            SourceFile(f"{RAW}/Zaeem20/FREE_PROXIES_LIST/master/https.txt", "text", "http"),
+        ),
+        10,
+    ),
+    "vakhov": SourceDefinition(
+        (
+            *protocol_files("vakhov/fresh-proxy-list", "master", ("http.txt", "socks4.txt", "socks5.txt")),
+            SourceFile(f"{RAW}/vakhov/fresh-proxy-list/master/https.txt", "text", "http"),
+        ),
+        60,
+    ),
+    "prxchk": SourceDefinition(protocol_files("prxchk/proxy-list", "main", ("http.txt", "socks4.txt", "socks5.txt")), 60),
+    "hookzof": SourceDefinition((SourceFile(f"{RAW}/hookzof/socks5_list/master/proxy.txt", "text", "socks5"),), 60),
+    "sunny9577": SourceDefinition((SourceFile(f"{RAW}/sunny9577/proxy-scraper/master/proxies.json"),), 60),
 }
 
-# Large or potentially stale reserves remain available through --sources / --provider all.
-DEFAULT_SOURCES = ("proxyscrape", "hproxy", "proxifly", "monosans", "relayglass", "thordata", "vpslab")
+# Explicit public collection uses the broad catalog; the known stale Jetkai
+# archive remains available via --sources all or --sources jetkai.
+DEFAULT_SOURCES = tuple(name for name in SOURCE_REGISTRY if name != "jetkai")
 
 
 def resolve_sources(value: str) -> list[str]:

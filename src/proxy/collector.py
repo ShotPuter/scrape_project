@@ -176,6 +176,10 @@ async def _load_iplocate_candidates(
 async def _load_candidate_sources(
     providers: list[str], csv_path: Path, source_url: str, config: CollectorConfig
 ) -> CatalogLoadResult:
+    from src.proxy.reputation import public_collection_allowed
+
+    if not public_collection_allowed():
+        providers = [p for p in providers if p in {"webshare", "paid"}]
     catalog = CatalogLoadResult()
     if "webshare" in providers:
         try:
@@ -284,7 +288,9 @@ async def collect(*, config: CollectorConfig, target: TargetProbe, csv_path: Pat
         webshare_free_fallback_threshold=threshold,
         free_sources_enabled=False,
     )
-    if usable <= threshold and reserves:
+    from src.proxy.reputation import public_collection_allowed
+
+    if public_collection_allowed() and usable <= threshold and reserves:
         _write_status(f"Webshare usable={usable} <= {threshold}; starting free proxy collection after Webshare publication")
         report["free_sources_enabled"] = True
         if kwargs.get("report_path") is not None:

@@ -36,10 +36,12 @@ ERRORS = {
     "proxy_failed",
     "proxy_ip_mismatch",
     "proxy_auth_failed",
+    "proxy_reputation_denied",
     "documents_failed",
     "retry_wait",
     "partial",
     "missing_pdf",
+    "daily_limit",
 }
 
 
@@ -146,6 +148,8 @@ def child_command(args, directory, count):
         str(args.max_documents),
         "--timeout",
         str(args.timeout),
+        "--captcha-timeout",
+        str(args.captcha_timeout),
         "--delay",
         str(args.delay),
         "--audio-model",
@@ -153,7 +157,7 @@ def child_command(args, directory, count):
         "--audio-rounds",
         "2",
         "--audio-seconds",
-        "90",
+        str(args.captcha_timeout),
         "--max-failures",
         str(args.max_failures),
         "--error-cooldown-minutes",
@@ -319,6 +323,12 @@ def cooldown_message(args, event, control):
         payload = json.loads(event.get("error") or "{}")
     except ValueError:
         payload = {}
+    if event["status"] == "daily_limit":
+        limit = payload.get("limit_per_day", 100)
+        return (
+            f"⛔ RES {args.run_id}: сайт сообщил о лимите {limit} документов в сутки. "
+            "Текущий запуск остановлен без автоматических повторов. CVE, ссылки и PDF сохранены."
+        )
     if event["status"] == "paused":
         until = datetime.fromtimestamp(payload.get("cooldown_until", control["cooldown_until"]), UTC).strftime(
             "%H:%M:%S UTC"
@@ -348,7 +358,12 @@ def final_message(args, summary):
         count for status, count in summary["statuses"].items() if status not in {"downloaded", "not_found", "no_cve_found"}
     )
     reasons = Counter(r["reason"]["code"] for r in summary.get("worker_stop_reasons", []))
-    stops = "\nОстановки процессов: " + ", ".join(f"{key}: {count}" for key, count in reasons.items()) if reasons else ""
+    labels = {"daily_document_limit": "суточный лимит RES", "cooldown_limit_reached": "исчерпаны паузы"}
+    stops = (
+        "\nОстановки процессов: " + ", ".join(f"{labels.get(key, key)}: {count}" for key, count in reasons.items())
+        if reasons
+        else ""
+    )
     return (
         f"🏁 RES {args.run_id} — {state}\n"
         f"PDF у {summary['companies_with_pdf']}/{len(summary['rows'])} компаний; не завершено: {unfinished}\n"
@@ -588,6 +603,7 @@ def parse_args(argv=None):
     parser.add_argument("--max-cooldowns", type=int, default=3)
     parser.add_argument("--audio-model", default="base")
     parser.add_argument("--timeout", type=float, default=40)
+    parser.add_argument("--captcha-timeout", type=float, default=130, help="CAPTCHA widget/audio budget in seconds")
     parser.add_argument("--delay", type=float, default=3)
     parser.add_argument("--checkpoint-seconds", type=float, default=15)
     parser.add_argument("--telegram-minutes", type=float, default=5)
@@ -609,7 +625,10 @@ def parse_args(argv=None):
         or min(args.company_attempts, args.tokens_per_proxy, args.max_failures) < 1
     ):
         parser.error("Invalid document, proxy, or attempt limits")
-    if any(not math.isfinite(v) or v <= 0 for v in (args.timeout, args.checkpoint_seconds, args.telegram_minutes)):
+    if any(
+        not math.isfinite(v) or v <= 0
+        for v in (args.timeout, args.captcha_timeout, args.checkpoint_seconds, args.telegram_minutes)
+    ):
         parser.error("Timing values must be finite and positive")
     if not math.isfinite(args.delay) or args.delay < 0:
         parser.error("delay must be finite and non-negative")

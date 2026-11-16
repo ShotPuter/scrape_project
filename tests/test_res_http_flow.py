@@ -328,3 +328,52 @@ def test_unexpected_response_diagnostics_bound_the_body_sample():
     assert len(failed.value.body_sample) == 65536
     assert failed.value.diagnostic["sample_truncated"] is True
     assert failed.value.diagnostic["body_bytes"] == len(body)
+
+
+DAILY_LIMIT_MESSAGE = "Estimado(a) usuario(a): No es posible generar más de 100 documentos diarios."
+
+
+def test_known_77_byte_daily_limit_response_is_not_a_pdf_or_a_captcha():
+    import hashlib
+
+    data = DAILY_LIMIT_MESSAGE.encode("utf-8")
+    assert len(data) == 77
+    assert hashlib.sha256(data).hexdigest() == "857dee44859a4495f792476f0e231630ee6ddeeb188afd0dd7f51a99b5542ffd"
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, headers={"content-type": "text/html; charset=utf-8"}, content=data)
+
+    with client(handler) as session, pytest.raises(http_flow.DownloadIssue) as error:
+        http_flow.download(session, DOCUMENT_LINK)
+    assert len(seen) == 1
+    assert error.value.status == "daily_limit"
+    assert error.value.daily_limit == error.value.diagnostic["daily_limit"] == 100
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        DAILY_LIMIT_MESSAGE,
+        "NO ES POSIBLE GENERAR MAS DE 100 DOCUMENTOS DIARIOS",
+        "<p>No es posible generar m&aacute;s de <b>100</b> documentos diarios.</p>",
+    ],
+)
+def test_daily_limit_text_normalization(text):
+    assert http_flow.daily_document_limit(text) == 100
+
+
+def test_verifier_quota_error_is_not_classified_as_captcha():
+    with (
+        client(lambda _: httpx.Response(200, json=envelope({"ErrorMessage": DAILY_LIMIT_MESSAGE}))) as session,
+        pytest.raises(http_flow.SearchIssue) as error,
+    ):
+        http_flow.verify(session, CVE, "single-use")
+    assert error.value.status == "daily_limit" and error.value.daily_limit == 100
+
+
+def test_daily_limit_words_in_a_valid_pdf_do_not_trigger_the_quota_detector():
+    pdf = b"%PDF-1.4\n" + DAILY_LIMIT_MESSAGE.encode() + b"\n%%EOF"
+    with client(lambda _: httpx.Response(200, headers={"content-type": "application/pdf"}, content=pdf)) as session:
+        assert http_flow.download(session, DOCUMENT_LINK) == pdf

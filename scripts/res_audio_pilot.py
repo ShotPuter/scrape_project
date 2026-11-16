@@ -77,6 +77,9 @@ def brightdata_proxy(output):
     username = config.get("BRIGHTDATA_PROXY_USERNAME", "")
     password = config.get("BRIGHTDATA_PROXY_PASSWORD", "")
     server = config.get("BRIGHTDATA_PROXY_SERVER", "http://brd.superproxy.io:44445")
+    from src.proxy.reputation import check_proxy
+
+    server = check_proxy(server)
     parts = urlsplit(server)
     if not username or not password or parts.scheme != "http" or not parts.hostname or not parts.port:
         raise ValueError("Valid Bright Data proxy settings are required in the environment or .env.camoufox")

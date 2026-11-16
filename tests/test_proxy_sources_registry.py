@@ -34,9 +34,22 @@ def test_registry_covers_requested_repositories_and_retains_existing_source():
         "rix4uni",
         "relayglass",
         "hproxy",
+        "shiftytr",
+        "roosterkid",
+        "hideip",
+        "clarketm",
+        "maximilianfeix",
+        "mmpx12",
+        "aliilapro",
+        "murongpig",
+        "zaeem20",
+        "vakhov",
+        "prxchk",
+        "hookzof",
+        "sunny9577",
     }
     assert "jetkai" not in DEFAULT_SOURCES
-    assert "gfpcom" not in DEFAULT_SOURCES
+    assert set(DEFAULT_SOURCES) == set(SOURCE_REGISTRY) - {"jetkai"}
     assert resolve_sources(" monosans,relayglass,monosans ") == ["monosans", "relayglass"]
     assert resolve_sources("all") == [*SOURCE_REGISTRY, "free-proxy"]
     with pytest.raises(ValueError):
@@ -46,7 +59,27 @@ def test_registry_covers_requested_repositories_and_retains_existing_source():
         build_parser().parse_args(["--sources", "monosans", "--provider", "relayglass"])
 
 
-@pytest.mark.parametrize("source", ["thespeedx", "vpslab", "gfpcom", "dpangestuw"])
+@pytest.mark.parametrize(
+    "source",
+    [
+        "thespeedx",
+        "vpslab",
+        "gfpcom",
+        "dpangestuw",
+        "shiftytr",
+        "roosterkid",
+        "hideip",
+        "clarketm",
+        "maximilianfeix",
+        "mmpx12",
+        "aliilapro",
+        "murongpig",
+        "zaeem20",
+        "vakhov",
+        "prxchk",
+        "hookzof",
+    ],
+)
 def test_protocol_shards_do_not_turn_socks_into_http(source):
     for file in SOURCE_REGISTRY[source].files:
         proxies = parse_source_payload("203.0.113.1:1080\n", source=source, default_protocol=file.protocol)
@@ -283,3 +316,26 @@ def test_record_limit_is_enforced_inside_expanded_json_rows():
         [{"ip": "203.0.113.2", "port": 1080, "http": "1", "socks4": "1", "socks5": "1"}], source="rix4uni", max_candidates=1
     )
     assert len(proxies) == 1
+
+
+@pytest.mark.parametrize(
+    "kind,protocol,https_supported",
+    [
+        ("HTTP/HTTPS", "http", True),
+        ("HTTPS", "http", True),
+        ("HTTP", "http", False),
+        ("SOCKS4", "socks4", False),
+        ("SOCKS5", "socks5", False),
+    ],
+)
+def test_sunny9577_preserves_type_transport(kind, protocol, https_supported):
+    rows = parse_source_payload([{"ip": "203.0.113.9", "port": 1080, "type": kind}], source="sunny9577")
+    assert rows[0].url == f"{protocol}://203.0.113.9:1080"
+    assert rows[0].https_supported is https_supported
+
+
+def test_mixed_https_capability_file_retains_explicit_socks_scheme():
+    rows = parse_source_payload(
+        "socks5://203.0.113.7:1080\n203.0.113.8:8080", source="maximilianfeix", default_protocol="http"
+    )
+    assert [row.protocol for row in rows] == ["socks5", "http"]

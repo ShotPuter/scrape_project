@@ -15,6 +15,7 @@ from . import (
     proxyscrape,
     relayglass,
     rix4uni,
+    sunny9577,
     thespeedx,
     thordata,
     vpslab,
@@ -35,6 +36,7 @@ ADAPTERS: dict[str, RowAdapter] = {
     "dpangestuw": dpangestuw.adapt,
     "rix4uni": rix4uni.adapt,
     "relayglass": relayglass.adapt,
+    "sunny9577": sunny9577.adapt,
 }
 
 

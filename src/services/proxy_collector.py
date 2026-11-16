@@ -54,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--provider",
         choices=list(PROVIDER_CHOICES),
         default="public",
-        help="Candidate source: public (default subset), all, or one named source.",
+        help="Candidate source: public (broad catalog), all (includes legacy archives), or one named source.",
     )
     selection.add_argument("--sources", help="Comma-separated source names; overrides PROXY_SOURCES.")
     selection.add_argument(

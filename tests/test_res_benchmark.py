@@ -277,3 +277,19 @@ async def test_new_batch_reuses_sqlite_files_without_counting_them_as_downloads(
     assert result["pdf_count"] == 1 and result["new_pdfs"] == 0
     assert result["skipped_companies"] == 1 and result["rows"][0]["documents"][0]["reused"] is True
     assert original.stat().st_mtime_ns == before
+
+
+@pytest.mark.parametrize("budget", [130, 175])
+def test_worker_receives_widget_and_audio_budgets_separate_from_http(tmp_path, budget):
+    args = args_for(tmp_path, "--timeout", "7", "--captcha-timeout", str(budget))
+    command = bench.child_command(args, tmp_path / "worker", 3)
+    child = pilot.parse_args(command[command.index("--db") :])
+    assert child.timeout == 7
+    assert child.captcha_timeout == budget
+    assert child.audio_seconds == budget
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])
+def test_benchmark_rejects_invalid_captcha_budget(tmp_path, value):
+    with pytest.raises(SystemExit):
+        args_for(tmp_path, "--captcha-timeout", value)

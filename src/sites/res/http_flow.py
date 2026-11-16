@@ -11,6 +11,7 @@ import html
 import json
 import re
 import time
+import unicodedata
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -26,6 +27,13 @@ REFERERS = {SEARCH_PATH: FORM_URL, DETAILS_PATH: f"https://{HOST}/Busqueda/Actua
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0"
 CODIGO_PATTERN = re.compile(r"[0-9A-Fa-f]{2}(?:-[0-9A-Fa-f]{2}){15}")
 TRANSIENT_HTTP = {502, 503, 504}
+
+
+def daily_document_limit(message):
+    text = html.unescape(re.sub(r"<[^>]*>", " ", str(message)))
+    text = unicodedata.normalize("NFKD", text).encode("ascii", errors="ignore").decode().casefold()
+    match = re.search(r"no\s+es\s+posible\s+generar\s+mas\s+de\s+(\d{1,9})\s+documentos\s+diarios", text)
+    return int(match[1]) if match else None
 
 
 class DownloadIssue(SearchIssue):
@@ -50,6 +58,9 @@ class DownloadIssue(SearchIssue):
 
 def new_session(timeout=30.0, proxy=None, verify=True) -> httpx.Client:
     """No redirects: a 302 from Escritura.aspx is an invalid codigo, not a fallback."""
+    from src.proxy.reputation import check_proxy
+
+    proxy = check_proxy(proxy)
     return httpx.Client(
         timeout=httpx.Timeout(timeout, connect=min(timeout, 12.0), pool=min(timeout, 12.0)),
         follow_redirects=False,
@@ -146,6 +157,11 @@ def verify(session: httpx.Client, cve: str, token: str) -> tuple[str, str, str]:
     if not isinstance(body, dict):
         raise SearchIssue("retry_wait", "Verifier returned an unexpected payload")
     if body.get("ErrorMessage"):
+        limit = daily_document_limit(body["ErrorMessage"])
+        if limit:
+            issue = SearchIssue("daily_limit", f"RES daily document limit reached ({limit} documents/day)")
+            issue.daily_limit = limit
+            raise issue
         raise SearchIssue("captcha_required", str(body["ErrorMessage"])[:300])
     if not isinstance(body.get("Link"), str) or not body["Link"]:
         raise SearchIssue("retry_wait", "Verifier did not return a document link")
@@ -162,6 +178,13 @@ def verify(session: httpx.Client, cve: str, token: str) -> tuple[str, str, str]:
 def download(session: httpx.Client, link: str) -> bytes:
     """Try the server-issued link; callers handle expiry by re-verifying."""
     response = get(session, res_url(link))
+    if not response.content.startswith(b"%PDF-"):
+        limit = daily_document_limit(response.content[:65536].decode("utf-8", errors="replace"))
+        if limit:
+            issue = DownloadIssue("daily_limit", f"RES daily document limit reached ({limit} documents/day)", response)
+            issue.daily_limit = limit
+            issue.diagnostic["daily_limit"] = limit
+            raise issue
     if response.status_code != 200:
         status = (
             "blocked"

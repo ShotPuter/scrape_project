@@ -1,0 +1,17 @@
+[Unit]
+Description=Scraper Docker bridge egress policy
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/scraper-docker-firewall.conf
+WorkingDirectory=/opt/scraper_project
+ExecStart=/opt/scraper_project/scripts/setup_docker_firewall.sh --apply
+RemainAfterExit=yes
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

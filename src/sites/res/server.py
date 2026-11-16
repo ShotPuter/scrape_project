@@ -11,7 +11,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, add_help=False)
     parser.add_argument(
         "stage",
-        choices=["track", "benchmark", "pipeline", "collect", "search", "download", "status", "export", "telegram-test"],
+        choices=[
+            "track",
+            "benchmark",
+            "free-stream",
+            "pipeline",
+            "collect",
+            "search",
+            "download",
+            "status",
+            "export",
+            "telegram-test",
+        ],
     )
     args, remainder = parser.parse_known_args()
     if args.stage == "track":
@@ -24,6 +35,10 @@ def main():
         from src.sites.res.telegram import test_delivery
 
         raise SystemExit(asyncio.run(test_delivery()))
+    if args.stage == "free-stream":
+        from src.sites.res.free_stream import main as stream_main
+
+        raise SystemExit(stream_main(remainder))
     if args.stage == "benchmark":
         from src.sites.res.benchmark import main as benchmark_main
 

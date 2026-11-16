@@ -12,6 +12,15 @@ HTTP по тому же Bright Data-прокси. Браузер работае�
 CAPTCHA API не используется; трафик/сессии Bright Data оплачиваются по тарифу
 провайдера. Не каждый CAPTCHA-вызов проходит: ошибки остаются в отчёте.
 
+Camoufox использует GeoIP выходного прокси для геопозиции и часового пояса.
+В основном пайплайне адрес берётся из HTTP-проверки, затем сверяется с IP
+браузера; несовпадение останавливает сеанс. Язык интерфейса остаётся `es-CL`.
+Зависимость `camoufox[geoip]` и база GeoIP входят в Docker-образ; базу загружаем
+при сборке, чтобы первый запуск не ждал её скачивания.
+
+Для непрерывного подбора бесплатных прокси с динамическими слотами браузеров
+используйте отдельный режим: [инструкция free-stream](res-free-stream.md).
+
 ## Подготовка и запуск 100 компаний
 
 На сервере нужны Docker Engine с Compose v2, Linux x86_64, свободное место для
@@ -356,3 +365,65 @@ Telegram присылает отдельные сообщения «пауза �
 остановку без паузы. Менять эти настройки можно с тем же `RES_RUN_ID`; размер,
 год/месяц и раскладку браузеров выборки менять при этом не нужно.
 Обновление схемы SQLite выполняется автоматически без удаления данных.
+
+## Суточный лимит генерации документов RES
+
+На серверном сборе получен ответ HTTP 200, `text/html`, размером 77 байт:
+
+```text
+Estimado(a) usuario(a): No es posible generar más de 100 documentos diarios.
+```
+
+Это явное сообщение RES о лимите генерации **100 документов в сутки**.
+Оно не сообщает, к чему привязан счётчик (IP, сессия или другой признак),
+часовой пояс и время сброса. По нему нельзя назначать автоматическое
+возобновление в полночь или обещать, что 10 минут ожидания помогут.
+
+Коллектор распознаёт сообщение отдельно как `daily_limit`, в том числе если
+оно возвращается в ошибке Verificar Certificados. Первая такая ошибка
+останавливает весь текущий пакет через общий флаг SQLite; уже запущенные
+операции завершаются, затем остальные процессы также прекращают новые задачи.
+Новые прокси-сессии и CAPTCHA для обхода этой квоты не запускаются. Обычная
+десятиминутная пауза при ошибках здесь не применяется.
+
+Telegram отправляет отдельное сообщение о суточном лимите. В отчёте указана
+причина `daily_document_limit`, в `events` — событие `daily_limit`. Найденные
+CVE, `codigo`, ссылки и готовые PDF сохраняются; ограничение не считается
+признаком устаревшего `codigo`.
+
+Автоматического возобновления после этой остановки нет (`restart: "no"`).
+После сброса квоты оператор может явно запустить продолжение с прежним
+`RES_RUN_ID` и `RES_RETRY_ERRORS=1`; готовые PDF будут пропущены. Если квота
+всё ещё действует, первый распознанный ответ снова остановит пакет.
+
+### CAPTCHA budget
+
+The benchmark and Docker workers now wait up to **130 seconds** for the CAPTCHA
+widget. The audio-solving window defaults to the same 130 seconds. HTTP requests
+keep their independent timeout; a short HTTP timeout no longer cuts widget loading
+short. These are per-phase budgets, not a 130-second deadline for the entire company.
+
+```dotenv
+RES_TIMEOUT=40
+RES_CAPTCHA_TIMEOUT=130
+```
+
+Compose forwards `RES_CAPTCHA_TIMEOUT` as `--captcha-timeout` to the benchmark,
+which forwards it to every worker and its audio solver. Standalone
+`scripts/res_free_pilot.sh` also defaults to 130 seconds; override with
+`--captcha-timeout`. An explicit `--audio-seconds` can override its audio window.
+Rebuild the RES image before deploying the new CLI option.
+
+Public proxy source expansion is documented in [proxy sources](proxy-sources.md).
+Automatic collection remains disabled; the expanded source registry is used only
+when public collection is explicitly enabled for a manual run.
+
+### Host egress policy
+
+Host installation instructions are in
+[Docker egress firewall](docker-egress-firewall.md). The supplied default allows
+only TCP 80/443/53 and UDP 53 from Docker bridges. Bright Data's port 44445 and
+public proxies on 3128/1080 therefore require exact screened IPv4:port entries
+in the host configuration. Do not install the host policy until those entries,
+service ordering and network mode have been reviewed. Application FireHOL/NoCoin
+checks are mandatory in both reputation modes and independent of host installation.

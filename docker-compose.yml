@@ -22,6 +22,17 @@ x-scraper: &scraper
     PROXY_CATALOG_CACHE_DIR: /app/data/proxy-sources
     # The independent collector keeps publishing while downloads are running.
     PROXY_AUTOCOLLECT: "false"
+    ALLOW_PUBLIC_PROXY_COLLECTION: "0"
+    ABUSEIPDB_API_KEY: ${ABUSEIPDB_API_KEY:-}
+    PROXY_REPUTATION_MODE: ${PROXY_REPUTATION_MODE:-strict}
+    PROXY_REPUTATION_SCORE_LIMIT: ${PROXY_REPUTATION_SCORE_LIMIT:-25}
+    PROXY_REPUTATION_MAX_REPORTS: ${PROXY_REPUTATION_MAX_REPORTS:-0}
+    PROXY_REPUTATION_CACHE_HOURS: ${PROXY_REPUTATION_CACHE_HOURS:-6}
+    PROXY_BLOCKLIST_REFRESH_HOURS: ${PROXY_BLOCKLIST_REFRESH_HOURS:-24}
+    PROXY_BLOCKLIST_MAX_AGE_HOURS: ${PROXY_BLOCKLIST_MAX_AGE_HOURS:-48}
+    PROXY_THREAT_REFRESH_HOURS: ${PROXY_THREAT_REFRESH_HOURS:-6}
+    PROXY_THREAT_MAX_AGE_HOURS: ${PROXY_THREAT_MAX_AGE_HOURS:-12}
+    PROXY_THREAT_CACHE: ${PROXY_THREAT_CACHE:-data/threat-feeds}
     PROXY_MODE: ${PROXY_MODE:-always}
     PROXY_STARTUP_TIMEOUT_SECONDS: ${PROXY_STARTUP_TIMEOUT_SECONDS:-900}
     WEBSHARE_API_TOKEN: ${WEBSHARE_API_TOKEN:-}
@@ -60,14 +71,12 @@ services:
     <<: *scraper
     restart: "no"
     command: []
-    depends_on:
-      proxy-collector:
-        condition: service_started
 
   proxy-collector:
+    profiles: [proxy-collection]
     <<: *scraper
     entrypoint: [python, -m, src.proxy]
-    command: [--sources, "${PROXY_SOURCES:-all}", --watch]
+    command: [--sources, "${PROXY_SOURCES:-webshare}", --watch]
     restart: unless-stopped
     environment:
       <<: *scraper-environment
@@ -78,9 +87,6 @@ services:
     <<: *scraper
     profiles: [stress]
     restart: "no"
-    depends_on:
-      proxy-collector:
-        condition: service_started
     environment:
       <<: *scraper-environment
       STORAGE_BASE_DIR: /app/data/stress

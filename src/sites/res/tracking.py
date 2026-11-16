@@ -107,6 +107,29 @@ class TrackingStore:
             )
         ]
 
+    def halt_daily_limit(self, limit):
+        """Stop this batch on an explicit site quota; no timed retry or route rotation."""
+        now = time.time()
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            self.db.execute("INSERT OR IGNORE INTO run_controls(run_id,updated_at) VALUES (?,?)", (self.run_id, now))
+            row = self.db.execute("SELECT reason,halted FROM run_controls WHERE run_id=?", (self.run_id,)).fetchone()
+            self.db.execute(
+                "UPDATE run_controls SET cooldown_until=0,halted=1,reason='daily_document_limit',updated_at=? "
+                "WHERE run_id=?",
+                (now, self.run_id),
+            )
+            if not row["halted"] or row["reason"] != "daily_document_limit":
+                self.db.execute(
+                    "INSERT INTO events(run_id,worker,stage,status,error,at) VALUES (?,?,'cooldown','daily_limit',?,?)",
+                    (self.run_id, self.worker, json.dumps({"reason": "daily_document_limit", "limit_per_day": limit}), now),
+                )
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+        return self.cooldown_state()
+
     def request_cooldown(self, seconds, max_cycles):
         """Coalesce simultaneous requests: joining workers never extend the deadline."""
         now = time.time()
@@ -119,7 +142,7 @@ class TrackingStore:
             if row["halted"] or row["cooldown_until"] > now:
                 self.db.commit()
                 return self.cooldown_state()
-            exhausted = row["cycles"] >= max_cycles
+            exhausted = max_cycles is not None and row["cycles"] >= max_cycles
             until = 0 if exhausted else now + seconds
             cycles = row["cycles"] if exhausted else row["cycles"] + 1
             reason = "cooldown_limit_reached" if exhausted else "consecutive_failures"

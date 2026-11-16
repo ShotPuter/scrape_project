@@ -11,6 +11,32 @@ from src.sites.dequienes.navigation import navigate
 from src.sites.res.engines import launch_context
 
 
+
+@pytest.fixture(autouse=True)
+def isolate_proxy_reputation_for_engine_unit_tests(monkeypatch):
+    # Reputation network policy is exercised separately in test_proxy_reputation.
+    async def already_screened(url):
+        return url
+
+    monkeypatch.setattr("src.proxy.reputation.screen_proxy", already_screened)
+
+@pytest.mark.parametrize("proxy_ip", [None, "203.0.113.7"])
+async def test_camoufox_proxy_enables_geoip_using_verified_egress(tmp_path, monkeypatch, proxy_ip):
+    options = {}
+
+    @asynccontextmanager
+    async def camoufox(**kwargs):
+        options.update(kwargs)
+        yield object()
+
+    monkeypatch.setitem(sys.modules, "camoufox.async_api", SimpleNamespace(AsyncCamoufox=camoufox))
+    proxy = {"server": "http://proxy.example:8080"}
+    async with launch_context(tmp_path, engine="camoufox", proxy=proxy, proxy_ip=proxy_ip):
+        pass
+    assert options["geoip"] == (proxy_ip or True)
+    assert options["proxy"] == proxy
+
+
 @pytest.mark.parametrize("engine", ["camoufox", "patchright"])
 async def test_modified_proxy_ca_is_rejected_before_browser_launch(tmp_path, monkeypatch, engine):
     certificate = tmp_path / "untrusted.pem"
@@ -73,7 +99,7 @@ async def test_owned_display_proxy_and_context_are_closed_on_success_and_launch_
     monkeypatch.setattr("src.sites.pep.proxy_tunnel.ProxyTunnel", Tunnel)
     monkeypatch.setitem(sys.modules, "patchright.async_api", SimpleNamespace(async_playwright=playwright))
     try:
-        async with launch_context(tmp_path, proxy={"password": "secret"}, pdf=True):
+        async with launch_context(tmp_path, proxy={"server": "http://proxy.example:8080", "password": "secret"}, pdf=True):
             assert not fail
     except RuntimeError:
         assert fail

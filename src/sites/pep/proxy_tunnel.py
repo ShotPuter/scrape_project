@@ -18,6 +18,9 @@ class ProxyTunnel:
 
     async def start(self) -> str:
         if self.server is None:
+            from src.proxy.reputation import screen_proxy
+
+            self.settings = {**self.settings, "server": await screen_proxy(self.settings["server"])}
             self.server = await asyncio.start_server(self.accept, "127.0.0.1", 0, limit=16384)
             port = self.server.sockets[0].getsockname()[1]
             self.url = f"http://127.0.0.1:{port}"

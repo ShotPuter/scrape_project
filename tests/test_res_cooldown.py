@@ -258,3 +258,73 @@ async def test_active_pause_yields_before_starting_the_next_document(tmp_path, m
         assert store.existing_file(first) and state["companies"]["A"]["cves"] == [first, second]
     finally:
         store.close()
+
+
+async def test_daily_limit_interrupts_an_active_pause_without_any_automatic_retry(tmp_path, monkeypatch):
+    store = store_for(tmp_path)
+    store.prepare_cooldown()
+    store.request_cooldown(600, 3)
+    args = SimpleNamespace(output=tmp_path, tracking_store=store, error_cooldown_minutes=10, max_cooldowns=3)
+    runtime = {"stop": False, "failures": 0}
+    report = {"run_id": "daily-limit"}
+
+    async def quota_arrived(seconds):
+        store.halt_daily_limit(100)
+
+    monkeypatch.setattr(cooldown.asyncio, "sleep", quota_arrived)
+    try:
+        await cooldown.wait(args, runtime, report)
+        assert runtime["stop"] is True
+        assert report["stop_reason"]["code"] == "daily_document_limit"
+        assert store.cooldown_state()["cooldown_until"] == 0
+        assert not store.cooldown_state()["active"]
+        store.halt_daily_limit(100)
+        assert sum(e["status"] == "daily_limit" for e in store.cooldown_events()) == 1
+        assert not any(e["status"] == "resumed" for e in store.cooldown_events())
+        # Only an explicit new launch clears the shared stop; time alone does not.
+        store.prepare_cooldown()
+        assert store.cooldown_state()["halted"] == 0
+    finally:
+        store.close()
+
+
+async def test_quota_arriving_during_preflight_prevents_browser_start(tmp_path, monkeypatch):
+    store = store_for(tmp_path)
+    store.prepare_cooldown()
+    args = pilot.parse_args(["--output", str(tmp_path), "--audio-model", ""])
+    args.tracking_store = store
+    args.state_path = tmp_path / "state.json"
+
+    async def resolve(slot, args):
+        store.halt_daily_limit(100)
+        return slot
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("No browser/session may start after the shared site quota signal")
+
+    monkeypatch.setattr(pilot, "resolve_proxy", resolve)
+    monkeypatch.setattr(pilot, "endpoint_session", forbidden)
+    monkeypatch.setattr(pilot, "load_companies", lambda *args: [{"company_id": "A", "company_name": "A", "rut": None}])
+    report = {"run_id": "preflight-quota", "proxies": []}
+    try:
+        await pilot.scan([pilot.DIRECT] * 2, args, {"companies": {}, "cves": {}}, Counter(), report, None, "", [])
+        assert report["stop_reason"]["code"] == "daily_document_limit"
+        assert report["companies"][0]["status"] == "stopped"
+    finally:
+        store.close()
+
+
+def test_unlimited_free_dispatcher_cooldowns_do_not_halt(tmp_path, monkeypatch):
+    store = store_for(tmp_path)
+    now = [1000.0]
+    monkeypatch.setattr(cooldown.time, "time", lambda: now[0])
+    try:
+        store.prepare_cooldown()
+        for _ in range(5):
+            result = store.request_cooldown(600, None)
+            assert not result["halted"]
+            now[0] += 601
+            store.finish_cooldown()
+        assert store.cooldown_state()["cycles"] == 5
+    finally:
+        store.close()

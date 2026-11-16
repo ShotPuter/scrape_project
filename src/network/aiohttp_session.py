@@ -69,6 +69,9 @@ class AiohttpSession:
         if not AIOHTTP_AVAILABLE:
             raise ImportError("aiohttp is not installed")
 
+        from src.proxy.reputation import check_proxy
+
+        proxy = check_proxy(proxy)
         self.proxy = proxy
         self._uses_socks = _is_socks_proxy(proxy)
         if self._uses_socks and ProxyConnector is None:

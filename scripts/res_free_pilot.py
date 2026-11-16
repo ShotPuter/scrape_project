@@ -78,7 +78,8 @@ def endpoint_from_url(url: str, expected_ip: str | None = None) -> ProxyEndpoint
         raise ValueError("Invalid proxy URL")
     parts = urlsplit(normalized)
     host = f"[{parts.hostname}]" if ":" in (parts.hostname or "") else parts.hostname
-    browser = {"server": f"http://{host}:{parts.port}"}
+    scheme = "socks5" if parts.scheme in {"socks5", "socks5h"} else "http"
+    browser = {"server": f"{scheme}://{host}:{parts.port}"}
     if parts.username:
         browser["username"] = unquote(parts.username)
         browser["password"] = unquote(parts.password or "")
@@ -146,6 +147,11 @@ async def load_proxy_endpoints(args) -> list[ProxyEndpoint]:
             )
     elif args.proxy_provider == "residential":
         endpoints = load_proxy_file(args.proxy_file)
+        if getattr(args, "expected_proxy_ip", None):
+            if len(endpoints) != 1:
+                raise ValueError("--expected-proxy-ip requires exactly one proxy endpoint")
+            endpoint = endpoints[0]
+            endpoints = [ProxyEndpoint(endpoint.url, endpoint.browser, endpoint.label, args.expected_proxy_ip)]
     elif args.proxy_provider == "webshare":
         token = os.getenv("WEBSHARE_API_TOKEN", "").strip()
         if not token:
@@ -406,7 +412,7 @@ class Cascade:
             self.audio_event_start = audio_start
             started = time.monotonic()
             try:
-                await open_token_form(self.page, url, self.args.timeout)
+                await open_token_form(self.page, url, self.args.captcha_timeout)
             except SearchIssue as exc:
                 self.events.append({"stage": "form", "status": exc.status, "error": safe_message(exc)})
                 await save_form_diagnostic(self.page, self.args)
@@ -525,6 +531,8 @@ async def ensure_document(cascade, http, cve, company_id, state, args, output, c
     try:
         return await _ensure_document(cascade, http, cve, company_id, state, args, output, counters)
     except Exception as exc:
+        if tracking and getattr(exc, "status", None) == "daily_limit" and getattr(args, "site_limit_scope", "run") == "run":
+            tracking.halt_daily_limit(getattr(exc, "daily_limit", 100))
         if getattr(cascade, "events", None) is not prior_events:
             exc.captcha_stages = list(cascade.events)
             audio = getattr(cascade, "audio", None)
@@ -699,7 +707,7 @@ async def process_company(cascade, http, company, state, args, output, counters)
                     "audio_events": getattr(exc, "audio_events", []),
                 }
             )
-            if exc.status in {"blocked", "proxy_exhausted", "proxy_failed"}:
+            if exc.status in {"blocked", "proxy_exhausted", "proxy_failed", "daily_limit"}:
                 raise
             continue
         result["documents"].append(document)
@@ -738,6 +746,18 @@ def new_stats(index: int, endpoint: ProxyEndpoint) -> dict:
 @asynccontextmanager
 async def endpoint_session(index, endpoint, args, counters, token_records, audio, vlm_model, stats):
     """One proxy: verify both transports share its IP, then yield a ready cascade."""
+    from src.proxy.reputation import check_ip, screen_proxy
+
+    if endpoint.url:
+        pinned = await screen_proxy(endpoint.url)
+        endpoint = ProxyEndpoint(
+            pinned,
+            {**endpoint.browser, "server": endpoint_from_url(pinned).browser["server"]},
+            endpoint.label,
+            endpoint.expected_ip,
+            endpoint.ca_file,
+            endpoint.dynamic_ip,
+        )
     cascade = None
     verify = True
     if endpoint.ca_file:
@@ -745,8 +765,10 @@ async def endpoint_session(index, endpoint, args, counters, token_records, audio
         verify.load_verify_locations(cafile=str(endpoint.ca_file))
     http = http_flow.new_session(timeout=args.timeout, proxy=endpoint.url, verify=verify)
     try:
-        await asyncio.to_thread(http_flow.prepare, http)
         stats["http_ip"] = await asyncio.to_thread(http_exit_ip, http)
+        if endpoint.url:
+            await asyncio.to_thread(check_ip, stats["http_ip"])
+        await asyncio.to_thread(http_flow.prepare, http)
         stats["preflight_ip_changed"] = bool(endpoint.expected_ip and stats["http_ip"] != endpoint.expected_ip)
         if endpoint.expected_ip and stats["http_ip"] != endpoint.expected_ip and not endpoint.dynamic_ip:
             raise SearchIssue(
@@ -765,6 +787,7 @@ async def endpoint_session(index, endpoint, args, counters, token_records, audio
             engine=args.engine,
             headed=args.headed,
             proxy=endpoint.browser,
+            proxy_ip=stats["http_ip"],
             **({"proxy_ca": endpoint.ca_file} if endpoint.ca_file else {}),
         ) as context:
             page = await context.new_page()
@@ -869,6 +892,14 @@ async def drain(cascade, http, queue, deferred, state, args, counters, report, s
         except SearchIssue as exc:
             if exc.status not in {"proxy_exhausted", "cooldown"}:
                 checkpoint_attempt(company, attempts + 1, failure_result(company, exc, cascade))
+            if exc.status == "daily_limit":
+                runtime["stop"] = True
+                report["stop_reason"] = {"code": "daily_document_limit", "limit_per_day": getattr(exc, "daily_limit", 100)}
+                stats["status"] = "daily_limit"
+                outcomes[company["company_id"]] = failure_result(company, exc, cascade)
+                stats["companies"] += 1
+                counters["company_failures"] += 1
+                return
             if exc.status in {"proxy_exhausted", "cooldown"}:
                 if getattr(args, "tracking_store", None):
                     args.tracking_store.finish_attempt(
@@ -997,6 +1028,11 @@ async def scan(proxies, args, state, counters, report, audio, vlm_model, token_r
         try:
             endpoint = await resolve_proxy(slot, args)
             stats.update(new_stats(index, endpoint))
+            # Another process can reach a site quota while this proxy preflight is in flight.
+            await cooldown.wait(args, runtime, report)
+            if runtime["stop"]:
+                stats["status"] = "stopped"
+                break
             async with endpoint_session(index, endpoint, args, counters, token_records, audio, vlm_model, stats) as (
                 cascade,
                 http,
@@ -1097,6 +1133,8 @@ async def run(args):
         args.tracking_store = TrackingStore(
             args.tracking_db, args.tracking_run_id, worker=args.tracking_worker, invocation=run_id
         )
+    from src.proxy.reputation import reputation_mode
+
     counters = Counter()
     token_records = []
     report = {
@@ -1107,10 +1145,14 @@ async def run(args):
         "engine": "none" if args.http_only else args.engine,
         "headed": args.headed,
         "proxy_provider": args.proxy_provider,
+        "proxy_reputation_mode": reputation_mode(),
+        "site_limit_scope": args.site_limit_scope,
         "proxy_limit": args.proxy_limit,
         "solves_per_proxy": args.solves_per_proxy,
         "challenges_per_proxy": args.challenges_per_proxy,
         "company_attempts": args.company_attempts,
+        "captcha_timeout_seconds": args.captcha_timeout,
+        "audio_budget_seconds": args.audio_seconds,
         "cascade": ["http"]
         if args.http_only
         else ["native"]
@@ -1216,6 +1258,11 @@ def parse_args(argv=None):
     parser.add_argument("--http-only", action="store_true", help="Never launch a browser; download cached codigos only")
     parser.add_argument("--proxy-provider", choices=("direct", "webshare", "residential", "brightdata"), default="webshare")
     parser.add_argument("--proxy-file", type=Path, default=Path("data/residential-proxies.txt"))
+    parser.add_argument(
+        "--expected-proxy-ip",
+        type=lambda value: str(ipaddress.ip_address(value)),
+        help="Require a single proxy to retain its verified HTTP/browser exit",
+    )
     parser.add_argument("--proxy-limit", type=int, default=0, help="Use at most this many proxy endpoints; 0 means all")
     parser.add_argument("--lazy-proxies", action="store_true", help="Create Bright Data sessions only when needed")
     parser.add_argument("--solves-per-proxy", type=int, default=0, help="Rotate after this many tokens; 0 means unlimited")
@@ -1225,9 +1272,18 @@ def parse_args(argv=None):
         default=2,
         help="Rotate after this many challenge requeues; 0 disables challenge rotation",
     )
+    parser.add_argument(
+        "--site-limit-scope",
+        choices=("run", "proxy"),
+        default="run",
+        help="Scope of a site document-limit stop; free dispatcher owns proxy cooldowns",
+    )
     parser.add_argument("--company-attempts", type=int, default=2, help="Tries per company across fresh proxies")
     parser.add_argument("--headed", action="store_true")
     parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument(
+        "--captcha-timeout", type=float, default=130.0, help="Seconds to load the CAPTCHA widget; separate from HTTP timeout"
+    )
     parser.add_argument("--native-wait", type=float, default=6.0, help="Seconds to wait for a free checkbox pass")
     parser.add_argument("--operator-wait", type=float, default=0.0, help="Seconds to wait for a manual solve")
     parser.add_argument("--delay", type=float, default=2.0, help="Seconds between token mints")
@@ -1239,7 +1295,9 @@ def parse_args(argv=None):
     parser.add_argument("--audio-device", default="cpu")
     parser.add_argument("--audio-compute", default="int8")
     parser.add_argument("--audio-rounds", type=int, default=3)
-    parser.add_argument("--audio-seconds", type=float, default=180.0)
+    parser.add_argument(
+        "--audio-seconds", type=float, default=None, help="Audio solve budget; defaults to --captcha-timeout"
+    )
     parser.add_argument("--refresh", action="store_true", help="Ignore cached company searches")
     parser.add_argument("--max-failures", type=int, default=20, help="Stop after this many consecutive failures")
     parser.add_argument(
@@ -1247,6 +1305,10 @@ def parse_args(argv=None):
     )
     parser.add_argument("--max-cooldowns", type=int, default=3, help="Maximum pauses before stopping the remaining queue")
     args = parser.parse_args(argv)
+    if args.audio_seconds is None:
+        args.audio_seconds = args.captcha_timeout
+    if any(not math.isfinite(v) or v <= 0 for v in (args.captcha_timeout, args.audio_seconds)):
+        parser.error("CAPTCHA and audio budgets must be finite and positive")
     if not math.isfinite(args.error_cooldown_minutes) or args.error_cooldown_minutes < 0 or args.max_cooldowns < 0:
         parser.error("Cooldown duration and maximum pauses must be finite and non-negative")
     return args
