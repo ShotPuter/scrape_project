@@ -485,3 +485,70 @@ async def test_installed_socks_transport_constructs_without_contacting_candidate
     for scheme in ("socks5", "socks5h"):
         async with stream.httpx.AsyncClient(proxy=f"{scheme}://127.0.0.1:1080", trust_env=False):
             pass
+
+
+def test_recovery_queue_has_delay_priority_and_two_attempt_budget(queue, monkeypatch):
+    import time
+
+    queue.add_jobs([company(1)])
+    endpoint = ready(queue, 1)
+    queue.claim_batch("owner", 1)
+    assert queue.schedule_connection_retry(endpoint, "owner", attempts=2, delay=30)
+    assert queue.claim_probe(fresh_for=3600) is None
+    current = time.time()
+    monkeypatch.setattr("src.sites.res.free_queue.time.time", lambda: current + 31)
+    assert queue.claim_probe(fresh_for=3600)["connection_retry"]
+    assert queue.claim_probe(fresh_for=3600) is None
+    assert not queue.finish_probe(endpoint, error="timeout", retryable=True, connection_retry_delay=1)
+    monkeypatch.setattr("src.sites.res.free_queue.time.time", lambda: current + 33)
+    assert queue.claim_probe(fresh_for=3600)["connection_retry"]
+    queue.finish_probe(endpoint, error="timeout", retryable=True)
+    assert queue.counts()["proxies"] == {"cooldown": 1}
+    assert queue.database.execute("SELECT COUNT(*) FROM free_connection_retries").fetchone()[0] == 0
+
+
+def test_recovery_persists_and_http_success_does_not_reset_budget(queue, tmp_path):
+    queue.add_jobs([company(1)])
+    endpoint = ready(queue, 1)
+    queue.claim_batch("owner", 1)
+    assert queue.schedule_connection_retry(endpoint, "owner", attempts=1, delay=0)
+    assert queue.retain_candidates([]) == 0
+    assert queue.claim_probe(fresh_for=3600)["connection_retry"]
+    recovered = FreeQueue(tmp_path / "pool.sqlite3", "test")
+    try:
+        recovered.recover()
+        assert recovered.claim_probe(fresh_for=3600)["connection_retry"]
+        assert recovered.finish_probe(endpoint, exit_ip="198.51.100.1")
+        assert recovered.claim_batch("next", 1)
+        assert not recovered.schedule_connection_retry(endpoint, "next", attempts=2, delay=0)
+    finally:
+        recovered.close()
+
+
+def test_reputation_denial_never_retries(queue):
+    queue.add_jobs([company(1)])
+    endpoint = ready(queue, 1)
+    queue.claim_batch("owner", 1)
+    queue.schedule_connection_retry(endpoint, "owner", attempts=2, delay=0)
+    queue.claim_probe(fresh_for=3600)
+    queue.finish_probe(endpoint, error="listed by FireHOL", retryable=False)
+    assert queue.counts()["proxies"] == {"cooldown": 1}
+
+
+async def test_preflight_timeout_queues_route_and_releases_unattempted_jobs(queue):
+    args = stream.parse_args(["--browsers", "1", "--connection-retry-delay", "1"])
+    queue.add_jobs([company(1)])
+    ready(queue, 1)
+    stop = asyncio.Event()
+    store = SimpleNamespace(cooldown_state=lambda: {"active": False, "halted": False})
+
+    async def worker(slot, proxy, companies, owner):
+        stop.set()
+        return stream.BatchResult(retry_connection=True, error="ConnectTimeout")
+
+    dispatcher = stream.Dispatcher(args, queue, worker, store, asyncio.Event(), stop)
+    await dispatcher.consume(0)
+    assert queue.counts()["jobs"] == {"pending": 1}
+    assert queue.counts()["proxies"] == {"retry_wait": 1}
+    assert queue.database.execute("SELECT attempts FROM free_jobs").fetchone()[0] == 0
+    assert not dispatcher.active

@@ -56,6 +56,7 @@ class BatchResult:
     terminal_errors: set[str] = field(default_factory=set)
     quota_companies: set[str] = field(default_factory=set)
     quota_limited: bool = False
+    retry_connection: bool = False
     new_pdfs: int = 0
     error: str | None = None
 
@@ -140,6 +141,8 @@ class ProxyProducer:
             "reputation_denied": 0,
             "connection_failed": 0,
             "configuration_failed": 0,
+            "connection_rechecks": 0,
+            "connection_recovered": 0,
             "failure_reasons": {},
             "not_admitted": 0,
             "recent_ready": [],
@@ -300,16 +303,28 @@ class ProxyProducer:
                 await asyncio.sleep(0.5)
                 continue
             cancelled = False
+            if candidate.get("connection_retry"):
+                self.stats["connection_rechecks"] += 1
             try:
                 async with self.rate_lock:
                     await asyncio.sleep(max(0, self.next_probe - time.monotonic()))
                     self.next_probe = time.monotonic() + 60 / self.args.proxy_rate_per_minute
+                if candidate.get("connection_retry") and not endpoint_allowed(
+                    candidate["endpoint"], self.exceptions, self.ports
+                ):
+                    raise ReputationDenied("Proxy no longer allowed by endpoint policy")
                 async with asyncio.timeout(self.args.proxy_timeout * 5 + 30):
                     exit_ip = await self.verify(candidate["endpoint"])
                 if self.queue.finish_probe(
                     candidate["endpoint"], exit_ip=exit_ip, ttl=self.args.proxy_ttl, retry=self.args.proxy_retry_seconds
                 ):
                     self.stats["ready"] += 1
+                    if candidate.get("connection_retry"):
+                        self.stats["connection_recovered"] += 1
+                        if self.notifications:
+                            self.notifications.activity(
+                                "connection_recovered", f"✅ RES: прокси восстановлен: {candidate['endpoint']}"
+                            )
                     self.stats["recent_ready"] = [*self.stats["recent_ready"][-4:], exit_ip]
                     if self.notifications:
                         self.notifications.activity(
@@ -329,7 +344,13 @@ class ProxyProducer:
                 category = probe_error_category(error)
                 message = f"{category}: {safe_message(error) or type(error).__name__}"
                 self.stats["failure_reasons"][category] = self.stats["failure_reasons"].get(category, 0) + 1
-                self.queue.finish_probe(candidate["endpoint"], retry=self.args.proxy_retry_seconds, error=message)
+                self.queue.finish_probe(
+                    candidate["endpoint"],
+                    retry=self.args.proxy_retry_seconds,
+                    error=message,
+                    retryable=category in {"timeout", "connect_error", "proxy_error", "protocol_error", "ReadError"},
+                    connection_retry_delay=self.args.connection_retry_delay,
+                )
                 self.stats["denied_or_failed"] += 1
                 counter = (
                     "reputation_denied"
@@ -515,6 +536,14 @@ class BrowserWorker:
                 (self.args.run_id, directory.name, batch_started_at),
             )
         )
+        result.retry_connection = not result.attempted and any(
+            proxy.get("status") == "proxy_failed"
+            and not proxy.get("http_ip")
+            and any(word in proxy.get("error", "") for word in ("ConnectTimeout", "ConnectError", "ReadTimeout"))
+            and not any(word in proxy.get("error", "").lower() for word in ("ssl", "certificate", "reputation"))
+            for report in new_reports
+            for proxy in report.get("proxies", [])
+        )
         result.quota_limited = bool(result.quota_companies) or any(
             report.get("stop_reason", {}).get("code") == "daily_document_limit" for report in new_reports
         )
@@ -580,6 +609,7 @@ class Dispatcher:
             owner = proxy["owner"]
             self.active[slot] = owner
             result = BatchResult(error="Worker interrupted before processing")
+            recovery_queued = False
             try:
                 result = await self.worker(slot, proxy, companies, owner)
             except asyncio.CancelledError:
@@ -590,6 +620,20 @@ class Dispatcher:
                 # Persist the exhausted route before returning its jobs to the queue.
                 if result.quota_limited:
                     self.queue.quarantine_proxy(proxy["endpoint"], owner, self.args.site_limit_hours * 3600, result.error)
+                elif result.retry_connection:
+                    recovery_queued = self.queue.schedule_connection_retry(
+                        proxy["endpoint"],
+                        owner,
+                        attempts=self.args.connection_retries,
+                        delay=self.args.connection_retry_delay,
+                        error=result.error,
+                    )
+                    if recovery_queued and getattr(self.worker, "notifications", None):
+                        self.worker.notifications.activity(
+                            "connection_retry",
+                            f"🔄 RES: прокси {proxy['endpoint']} в очереди повторной проверки; "
+                            f"пауза {self.args.connection_retry_delay:g} с, максимум {self.args.connection_retries} попытки",
+                        )
                 for company in companies:
                     identifier = company["company_id"]
                     self.queue.finish_job(
@@ -609,12 +653,14 @@ class Dispatcher:
                             "paused_until": time.time() + self.args.site_limit_hours * 3600,
                         }
                     )
-                else:
+                elif not recovery_queued:
                     self.queue.release_proxy(proxy["endpoint"], owner, self.args.proxy_retry_seconds, result.error)
                 self.active.pop(slot, None)
                 self.changed.set()
             self.total_new_pdfs += result.new_pdfs
-            self.proxy_failures = 0 if result.completed or result.quota_limited else self.proxy_failures + 1
+            self.proxy_failures = (
+                0 if result.completed or result.quota_limited or recovery_queued else self.proxy_failures + 1
+            )
             if self.proxy_failures >= self.args.max_failures and self.args.error_cooldown_minutes > 0:
                 self.store.request_cooldown(self.args.error_cooldown_minutes * 60, self.args.max_cooldowns or None)
                 self.proxy_failures = 0
@@ -880,6 +926,8 @@ def parse_args(argv=None):
     parser.add_argument("--proxy-rate-per-minute", type=float, default=120)
     parser.add_argument("--proxy-timeout", type=float, default=15)
     parser.add_argument("--proxy-ttl", type=float, default=600)
+    parser.add_argument("--connection-retries", type=int, default=2)
+    parser.add_argument("--connection-retry-delay", type=float, default=30)
     parser.add_argument("--proxy-retry-seconds", type=float, default=300)
     parser.add_argument("--retry-seconds", type=float, default=30)
     parser.add_argument("--ready-capacity", type=int, default=20)
@@ -926,6 +974,7 @@ def parse_args(argv=None):
         )
         or args.proxy_check_concurrency > 64
         or args.ready_capacity < args.browsers
+        or not 0 <= args.connection_retries <= 2
         or args.max_candidates < 0
         or args.source_records < 0
         or args.max_documents < 0
@@ -937,6 +986,7 @@ def parse_args(argv=None):
         args.proxy_rate_per_minute,
         args.proxy_timeout,
         args.proxy_ttl,
+        args.connection_retry_delay,
         args.site_limit_hours,
         args.proxy_retry_seconds,
         args.worker_timeout,

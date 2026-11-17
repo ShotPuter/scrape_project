@@ -41,6 +41,10 @@ services:
       - "${RES_FREE_CHECK_RATE_PER_MINUTE:-120}"
       - --ready-capacity
       - "${RES_FREE_READY_CAPACITY:-20}"
+      - --connection-retries
+      - "${RES_FREE_CONNECTION_RETRIES:-2}"
+      - --connection-retry-delay
+      - "${RES_FREE_CONNECTION_RETRY_DELAY:-30}"
       - --proxy-retry-seconds
       - "${RES_FREE_PROXY_RETRY_SECONDS:-300}"
       - --catalog-seconds

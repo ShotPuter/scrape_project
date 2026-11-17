@@ -27,6 +27,9 @@ class FreeQueue:
                 endpoint TEXT PRIMARY KEY,source TEXT,state TEXT NOT NULL DEFAULT 'pending',
                 exit_ip TEXT,verified_at REAL,expires_at REAL NOT NULL DEFAULT 0,
                 next_at REAL NOT NULL DEFAULT 0,owner TEXT,error TEXT,seen_at REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS free_connection_retries (
+                endpoint TEXT PRIMARY KEY, attempts INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL, created_at REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS free_exit_cooldowns (
                 exit_ip TEXT PRIMARY KEY,until_at REAL NOT NULL,reason TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS free_proxies_work ON free_proxies(state,next_at);
@@ -43,6 +46,11 @@ class FreeQueue:
             self.database.execute(
                 "UPDATE free_jobs SET state='pending',owner=NULL WHERE run_id=? AND state='leased'", (self.run_id,)
             )
+            self.database.execute(
+                "UPDATE free_connection_retries SET attempts=MAX(0,attempts-1) WHERE endpoint IN "
+                "(SELECT endpoint FROM free_proxies WHERE state='retry_probe')"
+            )
+            self.database.execute("UPDATE free_proxies SET state='retry_wait',owner=NULL WHERE state='retry_probe'")
             self.database.execute(
                 "UPDATE free_proxies SET state='pending',owner=NULL,next_at=0 WHERE state IN ('leased','probing')"
             )
@@ -104,9 +112,37 @@ class FreeQueue:
                 "INSERT OR IGNORE INTO retained_candidates VALUES(?)", ((value,) for value in endpoints)
             )
             return self.database.execute(
-                "DELETE FROM free_proxies WHERE state NOT IN ('leased','probing') AND NOT EXISTS "
+                "DELETE FROM free_proxies WHERE state NOT IN ('leased','probing','retry_wait','retry_probe') AND NOT EXISTS "
                 "(SELECT 1 FROM retained_candidates r WHERE r.endpoint=free_proxies.endpoint)"
             ).rowcount
+
+    def schedule_connection_retry(
+        self, endpoint: str, owner: str, *, attempts: int, delay: float, error: str | None = None
+    ) -> bool:
+        """Queue a previously verified, exclusively leased route for bounded revalidation."""
+        if attempts <= 0:
+            return False
+        with self.database:
+            self.database.execute("BEGIN IMMEDIATE")
+            row = self.database.execute(
+                "SELECT * FROM free_proxies WHERE endpoint=? AND owner=? AND state='leased' AND verified_at IS NOT NULL",
+                (endpoint, owner),
+            ).fetchone()
+            if row is None:
+                return False
+            prior = self.database.execute(
+                "SELECT attempts,max_attempts FROM free_connection_retries WHERE endpoint=?", (endpoint,)
+            ).fetchone()
+            if prior and prior["attempts"] >= prior["max_attempts"]:
+                return False
+            self.database.execute(
+                "INSERT OR IGNORE INTO free_connection_retries VALUES (?,0,?,?)", (endpoint, attempts, time.time())
+            )
+            self.database.execute(
+                "UPDATE free_proxies SET state='retry_wait',owner=NULL,next_at=?,error=? WHERE endpoint=?",
+                (time.time() + delay, error, endpoint),
+            )
+        return True
 
     def claim_probe(self, *, fresh_for: float) -> dict[str, Any] | None:
         now = time.time()
@@ -115,6 +151,18 @@ class FreeQueue:
             self.database.execute(
                 "UPDATE free_proxies SET state='pending',next_at=0 WHERE state='ready' AND expires_at<=?", (now,)
             )
+            row = self.database.execute(
+                "SELECT p.* FROM free_proxies p JOIN free_connection_retries r USING(endpoint) "
+                "WHERE p.state='retry_wait' AND p.next_at<=? AND r.attempts<r.max_attempts "
+                "ORDER BY p.next_at LIMIT 1",
+                (now,),
+            ).fetchone()
+            if row:
+                self.database.execute("UPDATE free_proxies SET state='retry_probe' WHERE endpoint=?", (row["endpoint"],))
+                self.database.execute(
+                    "UPDATE free_connection_retries SET attempts=attempts+1 WHERE endpoint=?", (row["endpoint"],)
+                )
+                return {**dict(row), "connection_retry": True}
             row = self.database.execute(
                 "SELECT * FROM free_proxies WHERE state IN ('pending','cooldown') "
                 "AND next_at<=? AND seen_at>=? ORDER BY next_at,seen_at DESC LIMIT 1",
@@ -125,9 +173,36 @@ class FreeQueue:
         return dict(row) if row else None
 
     def finish_probe(
-        self, endpoint: str, *, exit_ip: str | None = None, ttl: float = 600, retry: float = 300, error: str | None = None
+        self,
+        endpoint: str,
+        *,
+        exit_ip: str | None = None,
+        ttl: float = 600,
+        retry: float = 300,
+        error: str | None = None,
+        retryable: bool = False,
+        connection_retry_delay: float = 30,
     ) -> bool:
         now = time.time()
+        recovery = self.database.execute(
+            "SELECT r.attempts,r.max_attempts FROM free_connection_retries r JOIN free_proxies p USING(endpoint) "
+            "WHERE r.endpoint=? AND p.state='retry_probe'",
+            (endpoint,),
+        ).fetchone()
+        if recovery and not exit_ip:
+            interrupted = error == "probe interrupted"
+            with self.database:
+                if interrupted:
+                    self.database.execute(
+                        "UPDATE free_connection_retries SET attempts=MAX(0,attempts-1) WHERE endpoint=?", (endpoint,)
+                    )
+                if interrupted or (retryable and recovery["attempts"] < recovery["max_attempts"]):
+                    self.database.execute(
+                        "UPDATE free_proxies SET state='retry_wait',next_at=?,error=? WHERE endpoint=?",
+                        (now + connection_retry_delay, error, endpoint),
+                    )
+                    return False
+                self.database.execute("DELETE FROM free_connection_retries WHERE endpoint=?", (endpoint,))
         if exit_ip:
             limited = self.database.execute(
                 "SELECT until_at FROM free_exit_cooldowns WHERE exit_ip=? AND until_at>?", (exit_ip, now)
@@ -227,6 +302,11 @@ class FreeQueue:
 
     def release_proxy(self, endpoint: str, owner: str, retry: float, error: str | None = None) -> None:
         with self.database:
+            self.database.execute(
+                "DELETE FROM free_connection_retries WHERE endpoint=? AND EXISTS "
+                "(SELECT 1 FROM free_proxies WHERE endpoint=? AND owner=?)",
+                (endpoint, endpoint, owner),
+            )
             self.database.execute(
                 "UPDATE free_proxies SET state='cooldown',owner=NULL,next_at=?,error=? WHERE endpoint=? AND owner=?",
                 (time.time() + retry, error, endpoint, owner),
