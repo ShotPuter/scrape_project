@@ -94,6 +94,37 @@ def proxy_ports(value: str) -> set[int]:
     return ports
 
 
+def probe_error_category(error: Exception) -> str:
+    """Distinguish local setup errors from candidate connectivity and RES refusals."""
+    if isinstance(error, ReputationDenied):
+        return "reputation_denied"
+    if isinstance(error, ImportError):
+        return "missing_socks_dependency" if "socksio" in str(error).lower() else "missing_dependency"
+    if isinstance(error, (httpx.TimeoutException, TimeoutError)):
+        return "timeout"
+    if isinstance(error, httpx.HTTPStatusError):
+        return f"http_{error.response.status_code}"
+    if isinstance(error, httpx.ProxyError):
+        return "proxy_error"
+    if isinstance(error, httpx.ConnectError):
+        return "tls_error" if "ssl" in str(error).lower() or "certificate" in str(error).lower() else "connect_error"
+    if isinstance(error, httpx.RemoteProtocolError):
+        return "protocol_error"
+    if "RES form missing" in str(error):
+        return "res_form_missing"
+    if "exit changed" in str(error):
+        return "exit_changed"
+    return type(error).__name__
+
+
+def require_socks_support() -> None:
+    """Fail before scanning if the image cannot construct a SOCKS transport."""
+    try:
+        import socksio  # noqa: F401 - HTTPX optional transport dependency
+    except ImportError:
+        raise RuntimeError("RES requires SOCKS support: rebuild the image with httpx[socks]") from None
+
+
 class ProxyProducer:
     """Downloads only public list data; all target probing is HTTP, never a browser."""
 
@@ -108,6 +139,8 @@ class ProxyProducer:
             "catalog_refreshes": 0,
             "reputation_denied": 0,
             "connection_failed": 0,
+            "configuration_failed": 0,
+            "failure_reasons": {},
             "not_admitted": 0,
             "recent_ready": [],
         }
@@ -293,10 +326,19 @@ class ProxyProducer:
                 self.queue.finish_probe(candidate["endpoint"], retry=0, error="probe interrupted")
                 raise
             except Exception as error:
-                message = safe_message(error)
+                category = probe_error_category(error)
+                message = f"{category}: {safe_message(error) or type(error).__name__}"
+                self.stats["failure_reasons"][category] = self.stats["failure_reasons"].get(category, 0) + 1
                 self.queue.finish_probe(candidate["endpoint"], retry=self.args.proxy_retry_seconds, error=message)
                 self.stats["denied_or_failed"] += 1
-                self.stats["reputation_denied" if isinstance(error, ReputationDenied) else "connection_failed"] += 1
+                counter = (
+                    "reputation_denied"
+                    if isinstance(error, ReputationDenied)
+                    else "configuration_failed"
+                    if isinstance(error, ImportError)
+                    else "connection_failed"
+                )
+                self.stats[counter] += 1
                 if "feed" in message.lower() and any(
                     word in message.lower() for word in ("unavailable", "expired", "invalid")
                 ):
@@ -307,6 +349,7 @@ class ProxyProducer:
                     self.stats["checks"] += 1
 
     async def run(self) -> None:
+        require_socks_support()
         scanners = [asyncio.create_task(self.scan()) for _ in range(self.args.proxy_check_concurrency)]
         try:
             while not self.stop.is_set():
@@ -679,8 +722,9 @@ async def execute(args, root: Path) -> int:
             counts = queue.counts()
             if not counts["jobs"].get("pending", 0) and not counts["jobs"].get("leased", 0):
                 break
-            if any(task.done() and task.exception() for task in children):
-                raise RuntimeError("A dispatcher background task failed")
+            for task in children:
+                if task.done() and not task.cancelled() and (failure := task.exception()):
+                    raise RuntimeError(f"Dispatcher background task failed: {safe_message(failure)}") from failure
             control = store.cooldown_state()
             if control["halted"]:
                 break

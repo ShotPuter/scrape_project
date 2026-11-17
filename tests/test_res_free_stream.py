@@ -423,3 +423,65 @@ async def test_catalog_screens_lists_before_ports_and_has_no_default_pool_trunca
     assert producer.stats["rejected_ports"] == {"3128": 1}
     assert stream.endpoint_allowed("http://11.0.0.2:3128", set(), stream.proxy_ports("80,443,3128"))
     assert not stream.endpoint_allowed("http://8.211.1.1:3128", set(), stream.proxy_ports("80,443,3128"))
+
+
+@pytest.mark.parametrize(
+    "error,expected",
+    [
+        (ImportError("Using SOCKS proxy, but socksio is not installed"), "missing_socks_dependency"),
+        (TimeoutError(), "timeout"),
+        (stream.httpx.ConnectError("certificate verify failed"), "tls_error"),
+        (stream.httpx.ConnectError("connection refused"), "connect_error"),
+        (stream.httpx.ProxyError("CONNECT failed"), "proxy_error"),
+        (stream.httpx.RemoteProtocolError("Server disconnected"), "protocol_error"),
+        (ValueError("RES form missing"), "res_form_missing"),
+        (ValueError("Proxy exit changed during preflight"), "exit_changed"),
+    ],
+)
+def test_probe_failures_have_specific_categories(error, expected):
+    assert stream.probe_error_category(error) == expected
+
+
+async def test_missing_socks_support_stops_before_scanning(queue, tmp_path, monkeypatch):
+    import builtins
+
+    original = builtins.__import__
+
+    def without_socks(name, *args, **kwargs):
+        if name == "socksio":
+            raise ImportError("No socksio")
+        return original(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_socks)
+    producer = stream.ProxyProducer(stream.parse_args(["--no-telegram"]), tmp_path, queue, asyncio.Event(), asyncio.Event())
+    producer.scan = AsyncMock()
+    producer.refresh = AsyncMock()
+    with pytest.raises(RuntimeError, match=r"httpx\[socks\]"):
+        await producer.run()
+    producer.scan.assert_not_awaited()
+    producer.refresh.assert_not_awaited()
+
+
+async def test_missing_dependency_is_not_reported_as_a_network_failure(queue, tmp_path):
+    queue.add_candidates([("socks5://13.0.0.1:1080", "fixture")], capacity=10)
+    stop = asyncio.Event()
+    producer = stream.ProxyProducer(stream.parse_args(["--no-telegram"]), tmp_path, queue, asyncio.Event(), stop)
+
+    async def verify(endpoint):
+        stop.set()
+        raise ImportError("socksio is not installed")
+
+    producer.verify = verify
+    await producer.scan()
+    assert producer.stats["configuration_failed"] == 1
+    assert producer.stats["connection_failed"] == 0
+    assert producer.stats["failure_reasons"] == {"missing_socks_dependency": 1}
+    assert queue.database.execute("SELECT error FROM free_proxies").fetchone()[0].startswith("missing_socks_dependency:")
+
+
+async def test_installed_socks_transport_constructs_without_contacting_candidate():
+    stream.require_socks_support()
+    # Construct HTTPX SOCKS transports only; no DNS, connect or HTTP calls.
+    for scheme in ("socks5", "socks5h"):
+        async with stream.httpx.AsyncClient(proxy=f"{scheme}://127.0.0.1:1080", trust_env=False):
+            pass

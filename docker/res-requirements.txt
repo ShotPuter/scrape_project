@@ -6,7 +6,7 @@ beautifulsoup4>=4.12,<5
 python-dotenv>=1,<2
 certifi>=2024.2.2
 patchright==1.64.3
-httpx==0.28.1
+httpx[socks]==0.28.1
 requests>=2.32,<3
 faster-whisper==1.2.1
 av==18.1.0

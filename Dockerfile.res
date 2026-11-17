@@ -5,7 +5,8 @@ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
     HF_HUB_DISABLE_XET=1 RES_AUDIO_MODEL_PATH=/opt/res-audio-models
 WORKDIR /app
 COPY docker/res-requirements.txt /tmp/requirements.txt
-RUN --mount=type=cache,target=/root/.cache/pip pip install --timeout 120 --retries 5 -r /tmp/requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip pip install --timeout 120 --retries 5 -r /tmp/requirements.txt \
+    && python -c "import socksio"
 RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
     && printf '%s\n' 'Acquire::Retries "5";' 'Acquire::https::Timeout "60";' \
        'APT::Update::Error-Mode "any";' > /etc/apt/apt.conf.d/80-network-retries \
