@@ -27,6 +27,9 @@ class FreeQueue:
                 endpoint TEXT PRIMARY KEY,source TEXT,state TEXT NOT NULL DEFAULT 'pending',
                 exit_ip TEXT,verified_at REAL,expires_at REAL NOT NULL DEFAULT 0,
                 next_at REAL NOT NULL DEFAULT 0,owner TEXT,error TEXT,seen_at REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS free_subnets (
+                subnet TEXT PRIMARY KEY, timeout_streak INTEGER NOT NULL DEFAULT 0,
+                cooldown_until REAL NOT NULL DEFAULT 0, pauses INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS free_connection_retries (
                 endpoint TEXT PRIMARY KEY, attempts INTEGER NOT NULL DEFAULT 0,
                 max_attempts INTEGER NOT NULL, created_at REAL NOT NULL);
@@ -36,6 +39,33 @@ class FreeQueue:
             CREATE UNIQUE INDEX IF NOT EXISTS free_proxy_unique_exit ON free_proxies(exit_ip)
                 WHERE state IN ('ready','leased');
         """)
+        columns = {row[1] for row in self.database.execute("PRAGMA table_info(free_proxies)")}
+        with self.database:
+            for name, declaration in (
+                ("subnet", "TEXT"),
+                ("last_success", "REAL NOT NULL DEFAULT 0"),
+                ("catalog_active", "INTEGER NOT NULL DEFAULT 1"),
+            ):
+                if name not in columns:
+                    self.database.execute(f"ALTER TABLE free_proxies ADD COLUMN {name} {declaration}")
+            self.database.execute("UPDATE free_proxies SET last_success=verified_at WHERE verified_at>last_success")
+            self.database.execute("UPDATE free_proxies SET subnet=" + self.subnet_sql() + " WHERE subnet IS NULL")
+            self.database.execute("CREATE INDEX IF NOT EXISTS free_proxies_subnet_active ON free_proxies(state,subnet)")
+            self.database.execute(
+                "CREATE INDEX IF NOT EXISTS free_proxies_priority ON "
+                "free_proxies(state,last_success DESC,next_at,seen_at DESC)"
+            )
+            self.database.execute(
+                "CREATE INDEX IF NOT EXISTS free_proxies_new_priority ON "
+                "free_proxies(state,catalog_active,last_success,next_at,seen_at DESC)"
+            )
+
+    @staticmethod
+    def subnet_sql() -> str:
+        """Numeric IPv4 endpoints only; no custom SQLite function needed by other tools."""
+        authority = "substr(endpoint,instr(endpoint,'://')+3)"
+        host = f"substr({authority},1,instr({authority},':')-1)"
+        return f"rtrim({host},'0123456789') || '0/24'"
 
     def close(self) -> None:
         self.database.close()
@@ -94,17 +124,21 @@ class FreeQueue:
                 existing = self.database.execute("SELECT 1 FROM free_proxies WHERE endpoint=?", (endpoint,)).fetchone()
                 if existing:
                     self.database.execute(
-                        "UPDATE free_proxies SET seen_at=?,source=? WHERE endpoint=?", (now, source, endpoint)
+                        "UPDATE free_proxies SET seen_at=?,source=?,catalog_active=1 WHERE endpoint=?",
+                        (now, source, endpoint),
                     )
                 elif capacity == 0 or inserted < remaining:
                     self.database.execute(
                         "INSERT INTO free_proxies(endpoint,source,seen_at) VALUES(?,?,?)", (endpoint, source, now)
                     )
+                    self.database.execute(
+                        "UPDATE free_proxies SET subnet=" + self.subnet_sql() + " WHERE endpoint=?", (endpoint,)
+                    )
                     inserted += 1
         return inserted
 
     def retain_candidates(self, endpoints: Iterable[str]) -> int:
-        """Drop inactive candidates outside the newly screened shortlist; preserve live leases."""
+        """Deactivate missing candidates without deleting addresses, history or live leases."""
         with self.database:
             self.database.execute("CREATE TEMP TABLE IF NOT EXISTS retained_candidates(endpoint TEXT PRIMARY KEY)")
             self.database.execute("DELETE FROM retained_candidates")
@@ -112,7 +146,8 @@ class FreeQueue:
                 "INSERT OR IGNORE INTO retained_candidates VALUES(?)", ((value,) for value in endpoints)
             )
             return self.database.execute(
-                "DELETE FROM free_proxies WHERE state NOT IN ('leased','probing','retry_wait','retry_probe') AND NOT EXISTS "
+                "UPDATE free_proxies SET catalog_active=0 WHERE catalog_active=1 "
+                "AND state NOT IN ('leased','probing','retry_wait','retry_probe') AND NOT EXISTS "
                 "(SELECT 1 FROM retained_candidates r WHERE r.endpoint=free_proxies.endpoint)"
             ).rowcount
 
@@ -151,11 +186,22 @@ class FreeQueue:
             self.database.execute(
                 "UPDATE free_proxies SET state='pending',next_at=0 WHERE state='ready' AND expires_at<=?", (now,)
             )
+            busy = [
+                row[0]
+                for row in self.database.execute(
+                    "SELECT subnet FROM free_proxies WHERE state IN ('probing','retry_probe') "
+                    "GROUP BY subnet HAVING COUNT(*)>=2"
+                )
+            ]
+            subnet_gate = " AND NOT EXISTS (SELECT 1 FROM free_subnets n WHERE n.subnet=p.subnet AND n.cooldown_until>?)" + (
+                " AND p.subnet NOT IN (" + ",".join("?" for _ in busy) + ")" if busy else ""
+            )
             row = self.database.execute(
                 "SELECT p.* FROM free_proxies p JOIN free_connection_retries r USING(endpoint) "
                 "WHERE p.state='retry_wait' AND p.next_at<=? AND r.attempts<r.max_attempts "
-                "ORDER BY p.next_at LIMIT 1",
-                (now,),
+                + subnet_gate
+                + " ORDER BY p.next_at LIMIT 1",
+                (now, now, *busy),
             ).fetchone()
             if row:
                 self.database.execute("UPDATE free_proxies SET state='retry_probe' WHERE endpoint=?", (row["endpoint"],))
@@ -163,11 +209,28 @@ class FreeQueue:
                     "UPDATE free_connection_retries SET attempts=attempts+1 WHERE endpoint=?", (row["endpoint"],)
                 )
                 return {**dict(row), "connection_retry": True}
-            row = self.database.execute(
-                "SELECT * FROM free_proxies WHERE state IN ('pending','cooldown') "
-                "AND next_at<=? AND seen_at>=? ORDER BY next_at,seen_at DESC LIMIT 1",
-                (now, now - fresh_for),
-            ).fetchone()
+            row = None
+            for known in (True, False):
+                condition = "p.last_success>0" if known else "p.last_success=0 AND p.catalog_active=1 AND p.seen_at>=?"
+                parameters = (now,) if known else (now, now - fresh_for)
+                order = "p.last_success DESC,p.next_at,p.seen_at DESC" if known else "p.next_at,p.seen_at DESC"
+                # Query each state separately so SQLite can stop at the first indexed
+                # match instead of sorting the entire million-address pool for IN(...).
+                choices = []
+                for state in ("pending", "cooldown"):
+                    match = self.database.execute(
+                        "SELECT p.* FROM free_proxies p WHERE p.state=? "
+                        "AND p.next_at<=? AND " + condition + subnet_gate + " ORDER BY " + order + " LIMIT 1",
+                        (state, *parameters, now, *busy),
+                    ).fetchone()
+                    if match:
+                        choices.append(match)
+                if choices:
+                    row = min(
+                        choices,
+                        key=lambda value: (-value["last_success"] if known else 0, value["next_at"], -value["seen_at"]),
+                    )
+                    break
             if row:
                 self.database.execute("UPDATE free_proxies SET state='probing' WHERE endpoint=?", (row["endpoint"],))
         return dict(row) if row else None
@@ -184,6 +247,8 @@ class FreeQueue:
         connection_retry_delay: float = 30,
     ) -> bool:
         now = time.time()
+        if error != "probe interrupted":
+            self.record_subnet_outcome(endpoint, success=bool(exit_ip), error=error)
         recovery = self.database.execute(
             "SELECT r.attempts,r.max_attempts FROM free_connection_retries r JOIN free_proxies p USING(endpoint) "
             "WHERE r.endpoint=? AND p.state='retry_probe'",
@@ -218,7 +283,8 @@ class FreeQueue:
         try:
             with self.database:
                 self.database.execute(
-                    "UPDATE free_proxies SET state=?,exit_ip=?,verified_at=?,expires_at=?,next_at=?,error=? WHERE "
+                    "UPDATE free_proxies SET state=?,exit_ip=?,verified_at=?,expires_at=?,next_at=?,error=?,"
+                    "last_success=CASE WHEN ? IS NOT NULL THEN ? ELSE last_success END WHERE "
                     "endpoint=?",
                     (
                         "ready" if exit_ip else "cooldown",
@@ -227,6 +293,8 @@ class FreeQueue:
                         now + ttl if exit_ip else 0,
                         now + retry,
                         error,
+                        exit_ip,
+                        now,
                         endpoint,
                     ),
                 )
@@ -240,6 +308,36 @@ class FreeQueue:
                 )
             return False
 
+    def record_subnet_outcome(self, endpoint: str, *, success: bool, error: str | None) -> None:
+        """Five consecutive timeout completions pause a /24 for ten minutes; no deletions."""
+        row = self.database.execute("SELECT subnet FROM free_proxies WHERE endpoint=?", (endpoint,)).fetchone()
+        if not row:
+            return
+        subnet = row[0]
+        timeout = bool(error and (error == "timeout" or error.startswith("timeout:")))
+        if not success and (not error or error.startswith("reputation_denied:")):
+            return
+        now = time.time()
+        with self.database:
+            self.database.execute("INSERT OR IGNORE INTO free_subnets(subnet) VALUES(?)", (subnet,))
+            self.database.execute(
+                "UPDATE free_subnets SET timeout_streak=CASE WHEN ? THEN "
+                "CASE WHEN cooldown_until>0 AND cooldown_until<=? THEN 1 ELSE timeout_streak+1 END ELSE 0 END "
+                ",cooldown_until=CASE WHEN cooldown_until<=? THEN 0 ELSE cooldown_until END WHERE subnet=?",
+                (int(timeout), now, now, subnet),
+            )
+            self.database.execute(
+                "UPDATE free_subnets SET cooldown_until=?,pauses=pauses+1 "
+                "WHERE subnet=? AND timeout_streak>=5 AND cooldown_until<=?",
+                (now + 600, subnet, now),
+            )
+
+    def subnet_status(self) -> dict[str, int]:
+        row = self.database.execute(
+            "SELECT COALESCE(SUM(cooldown_until>?),0),COALESCE(SUM(pauses),0) FROM free_subnets", (time.time(),)
+        ).fetchone()
+        return {"paused": row[0], "pause_events": row[1]}
+
     def claim_batch(self, owner: str, count: int) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
         now = time.time()
         with self.database:
@@ -248,7 +346,10 @@ class FreeQueue:
                 "UPDATE free_proxies SET state='pending',next_at=0 WHERE state='ready' AND expires_at<=?", (now,)
             )
             proxy = self.database.execute(
-                "SELECT * FROM free_proxies WHERE state='ready' AND expires_at>? ORDER BY verified_at DESC LIMIT 1", (now,)
+                "SELECT p.* FROM free_proxies p WHERE p.state='ready' AND p.expires_at>? "
+                "AND NOT EXISTS (SELECT 1 FROM free_subnets n WHERE n.subnet=p.subnet AND n.cooldown_until>?) "
+                "ORDER BY p.verified_at DESC LIMIT 1",
+                (now, now),
             ).fetchone()
             jobs = self.database.execute(
                 "SELECT * FROM free_jobs WHERE run_id=? AND state='pending' AND next_at<=? ORDER BY "
@@ -354,5 +455,6 @@ class FreeQueue:
     def prune(self, *, unseen_for: float) -> None:
         with self.database:
             self.database.execute(
-                "DELETE FROM free_proxies WHERE state IN ('pending','cooldown') AND seen_at<?", (time.time() - unseen_for,)
+                "UPDATE free_proxies SET catalog_active=0 WHERE state IN ('pending','cooldown') AND seen_at<?",
+                (time.time() - unseen_for,),
             )

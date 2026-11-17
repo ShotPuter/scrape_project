@@ -389,7 +389,8 @@ def test_unlimited_candidate_pool_and_refresh_preserve_active_jobs_and_exit_paus
     queue.database.execute("INSERT INTO free_exit_cooldowns VALUES ('198.51.100.2',9999999999,'site_document_limit')")
     queue.database.commit()
     assert queue.retain_candidates([]) == 38
-    assert queue.database.execute("SELECT state FROM free_proxies").fetchone()[0] == "leased"
+    assert queue.database.execute("SELECT COUNT(*) FROM free_proxies").fetchone()[0] == 39
+    assert queue.database.execute("SELECT COUNT(*) FROM free_proxies WHERE catalog_active=1").fetchone()[0] == 1
     assert queue.database.execute("SELECT COUNT(*) FROM free_exit_cooldowns").fetchone()[0] == 1
     assert queue.counts()["jobs"] == {"leased": 1}
 
@@ -552,3 +553,117 @@ async def test_preflight_timeout_queues_route_and_releases_unattempted_jobs(queu
     assert queue.counts()["proxies"] == {"retry_wait": 1}
     assert queue.database.execute("SELECT attempts FROM free_jobs").fetchone()[0] == 0
     assert not dispatcher.active
+
+
+def test_at_most_two_probes_per_subnet_across_protocols_and_other_network_keeps_working(queue):
+    candidates = [
+        ("http://11.2.3.1:80", "one"),
+        ("socks5://11.2.3.2:1080", "two"),
+        ("http://11.2.3.3:443", "three"),
+        ("http://11.2.4.1:80", "four"),
+    ]
+    queue.add_candidates(candidates, capacity=0)
+    first = queue.claim_probe(fresh_for=3600)
+    second = queue.claim_probe(fresh_for=3600)
+    third = queue.claim_probe(fresh_for=3600)
+    assert {first["subnet"], second["subnet"], third["subnet"]} == {"11.2.3.0/24", "11.2.4.0/24"}
+    assert sum(row["subnet"] == "11.2.3.0/24" for row in (first, second, third)) == 2
+    assert queue.claim_probe(fresh_for=3600) is None
+    queue.finish_probe(first["endpoint"], error="connection refused")
+    assert queue.claim_probe(fresh_for=3600)["subnet"] == "11.2.3.0/24"
+
+
+def test_five_timeouts_pause_only_that_subnet_for_ten_minutes_and_survive_restart(queue, tmp_path, monkeypatch):
+    import time
+
+    now = time.time()
+    monkeypatch.setattr("src.sites.res.free_queue.time.time", lambda: now)
+    queue.add_candidates([(f"http://11.2.3.{number}:80", "one") for number in range(1, 9)], capacity=0)
+    for index in range(5):
+        proxy = queue.claim_probe(fresh_for=3600)
+        assert proxy
+        queue.finish_probe(proxy["endpoint"], error="timeout: ConnectTimeout")
+        assert queue.subnet_status()["paused"] == int(index == 4)
+    assert queue.claim_probe(fresh_for=3600) is None
+    queue.add_candidates([("http://11.2.4.1:80", "two")], capacity=0)
+    assert queue.claim_probe(fresh_for=3600)["subnet"] == "11.2.4.0/24"
+    recovered = FreeQueue(tmp_path / "pool.sqlite3", "test")
+    try:
+        assert recovered.subnet_status() == {"paused": 1, "pause_events": 1}
+        assert recovered.claim_probe(fresh_for=3600) is None
+        monkeypatch.setattr("src.sites.res.free_queue.time.time", lambda: now + 599)
+        assert recovered.claim_probe(fresh_for=3600) is None
+        monkeypatch.setattr("src.sites.res.free_queue.time.time", lambda: now + 601)
+        assert recovered.claim_probe(fresh_for=3600)["subnet"] == "11.2.3.0/24"
+        assert recovered.database.execute("SELECT COUNT(*) FROM free_proxies").fetchone()[0] == 9
+    finally:
+        recovered.close()
+
+
+def test_success_resets_subnet_timeout_streak_and_failures_preserve_last_success(queue):
+    endpoint = "http://11.2.3.1:80"
+    queue.add_candidates([(endpoint, "one"), ("http://11.2.4.1:80", "two")], capacity=0)
+    for _ in range(4):
+        queue.finish_probe(endpoint, error="timeout: ConnectTimeout", retry=0)
+    assert queue.finish_probe(endpoint, exit_ip="11.2.3.1")
+    queue.finish_probe(endpoint, error="timeout: ConnectTimeout", retry=0)
+    assert queue.subnet_status()["paused"] == 0
+    queue.retain_candidates([])
+    queue.prune(unseen_for=-1)
+    assert queue.database.execute("SELECT COUNT(*) FROM free_proxies").fetchone()[0] == 2
+    preferred = queue.claim_probe(fresh_for=3600)
+    assert preferred["endpoint"] == endpoint and preferred["last_success"] > 0
+
+
+def test_old_schema_migrates_without_losing_addresses_or_verification(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "legacy.sqlite3"
+    db = sqlite3.connect(path)
+    db.execute(
+        "CREATE TABLE free_proxies(endpoint TEXT PRIMARY KEY,source TEXT,state TEXT,exit_ip TEXT,"
+        "verified_at REAL,expires_at REAL,next_at REAL,owner TEXT,error TEXT,seen_at REAL)"
+    )
+    db.execute("INSERT INTO free_proxies VALUES ('socks5://11.2.3.9:1080','legacy','cooldown',NULL,123,0,0,NULL,NULL,0)")
+    db.commit()
+    db.close()
+    queue = FreeQueue(path, "migration")
+    try:
+        row = queue.database.execute("SELECT subnet,last_success FROM free_proxies").fetchone()
+        assert tuple(row) == ("11.2.3.0/24", 123)
+    finally:
+        queue.close()
+
+
+def test_retry_lane_obeys_same_subnet_limit_without_spending_attempts(queue):
+    queue.add_jobs([company(1)])
+    endpoints = [f"http://11.2.3.{number}:80" for number in range(1, 4)]
+    queue.add_candidates([(value, "fixture") for value in endpoints], capacity=0)
+    queue.finish_probe(endpoints[2], exit_ip="11.2.3.3")
+    queue.claim_batch("worker", 1)
+    queue.schedule_connection_retry(endpoints[2], "worker", attempts=2, delay=0)
+    # Two independently running probes occupy the network before recovery is due.
+    queue.database.execute("UPDATE free_proxies SET state='probing' WHERE endpoint IN (?,?)", endpoints[:2])
+    queue.database.commit()
+    assert queue.claim_probe(fresh_for=3600) is None
+    assert queue.database.execute("SELECT attempts FROM free_connection_retries").fetchone()[0] == 0
+    queue.finish_probe(endpoints[0], error="connect refused")
+    assert queue.claim_probe(fresh_for=3600)["connection_retry"]
+
+
+def test_paused_subnet_is_not_assigned_to_new_browser_and_second_pause_works(queue, monkeypatch):
+    import time
+
+    now = time.time()
+    monkeypatch.setattr("src.sites.res.free_queue.time.time", lambda: now)
+    queue.add_jobs([company(1)])
+    endpoint = "http://11.2.3.1:80"
+    queue.add_candidates([(endpoint, "fixture")], capacity=0)
+    queue.finish_probe(endpoint, exit_ip="11.2.3.1", ttl=2000)
+    for _ in range(5):
+        queue.record_subnet_outcome(endpoint, success=False, error="timeout: ConnectTimeout")
+    assert queue.claim_batch("blocked", 1) is None
+    monkeypatch.setattr("src.sites.res.free_queue.time.time", lambda: now + 601)
+    for _ in range(5):
+        queue.record_subnet_outcome(endpoint, success=False, error="timeout: ConnectTimeout")
+    assert queue.subnet_status() == {"paused": 1, "pause_events": 2}

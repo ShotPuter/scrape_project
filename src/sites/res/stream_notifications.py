@@ -40,6 +40,7 @@ class StreamNotifications:
         self.started = self.last_activity = clock()
         self.next_summary = self.started + args.telegram_minutes * 60
         self.previous: dict[str, Any] = {}
+        self.subnet_events = 0
         self.cooldown = False
         self.health = ""
         self.last_progress = self.started
@@ -139,6 +140,7 @@ class StreamNotifications:
             f"прошло IP-фильтры: {stats.get('blacklist_passed', 0)}; "
             f"исключено по портам: {stats.get('port_rejected', 0)}; "
             f"в пуле: {stats.get('selected_candidates', 0)}\n"
+            f"Подсетей на паузе: {snapshot.get('subnets', {}).get('paused', 0)}; максимум 2 проверки на /24\n"
             f"Проверок прокси: {stats.get('checks', 0)}; допусков: {stats.get('ready', 0)}; "
             f"отклонено репутацией: {stats.get('reputation_denied', 0)}; "
             f"ошибок связи/проверки: {stats.get('connection_failed', 0)}; "
@@ -169,6 +171,15 @@ class StreamNotifications:
                 f"{'⏸ Общая пауза после серии ошибок' if active else '▶️ Работа возобновлена'} — RES {self.args.run_id}",
             )
             self.cooldown = active
+        subnet_status = snapshot.get("subnets", {})
+        events = subnet_status.get("pause_events", 0)
+        if events > self.subnet_events:
+            self.activity(
+                "subnet_pause",
+                f"⏸ RES {self.args.run_id}: подсетей на паузе {subnet_status.get('paused', 0)}; "
+                "после 5 таймаутов /24 исключается из проверок на 10 минут; адреса сохранены",
+            )
+            self.subnet_events = events
         stats = snapshot.get("producer", {})
         if stats.get("catalog_refreshes", 0) and "catalog" not in self.first_events:
             self.activity(
@@ -222,6 +233,7 @@ class StreamNotifications:
                     f"подтверждено {self.pending['browser_ready']}; "
                     f"сессий завершено {self.pending['browser_finished']}; "
                     f"лимитов RES {self.pending['site_limit']}\n"
+                    f"Подсетей на паузе: {snapshot.get('subnets', {}).get('paused', 0)}; максимум 2 проверки на /24\n"
                     f"Сетевых ошибок: {stats.get('connection_failed', 0)}; "
                     f"отказов репутации при проверке: {stats.get('reputation_denied', 0)}\n"
                     f"Ошибок конфигурации: {stats.get('configuration_failed', 0)}; "

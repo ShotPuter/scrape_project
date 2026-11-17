@@ -231,7 +231,8 @@ class ProxyProducer:
             selected_candidates=len(candidates),
             capacity_rejected=len(eligible) - len(candidates),
             queue_inserted=inserted,
-            queue_removed=removed,
+            queue_archived=removed,
+            queue_removed=0,
             prefilter_status="ready",
         )
         if self.notifications:
@@ -309,7 +310,7 @@ class ProxyProducer:
                 async with self.rate_lock:
                     await asyncio.sleep(max(0, self.next_probe - time.monotonic()))
                     self.next_probe = time.monotonic() + 60 / self.args.proxy_rate_per_minute
-                if candidate.get("connection_retry") and not endpoint_allowed(
+                if (candidate.get("connection_retry") or candidate.get("last_success", 0)) and not endpoint_allowed(
                     candidate["endpoint"], self.exceptions, self.ports
                 ):
                     raise ReputationDenied("Proxy no longer allowed by endpoint policy")
@@ -819,6 +820,7 @@ async def execute(args, root: Path) -> int:
                     ready_browsers=sum(bool(active.get("ready")) for active in worker.active.values()),
                     new_pdfs=max(0, pdf_count() - initial_pdf_count),
                     producer=producer.stats,
+                    subnets=queue.subnet_status(),
                     cooldown=control,
                     proxy_reputation_mode=reputation_mode(),
                     site_limit_pauses=dispatcher.site_limits,
@@ -866,6 +868,7 @@ async def execute(args, root: Path) -> int:
             elapsed_seconds=round(time.monotonic() - started, 2),
             new_pdfs=max(0, pdf_count() - initial_pdf_count),
             producer=producer.stats,
+            subnets=queue.subnet_status(),
             cooldown=store.cooldown_state(),
         )
         summary.update(attempt_counts())
