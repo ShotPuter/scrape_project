@@ -174,3 +174,16 @@ def test_first_pdf_and_stall_recovery_messages_are_not_repeated(tmp_path):
     rows = records(notifications)
     assert sum(row["event"] == "health" for row in rows) == 2
     assert sum(row["event"] == "first_first_pdf" for row in rows) == 1
+
+
+def test_summary_mode_suppresses_proxy_and_browser_delivery(tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "test-chat")
+    notifications = StreamNotifications(settings(no_telegram=False, telegram_events="summary"), tmp_path)
+    notifications.activity("browser_started", "browser")
+    notifications.activity("proxy_ready", "proxy")
+    notifications.publish("activity", "five-minute noise")
+    notifications.publish("progress", "thirty-minute summary")
+    assert notifications.queue.qsize() == 1
+    assert notifications.queue.get_nowait() == ("progress", "thirty-minute summary")
+    assert len(records(notifications)) == 4

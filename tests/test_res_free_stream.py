@@ -256,7 +256,7 @@ async def test_worker_command_has_one_browser_one_proxy_and_expected_exit(tmp_pa
 @pytest.mark.parametrize(
     "flags",
     [
-        ["--browsers", "6"],
+        ["--browsers", "11"],
         ["--browsers", "0"],
         ["--proxy-rate-per-minute", "0"],
         ["--worker-timeout", "nan"],
@@ -700,3 +700,48 @@ async def test_last_company_ack_does_not_cancel_worker_before_final_report(tmp_p
     monkeypatch.setattr(stream.BrowserWorker, "__call__", worker)
     assert await asyncio.wait_for(stream.execute(args, root), 5) == 0
     assert ended == [True]
+
+
+async def test_session_summary_counts_all_dynamic_companies_not_only_initial_lease(tmp_path, monkeypatch):
+    import json
+
+    args = stream.parse_args(["--output", str(tmp_path), "--no-telegram"])
+    args.runtime_lock_fd = 99
+    root = tmp_path / args.run_id
+    root.mkdir()
+    companies = [company(index) for index in range(3)]
+    store = TrackingStore(tmp_path / "tracking.sqlite3", args.run_id)
+    store.register_run({}, companies)
+
+    class Process:
+        pid = 123456
+        returncode = 0
+
+        async def wait(self):
+            return 0
+
+    async def spawn(*command, **options):
+        directory = root / "workers/w00"
+        report = {
+            "companies": [
+                {**companies[0], "status": "downloaded"},
+                {**companies[1], "status": "downloaded"},
+                {**companies[2], "status": "captcha_required", "error": "Google declined challenge"},
+            ],
+            "totals": {"downloaded": 4},
+            "stop_reason": {"code": "captcha_required", "error": "Google declined challenge"},
+        }
+        (directory / "report-fixture.json").write_text(json.dumps(report))
+        return Process()
+
+    monkeypatch.setattr(stream.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(stream.os, "killpg", Mock(side_effect=ProcessLookupError))
+    try:
+        result = await stream.BrowserWorker(args, root, store)(
+            0, {"endpoint": "http://11.2.3.4:80", "exit_ip": "11.2.3.4"}, [companies[0]], "owner"
+        )
+        assert result.completed == {companies[0]["company_id"], companies[1]["company_id"]}
+        assert result.new_pdfs == 4
+        assert result.error == "Google declined challenge"
+    finally:
+        store.close()

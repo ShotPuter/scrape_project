@@ -75,7 +75,12 @@ class StreamNotifications:
     def publish(self, event: str, text: str) -> None:
         text = self.clean(text)
         self.record(event, text)
-        if self.enabled:
+        deliver = getattr(self.args, "telegram_events", "details") == "details" or event in {
+            "preparing",
+            "progress",
+            "finished",
+        }
+        if self.enabled and deliver:
             try:
                 self.queue.put_nowait((event, text))
             except asyncio.QueueFull:

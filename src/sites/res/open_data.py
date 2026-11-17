@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import csv
+import itertools
 import json
 import re
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -91,3 +94,106 @@ def select_companies(year, month, limit, *, session=None):
         "month": month,
         "companies": companies,
     }
+
+
+def select_archive(from_year, limit=0, *, session=None):
+    """Select every available official year up to from_year, newest month first.
+
+    Zero limit means all unique companies. Missing newer years are not invented;
+    the result records the actual newest and oldest periods found in the data.
+    """
+    if from_year < 2013 or limit < 0:
+        raise ValueError("Invalid archive year or limit")
+    if session is None:
+        with httpx.Client(timeout=45, trust_env=False, transport=httpx.HTTPTransport(retries=1)) as client:
+            return select_archive(from_year, limit, session=client)
+    package = request(session, "package_show", {"id": DATASET})
+    resources = {}
+    for resource in package.get("resources", []):
+        years = re.findall(r"\b(20\d{2})\b", str(resource.get("name", "")))
+        if len(set(years)) == 1 and int(years[0]) <= from_year and str(resource.get("format", "")).lower() == "csv":
+            year = int(years[0])
+            if year in resources:
+                raise ValueError(f"Multiple active company resources for {year}")
+            resources[year] = resource
+    if not resources:
+        raise ValueError("No active official company resources available in the requested archive")
+    companies, seen, periods = [], set(), []
+    for year in sorted(resources, reverse=True):
+        resource = resources[year]
+        buckets = {month: [] for month in range(1, 13)}
+        offset = 0
+        csv_rows = None
+        if resource.get("url"):
+            csv_rows = iter_archive_csv(session, resource["url"])
+        while True:
+            page = (
+                {"records": list(itertools.islice(csv_rows, 500))}
+                if csv_rows is not None
+                else request(
+                    session,
+                    "datastore_search",
+                    {"resource_id": resource["id"], "limit": 500, "offset": offset, "sort": "_id desc"},
+                )
+            )
+            records = page.get("records")
+            if not isinstance(records, list):
+                raise ValueError("Invalid official archive page")
+            if not records:
+                break
+            for row in records:
+                if str(row.get("Anio")) != str(year) or row.get("Mes") not in MONTHS:
+                    raise ValueError("Unexpected year/month in official archive")
+                rut = normalized_rut(str(row.get("RUT", "")))
+                name = " ".join(str(row.get("Razon Social") or "").split())
+                if rut and name:
+                    month = MONTHS.index(row["Mes"]) + 1
+                    buckets[month].append(
+                        {
+                            "company_id": "rut:" + rut,
+                            "company_name": name,
+                            "rut": rut,
+                            "source_period": f"{year}-{month:02d}",
+                        }
+                    )
+            offset += len(records)
+            if offset >= page.get("total", offset + 1):
+                break
+        for month in range(12, 0, -1):
+            if buckets[month]:
+                periods.append(f"{year}-{month:02d}")
+            for company in buckets[month]:
+                if company["rut"] not in seen:
+                    seen.add(company["rut"])
+                    companies.append(company)
+                    if limit and len(companies) >= limit:
+                        return {
+                            "companies": companies,
+                            "periods": periods,
+                            "newest_period": periods[0],
+                            "source": "official_res_ckan_archive",
+                        }
+    if not companies:
+        raise ValueError("Official archive contains no valid companies")
+    return {
+        "companies": companies,
+        "periods": periods,
+        "newest_period": periods[0],
+        "oldest_period": periods[-1],
+        "source": "official_res_ckan_archive",
+    }
+
+
+def iter_archive_csv(session, url):
+    """Stream official CSV fallback for resources without Datastore access."""
+    if urlsplit(url).scheme != "https" or urlsplit(url).hostname != "datos.gob.cl":
+        raise ValueError("Unexpected archive CSV host")
+    with session.stream("GET", url) as response:
+        response.raise_for_status()
+        lines = response.iter_lines()
+        header = next(lines, "").lstrip("\ufeff")
+        delimiter = ";" if ";" in header else ","
+        reader = csv.DictReader(itertools.chain([header], lines), delimiter=delimiter)
+        if not {"RUT", "Razon Social", "Anio", "Mes"}.issubset(reader.fieldnames or []):
+            raise ValueError("Official archive CSV has an unexpected schema")
+        yield from reader

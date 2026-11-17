@@ -1,4 +1,4 @@
-"""Continuous HTTP proxy discovery feeding up to five isolated RES browser slots."""
+"""Continuous HTTP proxy discovery feeding up to ten isolated RES browser slots."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ from src.proxy.sources.registry import resolve_sources
 from src.sites.res import benchmark
 from src.sites.res.free_queue import FreeQueue
 from src.sites.res.http_flow import USER_AGENT
-from src.sites.res.open_data import select_companies
+from src.sites.res.open_data import select_archive, select_companies
 from src.sites.res.stream_notifications import StreamNotifications
 from src.sites.res.tracking import TrackingStore, import_run
 from src.utils.atomic import atomic_write_json
@@ -546,6 +546,12 @@ class BrowserWorker:
             report.get("totals", {}).get("downloaded", report.get("progress", {}).get("downloaded", 0))
             for report in new_reports
         )
+        # A continuous worker receives only its first company from the parent;
+        # its final report includes all later companies claimed from SQLite.
+        result.completed.update(identifier for identifier, row in latest.items() if row.get("status") in TERMINAL)
+        result.terminal_errors.update(
+            identifier for identifier, row in latest.items() if row.get("status") == "ambiguous_match"
+        )
         for company in companies:
             cached = pilot.cached_company_result(company, state, self.args, directory)
             row = cached or latest.get(company["company_id"], {})
@@ -628,8 +634,8 @@ class Dispatcher:
         changed: asyncio.Event,
         stop: asyncio.Event,
     ):
-        if not 1 <= args.browsers <= 5:
-            raise ValueError("Free dispatcher supports at most five browsers")
+        if not 1 <= args.browsers <= 10:
+            raise ValueError("Free dispatcher supports at most ten browsers")
         self.args, self.queue, self.worker, self.store, self.changed, self.stop = args, queue, worker, store, changed, stop
         self.active: dict[int, str] = {}
         self.proxy_failures = 0
@@ -748,11 +754,17 @@ async def execute(args, root: Path) -> int:
     notifications.publish("preparing", f"🚀 RES {args.run_id}: подготовка выборки и восстановление сохранённых PDF")
     try:
         config = {"year": args.year, "month": args.month, "limit": args.limit}
+        if args.archive_from_year:
+            config["archive_from_year"] = args.archive_from_year
         selection = benchmark.read_json(root / "selection.json")
         if selection and any(selection["config"].get(key) != value for key, value in config.items()):
             raise ValueError("Selection settings changed; choose a new --run-id")
         if not selection:
-            selection = await asyncio.to_thread(select_companies, args.year, args.month, args.limit)
+            selection = (
+                await asyncio.to_thread(select_archive, args.archive_from_year, args.limit)
+                if args.archive_from_year
+                else (await asyncio.to_thread(select_companies, args.year, args.month, args.limit))
+            )
             selection["config"] = config
             atomic_write_json(root / "selection.json", selection)
         companies = selection["companies"]
@@ -789,7 +801,7 @@ async def execute(args, root: Path) -> int:
         notifications.publish(
             "started",
             f"🚀 RES {args.run_id} — запуск\n"
-            f"Выборка: {args.year}-{args.month:02d}, компаний: {len(companies)}\n"
+            f"Выборка: {selection.get('newest_period', f'{args.year}-{args.month:02d}')}, компаний: {len(companies)}\n"
             f"В очереди: {counts.get('pending', 0)}; уже завершено: {counts.get('done', 0)}\n"
             f"Браузеров максимум: {args.browsers}; CAPTCHA: {args.captcha_timeout:g} с\n"
             f"Проверка репутации: {reputation_mode()}; полная сводка каждые {args.telegram_minutes:g} мин",
@@ -955,6 +967,8 @@ async def execute(args, root: Path) -> int:
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--archive-from-year", type=int, default=0)
+    parser.add_argument("--telegram-events", choices=("summary", "details"), default="summary")
     parser.add_argument("--year", type=int, default=2025)
     parser.add_argument("--month", type=int, default=1)
     parser.add_argument("--limit", type=int, default=100)
@@ -1003,8 +1017,12 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,100}", args.run_id):
         parser.error("Invalid run id")
-    if not 1 <= args.browsers <= 5 or not 1 <= args.month <= 12 or not 1 <= args.limit <= 10000:
-        parser.error("browsers: 1..5; month: 1..12; limit: 1..10000")
+    if (
+        not 1 <= args.browsers <= 10
+        or not 1 <= args.month <= 12
+        or not (args.limit >= 0 if args.archive_from_year else 1 <= args.limit <= 10000)
+    ):
+        parser.error("browsers: 1..10; month: 1..12; limit: 1..10000")
     if (
         any(
             value < 1
@@ -1021,6 +1039,7 @@ def parse_args(argv=None):
         or args.proxy_check_concurrency > 64
         or args.ready_capacity < args.browsers
         or not 0 <= args.connection_retries <= 2
+        or (args.archive_from_year != 0 and not 2013 <= args.archive_from_year <= 2100)
         or args.max_candidates < 0
         or args.source_records < 0
         or args.max_documents < 0

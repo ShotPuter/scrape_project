@@ -7,6 +7,10 @@ services:
       RES_FREE_ALLOWED_PROXY_ENDPOINTS: ${RES_FREE_ALLOWED_PROXY_ENDPOINTS:-}
     command:
       - free-stream
+      - --archive-from-year
+      - "${RES_FREE_ARCHIVE_FROM_YEAR:-0}"
+      - --telegram-events
+      - "${RES_FREE_TELEGRAM_EVENTS:-summary}"
       - --year
       - "${RES_YEAR:-2025}"
       - --month

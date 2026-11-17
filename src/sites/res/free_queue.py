@@ -41,6 +41,9 @@ class FreeQueue:
             CREATE UNIQUE INDEX IF NOT EXISTS free_proxy_unique_exit ON free_proxies(exit_ip)
                 WHERE state IN ('ready','leased');
         """)
+        job_columns = {row[1] for row in self.database.execute("PRAGMA table_info(free_jobs)")}
+        if "selection_order" not in job_columns:
+            self.database.execute("ALTER TABLE free_jobs ADD COLUMN selection_order INTEGER NOT NULL DEFAULT 0")
         columns = {row[1] for row in self.database.execute("PRAGMA table_info(free_proxies)")}
         with self.database:
             for name, declaration in (
@@ -90,8 +93,11 @@ class FreeQueue:
     def add_jobs(self, companies: Iterable[dict[str, Any]], *, retry_errors: bool = False) -> None:
         with self.database:
             self.database.executemany(
-                "INSERT OR IGNORE INTO free_jobs(run_id,company_id,payload) VALUES(?,?,?)",
-                ((self.run_id, company["company_id"], json.dumps(company)) for company in companies),
+                "INSERT OR IGNORE INTO free_jobs(run_id,company_id,payload,selection_order) VALUES(?,?,?,?)",
+                (
+                    (self.run_id, company["company_id"], json.dumps(company), index)
+                    for index, company in enumerate(companies)
+                ),
             )
             if retry_errors:
                 self.database.execute(
@@ -355,7 +361,7 @@ class FreeQueue:
             ).fetchone()
             jobs = self.database.execute(
                 "SELECT * FROM free_jobs WHERE run_id=? AND state='pending' AND next_at<=? ORDER BY "
-                "attempts,next_at,company_id LIMIT ?",
+                "attempts,next_at,selection_order,company_id LIMIT ?",
                 (self.run_id, now, count),
             ).fetchall()
             if not proxy or not jobs:
@@ -382,7 +388,7 @@ class FreeQueue:
                 return json.loads(owned[0])
             row = self.database.execute(
                 "SELECT * FROM free_jobs WHERE run_id=? AND state='pending' AND next_at<=? "
-                "ORDER BY attempts,next_at,company_id LIMIT 1",
+                "ORDER BY attempts,next_at,selection_order,company_id LIMIT 1",
                 (self.run_id, time.time()),
             ).fetchone()
             if not row:
