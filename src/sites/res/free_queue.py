@@ -13,11 +13,13 @@ from typing import Any
 class FreeQueue:
     """One scheduler owns a flock; transactions keep state recoverable after exit."""
 
-    def __init__(self, path: Path, run_id: str):
+    def __init__(self, path: Path, run_id: str, *, initialize: bool = True):
         self.run_id = run_id
         self.database = sqlite3.connect(path, timeout=30)
         self.database.row_factory = sqlite3.Row
         self.database.execute("PRAGMA journal_mode=WAL")
+        if not initialize:
+            return
         self.database.executescript("""
             CREATE TABLE IF NOT EXISTS free_jobs (
                 run_id TEXT,company_id TEXT,payload TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',
@@ -366,6 +368,38 @@ class FreeQueue:
                 ((owner, self.run_id, row["company_id"]) for row in jobs),
             )
         return {**dict(proxy), "owner": owner}, [json.loads(row["payload"]) for row in jobs]
+
+    def claim_company(self, owner: str) -> dict[str, Any] | None:
+        """Lease exactly one company to a live proxy owner; never reserve a batch."""
+        with self.database:
+            self.database.execute("BEGIN IMMEDIATE")
+            if not self.database.execute("SELECT 1 FROM free_proxies WHERE owner=? AND state='leased'", (owner,)).fetchone():
+                return None
+            owned = self.database.execute(
+                "SELECT payload FROM free_jobs WHERE run_id=? AND owner=? AND state='leased' LIMIT 1", (self.run_id, owner)
+            ).fetchone()
+            if owned:
+                return json.loads(owned[0])
+            row = self.database.execute(
+                "SELECT * FROM free_jobs WHERE run_id=? AND state='pending' AND next_at<=? "
+                "ORDER BY attempts,next_at,company_id LIMIT 1",
+                (self.run_id, time.time()),
+            ).fetchone()
+            if not row:
+                return None
+            self.database.execute(
+                "UPDATE free_jobs SET state='leased',owner=? WHERE run_id=? AND company_id=?",
+                (owner, self.run_id, row["company_id"]),
+            )
+        return json.loads(row["payload"])
+
+    def owned_companies(self, owner: str) -> list[dict[str, Any]]:
+        return [
+            json.loads(row[0])
+            for row in self.database.execute(
+                "SELECT payload FROM free_jobs WHERE run_id=? AND owner=? AND state='leased'", (self.run_id, owner)
+            )
+        ]
 
     def finish_job(
         self,

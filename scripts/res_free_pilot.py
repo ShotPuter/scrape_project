@@ -991,6 +991,11 @@ async def drain(cascade, http, queue, deferred, state, args, counters, report, s
 
 
 async def scan(proxies, args, state, counters, report, audio, vlm_model, token_records):
+    if getattr(args, "stream_db", None):
+        from src.sites.res.continuous_worker import scan_continuously
+
+        await scan_continuously(proxies, args, state, counters, report, audio, vlm_model, token_records)
+        return
     if args.cve:
         await scan_single(proxies, args, state, counters, report, audio, vlm_model, token_records)
         return
@@ -1243,6 +1248,11 @@ async def run(args):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--stream-db", type=Path)
+    parser.add_argument("--stream-owner")
+    parser.add_argument("--stream-company-attempts", type=int, default=3)
+    parser.add_argument("--stream-network-retries", type=int, choices=(0, 1, 2), default=2)
+    parser.add_argument("--stream-retry-delay", type=float, default=3)
     parser.add_argument("--db", type=Path, default=Path("data/dequienes-companies-2025/companies.sqlite3"))
     parser.add_argument("--limit", type=int, default=10, help="Companies to scan; 0 means all")
     parser.add_argument("--cve", help="Process a single CVE without a company search")
@@ -1305,6 +1315,10 @@ def parse_args(argv=None):
     )
     parser.add_argument("--max-cooldowns", type=int, default=3, help="Maximum pauses before stopping the remaining queue")
     args = parser.parse_args(argv)
+    if args.stream_db and (not args.stream_owner or not args.tracking_db or not args.tracking_run_id):
+        parser.error("Continuous mode requires owner, tracking DB and run ID")
+    if args.stream_company_attempts < 1 or not math.isfinite(args.stream_retry_delay) or args.stream_retry_delay < 0:
+        parser.error("Invalid continuous worker retry settings")
     if args.audio_seconds is None:
         args.audio_seconds = args.captcha_timeout
     if any(not math.isfinite(v) or v <= 0 for v in (args.captcha_timeout, args.audio_seconds)):

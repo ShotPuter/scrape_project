@@ -435,6 +435,7 @@ class BrowserWorker:
         option("--max-failures", "1")
         option("--error-cooldown-minutes", "0")
         option("--max-cooldowns", "0")
+        option("--solves-per-proxy", "0")
         command.extend(
             [
                 "--proxy-file",
@@ -443,6 +444,14 @@ class BrowserWorker:
                 proxy["exit_ip"],
                 "--site-limit-scope",
                 "proxy",
+                "--stream-db",
+                str(self.args.output / "free-runtime.sqlite3"),
+                "--stream-owner",
+                owner,
+                "--stream-company-attempts",
+                str(self.args.company_attempts),
+                "--stream-network-retries",
+                str(self.args.session_network_retries),
             ]
         )
         batch_started_at = time.time()
@@ -474,12 +483,35 @@ class BrowserWorker:
                         "browser_started",
                         f"🖥 RES {self.args.run_id}: запущен процесс слота {slot + 1}\n"
                         f"Прокси: {proxy['endpoint']}; ожидаемый IP: {proxy['exit_ip']}\n"
-                        f"Компаний в порции: {len(companies)}; подготовка браузера",
+                        "Непрерывная сессия: компании по одной, без лимита количества; подготовка браузера",
                     )
                 try:
-                    await asyncio.wait_for(process.wait(), self.args.worker_timeout)
+                    waiter = asyncio.create_task(process.wait())
+                    last_activity = time.monotonic()
+                    seen_report_time = 0
+                    try:
+                        while not waiter.done():
+                            report_time = max(
+                                (
+                                    path.stat().st_mtime_ns
+                                    for path in directory.glob("report-*.json")
+                                    if str(path) not in prior
+                                ),
+                                default=0,
+                            )
+                            if report_time > seen_report_time:
+                                seen_report_time = report_time
+                                last_activity = time.monotonic()
+                            if time.monotonic() - last_activity >= self.args.worker_timeout:
+                                raise TimeoutError
+                            with suppress(TimeoutError):
+                                await asyncio.wait_for(asyncio.shield(waiter), 1)
+                    finally:
+                        if not waiter.done():
+                            waiter.cancel()
+                        await asyncio.gather(waiter, return_exceptions=True)
                 except TimeoutError:
-                    result.error = "Browser session timeout"
+                    result.error = "Browser worker inactivity timeout"
                 except asyncio.CancelledError:
                     result.error = "Dispatcher stopping"
                 finally:
@@ -548,6 +580,16 @@ class BrowserWorker:
         result.quota_limited = bool(result.quota_companies) or any(
             report.get("stop_reason", {}).get("code") == "daily_document_limit" for report in new_reports
         )
+        explicit_reason = next(
+            (
+                report.get("stop_reason", {}).get("error")
+                for report in reversed(new_reports)
+                if report.get("stop_reason", {}).get("error")
+            ),
+            None,
+        )
+        if explicit_reason and any(report.get("stop_reason", {}).get("code") != "queue_drained" for report in new_reports):
+            result.error = safe_message(explicit_reason)
         if not result.error and len(result.completed) < len(companies):
             result.error = next(
                 (
@@ -600,7 +642,7 @@ class Dispatcher:
             if control["halted"]:
                 self.stop.set()
                 return
-            lease = None if control["active"] else self.queue.claim_batch(uuid.uuid4().hex, self.args.batch_size)
+            lease = None if control["active"] else self.queue.claim_batch(uuid.uuid4().hex, 1)
             if not lease:
                 with suppress(TimeoutError):
                     await asyncio.wait_for(self.changed.wait(), 0.5)
@@ -635,7 +677,7 @@ class Dispatcher:
                             f"🔄 RES: прокси {proxy['endpoint']} в очереди повторной проверки; "
                             f"пауза {self.args.connection_retry_delay:g} с, максимум {self.args.connection_retries} попытки",
                         )
-                for company in companies:
+                for company in self.queue.owned_companies(owner):
                     identifier = company["company_id"]
                     self.queue.finish_job(
                         identifier,
@@ -767,7 +809,7 @@ async def execute(args, root: Path) -> int:
         site_limit_cursor = 0
         while children and not stop.is_set():
             counts = queue.counts()
-            if not counts["jobs"].get("pending", 0) and not counts["jobs"].get("leased", 0):
+            if not counts["jobs"].get("pending", 0) and not counts["jobs"].get("leased", 0) and not dispatcher.active:
                 break
             for task in children:
                 if task.done() and not task.cancelled() and (failure := task.exception()):
@@ -917,6 +959,7 @@ def parse_args(argv=None):
     parser.add_argument("--month", type=int, default=1)
     parser.add_argument("--limit", type=int, default=100)
     parser.add_argument("--browsers", type=int, default=5)
+    parser.add_argument("--session-network-retries", type=int, choices=(0, 1, 2), default=2)
     parser.add_argument("--batch-size", type=int, default=10)
     parser.add_argument("--max-documents", type=int, default=0)
     parser.add_argument("--company-attempts", type=int, default=3)

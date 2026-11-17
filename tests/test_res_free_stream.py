@@ -245,6 +245,8 @@ async def test_worker_command_has_one_browser_one_proxy_and_expected_exit(tmp_pa
         assert child.proxy_limit == 1 and child.company_attempts == 1 and child.profile_slots == 1
         assert child.expected_proxy_ip == "1.1.1.1" and child.captcha_timeout == 130
         assert child.site_limit_scope == "proxy"
+        assert child.solves_per_proxy == 0 and child.stream_owner == "lease"
+        assert child.stream_db == tmp_path / "free-runtime.sqlite3"
         assert options["start_new_session"] is True and options["pass_fds"] == (99,)
         assert not result.attempted
     finally:
@@ -667,3 +669,34 @@ def test_paused_subnet_is_not_assigned_to_new_browser_and_second_pause_works(que
     for _ in range(5):
         queue.record_subnet_outcome(endpoint, success=False, error="timeout: ConnectTimeout")
     assert queue.subnet_status() == {"paused": 1, "pause_events": 2}
+
+
+async def test_last_company_ack_does_not_cancel_worker_before_final_report(tmp_path, monkeypatch):
+    args = stream.parse_args(
+        ["--output", str(tmp_path), "--run-id", "last-company", "--limit", "1", "--browsers", "1", "--no-telegram"]
+    )
+    root = tmp_path / args.run_id
+    root.mkdir()
+    companies = [company(1)]
+    monkeypatch.setenv("ALLOW_PUBLIC_PROXY_COLLECTION", "1")
+    monkeypatch.setattr(stream, "select_companies", lambda *args: {"companies": companies})
+    ended = []
+
+    async def producer(self):
+        ready(self.queue, 1)
+        await self.stop.wait()
+
+    async def worker(self, slot, proxy, selected, owner):
+        queue = stream.FreeQueue(args.output / "free-runtime.sqlite3", args.run_id, initialize=False)
+        self.store.search_result(selected[0]["company_id"], {"status": "not_found", "cves": []})
+        queue.finish_job(selected[0]["company_id"], owner, complete=True, attempted=True, limit=3, retry=0)
+        queue.close()
+        # This emulates flushing the final report and closing a healthy browser.
+        await asyncio.sleep(0.8)
+        ended.append(True)
+        return stream.BatchResult(completed={selected[0]["company_id"]})
+
+    monkeypatch.setattr(stream.ProxyProducer, "run", producer)
+    monkeypatch.setattr(stream.BrowserWorker, "__call__", worker)
+    assert await asyncio.wait_for(stream.execute(args, root), 5) == 0
+    assert ended == [True]

@@ -19,6 +19,8 @@ services:
       - data/res-benchmark
       - --browsers
       - "${RES_BROWSERS:-5}"
+      - --session-network-retries
+      - "${RES_FREE_SESSION_NETWORK_RETRIES:-2}"
       - --batch-size
       - "${RES_FREE_BATCH_SIZE:-10}"
       - --sources
