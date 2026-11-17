@@ -44,6 +44,11 @@ class FreeQueue:
         job_columns = {row[1] for row in self.database.execute("PRAGMA table_info(free_jobs)")}
         if "selection_order" not in job_columns:
             self.database.execute("ALTER TABLE free_jobs ADD COLUMN selection_order INTEGER NOT NULL DEFAULT 0")
+        self.database.execute(
+            "CREATE INDEX IF NOT EXISTS free_jobs_dispatch ON "
+            "free_jobs(run_id,state,attempts,next_at,selection_order,company_id)"
+        )
+        self.database.execute("CREATE INDEX IF NOT EXISTS free_jobs_owner ON free_jobs(run_id,owner,state)")
         columns = {row[1] for row in self.database.execute("PRAGMA table_info(free_proxies)")}
         with self.database:
             for name, declaration in (
@@ -359,6 +364,8 @@ class FreeQueue:
                 "ORDER BY p.verified_at DESC LIMIT 1",
                 (now, now),
             ).fetchone()
+            if not proxy:
+                return None
             jobs = self.database.execute(
                 "SELECT * FROM free_jobs WHERE run_id=? AND state='pending' AND next_at<=? ORDER BY "
                 "attempts,next_at,selection_order,company_id LIMIT ?",
@@ -478,6 +485,26 @@ class FreeQueue:
                     "UPDATE free_proxies SET state='cooldown',owner=NULL,next_at=?,error=? WHERE endpoint=?",
                     (until_at, error, endpoint),
                 )
+
+    def completed_company_ids(self) -> set[str]:
+        return {
+            row[0]
+            for row in self.database.execute(
+                "SELECT company_id FROM free_jobs WHERE run_id=? AND state='done'", (self.run_id,)
+            )
+        }
+
+    def has_unfinished_jobs(self) -> bool:
+        return (
+            self.database.execute(
+                "SELECT 1 FROM free_jobs WHERE run_id=? AND state IN ('pending','leased') LIMIT 1", (self.run_id,)
+            ).fetchone()
+            is not None
+        )
+
+    def proxy_counts(self) -> dict[str, int]:
+        """Proxy producer must not aggregate the multi-million-company archive."""
+        return dict(self.database.execute("SELECT state,COUNT(*) FROM free_proxies GROUP BY state"))
 
     def counts(self) -> dict[str, dict[str, int]]:
         return {

@@ -392,10 +392,11 @@ class TrackingStore:
                     )
 
 
-def import_run(store, root, *, max_documents=0):
+def import_run(store, root, *, max_documents=0, selection=None):
     """Idempotent, offline import; existing PDFs are read but never rewritten."""
     root = Path(root).resolve()
-    selection = json.loads((root / "selection.json").read_text())
+    if selection is None:
+        selection = json.loads((root / "selection.json").read_text())
     config = {
         **selection.get("config", {}),
         "max_documents": max_documents,
@@ -465,7 +466,8 @@ def import_run(store, root, *, max_documents=0):
                                 (doc["status"], safe_message(doc.get("error", "")) or None, doc["cve"]),
                             )
             latest.update({r["company_id"]: r for r in report.get("companies", []) if r["company_id"] in allowed})
-        for company_id in allowed:
+        checkpointed = state["companies"].keys() | latest.keys()
+        for company_id in checkpointed.intersection(allowed):
             cached = state["companies"].get(company_id)
             if not cached:
                 known = store.db.execute("SELECT * FROM companies WHERE company_id=?", (company_id,)).fetchone()
@@ -516,14 +518,42 @@ def import_run(store, root, *, max_documents=0):
         )
 
 
+def pending_cves(path: Path, run_id: str, limit: int) -> list[dict]:
+    """Read a bounded, deduplicated worklist while the collector writes to SQLite."""
+    from contextlib import closing
+
+    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
+        db.row_factory = sqlite3.Row
+        if not db.execute("SELECT 1 FROM runs WHERE run_id=?", (run_id,)).fetchone():
+            raise ValueError(f"Unknown run ID: {run_id}")
+        return [
+            dict(row)
+            for row in db.execute(
+                """SELECT d.cve, d.status
+                   FROM documents d LEFT JOIN document_files f USING(cve)
+                   WHERE (f.cve IS NULL OR d.status != 'downloaded')
+                     AND EXISTS (
+                        SELECT 1 FROM company_documents cd
+                        JOIN run_companies rc ON rc.company_id=cd.company_id AND rc.run_id=?
+                        WHERE cd.cve=d.cve
+                     )
+                   ORDER BY d.cve LIMIT ?""",
+                (run_id, limit),
+            )
+        ]
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("data/res-benchmark"))
     parser.add_argument("--run-id", default="res-2025-01-100")
     parser.add_argument("--db", type=Path)
-    parser.add_argument("--action", choices=["sync", "status", "errors", "companies", "documents"], default="status")
+    parser.add_argument(
+        "--action", choices=["sync", "status", "errors", "companies", "documents", "pending-cves"], default="status"
+    )
     parser.add_argument("--company", help="RUT or company name substring")
     parser.add_argument("--max-documents", type=int, default=0)
+    parser.add_argument("--limit", type=int, default=1000, help="Maximum number of pending CVEs to list")
     args = parser.parse_args(argv)
     if Path(args.run_id).name != args.run_id or args.run_id in {".", ".."}:
         parser.error("Invalid run-id")
@@ -531,6 +561,15 @@ def main(argv=None):
     path = args.db or args.output / "tracking.sqlite3"
     if args.action != "sync" and not path.exists():
         parser.error("Tracking database not found; run --action sync first")
+    if args.action == "pending-cves":
+        if args.limit < 1 or args.company:
+            parser.error("pending-cves requires a positive --limit and selects the entire run")
+        try:
+            result = pending_cves(path, args.run_id, args.limit)
+        except ValueError as error:
+            parser.error(str(error))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
     store = TrackingStore(path, args.run_id)
     try:
         if args.action == "sync":

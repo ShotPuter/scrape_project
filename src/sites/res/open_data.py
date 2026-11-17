@@ -6,6 +6,7 @@ import csv
 import itertools
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlsplit
 
 import httpx
@@ -119,46 +120,7 @@ def select_archive(from_year, limit=0, *, session=None):
     if not resources:
         raise ValueError("No active official company resources available in the requested archive")
     companies, seen, periods = [], set(), []
-    for year in sorted(resources, reverse=True):
-        resource = resources[year]
-        buckets = {month: [] for month in range(1, 13)}
-        offset = 0
-        csv_rows = None
-        if resource.get("url"):
-            csv_rows = iter_archive_csv(session, resource["url"])
-        while True:
-            page = (
-                {"records": list(itertools.islice(csv_rows, 500))}
-                if csv_rows is not None
-                else request(
-                    session,
-                    "datastore_search",
-                    {"resource_id": resource["id"], "limit": 500, "offset": offset, "sort": "_id desc"},
-                )
-            )
-            records = page.get("records")
-            if not isinstance(records, list):
-                raise ValueError("Invalid official archive page")
-            if not records:
-                break
-            for row in records:
-                if str(row.get("Anio")) != str(year) or row.get("Mes") not in MONTHS:
-                    raise ValueError("Unexpected year/month in official archive")
-                rut = normalized_rut(str(row.get("RUT", "")))
-                name = " ".join(str(row.get("Razon Social") or "").split())
-                if rut and name:
-                    month = MONTHS.index(row["Mes"]) + 1
-                    buckets[month].append(
-                        {
-                            "company_id": "rut:" + rut,
-                            "company_name": name,
-                            "rut": rut,
-                            "source_period": f"{year}-{month:02d}",
-                        }
-                    )
-            offset += len(records)
-            if offset >= page.get("total", offset + 1):
-                break
+    for year, buckets in archive_years(session, resources, workers=1 if limit else 3):
         for month in range(12, 0, -1):
             if buckets[month]:
                 periods.append(f"{year}-{month:02d}")
@@ -182,6 +144,58 @@ def select_archive(from_year, limit=0, *, session=None):
         "oldest_period": periods[-1],
         "source": "official_res_ckan_archive",
     }
+
+
+def archive_years(session, resources, *, workers):
+    """Prefetch at most one batch of years, yielding newest first."""
+    years = sorted(resources, reverse=True)
+    if workers == 1:
+        for year in years:
+            yield year, read_archive_year(session, year, resources[year])
+        return
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        for start in range(0, len(years), workers):
+            batch = years[start : start + workers]
+            futures = [executor.submit(read_archive_year, session, year, resources[year]) for year in batch]
+            for year, future in zip(batch, futures, strict=True):
+                yield year, future.result()
+
+
+def read_archive_year(session, year, resource):
+    buckets = {month: [] for month in range(1, 13)}
+    offset = 0
+    csv_rows = None
+    if resource.get("url"):
+        csv_rows = iter_archive_csv(session, resource["url"])
+    while True:
+        page = (
+            {"records": list(itertools.islice(csv_rows, 500))}
+            if csv_rows is not None
+            else request(
+                session,
+                "datastore_search",
+                {"resource_id": resource["id"], "limit": 500, "offset": offset, "sort": "_id desc"},
+            )
+        )
+        records = page.get("records")
+        if not isinstance(records, list):
+            raise ValueError("Invalid official archive page")
+        if not records:
+            break
+        for row in records:
+            if str(row.get("Anio")) != str(year) or row.get("Mes") not in MONTHS:
+                raise ValueError("Unexpected year/month in official archive")
+            rut = normalized_rut(str(row.get("RUT", "")))
+            name = " ".join(str(row.get("Razon Social") or "").split())
+            if rut and name:
+                month = MONTHS.index(row["Mes"]) + 1
+                buckets[month].append(
+                    {"company_id": "rut:" + rut, "company_name": name, "rut": rut, "source_period": f"{year}-{month:02d}"}
+                )
+        offset += len(records)
+        if offset >= page.get("total", offset + 1):
+            break
+    return buckets
 
 
 def iter_archive_csv(session, url):

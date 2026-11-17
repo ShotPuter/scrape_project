@@ -745,3 +745,29 @@ async def test_session_summary_counts_all_dynamic_companies_not_only_initial_lea
         assert result.error == "Google declined challenge"
     finally:
         store.close()
+
+
+def test_idle_browser_does_not_query_company_queue(queue):
+    statements = []
+    queue.database.set_trace_callback(statements.append)
+    assert queue.claim_batch("idle", 1) is None
+    assert not any("FROM free_jobs" in statement for statement in statements)
+
+
+def test_company_dispatch_uses_index_without_archive_sort(queue):
+    plan = [
+        row[3]
+        for row in queue.database.execute(
+            "EXPLAIN QUERY PLAN SELECT * FROM free_jobs WHERE run_id='archive' AND state='pending' AND next_at<=9999999999 "
+            "ORDER BY attempts,next_at,selection_order,company_id LIMIT 1"
+        )
+    ]
+    assert any("free_jobs_dispatch" in row for row in plan)
+    assert not any("TEMP B-TREE" in row for row in plan)
+
+
+def test_proxy_counters_do_not_read_companies(queue):
+    statements = []
+    queue.database.set_trace_callback(statements.append)
+    assert queue.proxy_counts() == {}
+    assert not any("free_jobs" in statement for statement in statements)

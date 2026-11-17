@@ -150,6 +150,8 @@ class ProxyProducer:
         self.notifications: StreamNotifications | None = None
         self.next_catalog = 0.0
         self.next_probe = 0.0
+        self.next_pool_count = 0.0
+        self.pool_counts: dict[str, int] = {}
         self.rate_lock = asyncio.Lock()
         self.security_pause_until = 0.0
 
@@ -292,7 +294,10 @@ class ProxyProducer:
 
     async def scan(self) -> None:
         while not self.stop.is_set():
-            counts = self.queue.counts()["proxies"]
+            if time.monotonic() >= self.next_pool_count:
+                self.pool_counts = self.queue.proxy_counts()
+                self.next_pool_count = time.monotonic() + 1
+            counts = self.pool_counts
             if (
                 counts.get("ready", 0) + counts.get("leased", 0) >= self.args.ready_capacity
                 or time.monotonic() < self.security_pause_until
@@ -768,27 +773,31 @@ async def execute(args, root: Path) -> int:
             selection["config"] = config
             atomic_write_json(root / "selection.json", selection)
         companies = selection["companies"]
-        store.register_run(config, companies)
-        store.reconcile_files()
-        import_run(store, root, max_documents=args.max_documents)
+        import_run(store, root, max_documents=args.max_documents, selection=selection)
         queue.recover()
         queue.add_jobs(companies, retry_errors=args.retry_errors)
         # Reconcile all selected companies from the durable ledger, even after a
         # crash between the final PDF write and the scheduler acknowledgement.
         recovery = root / "recovery"
-        store.restore_worker(recovery, companies)
+        known = {
+            row[0]
+            for row in store.db.execute(
+                "SELECT c.company_id FROM run_companies rc JOIN companies c USING(company_id) "
+                "WHERE rc.run_id=? AND c.search_status NOT IN ('pending','searching')",
+                (args.run_id,),
+            )
+        }
+        known_companies = [company for company in companies if company["company_id"] in known]
+        store.restore_worker(recovery, known_companies)
         recovered = pilot.load_state(recovery / "state.json")
-        for company in companies:
+        complete = set()
+        for company in known_companies:
             cached = pilot.cached_company_result(company, recovered, args, recovery)
             if cached and cached["status"] in TERMINAL:
+                complete.add(company["company_id"])
                 queue.mark_complete(company["company_id"])
-            elif (
-                queue.database.execute(
-                    "SELECT state FROM free_jobs WHERE run_id=? AND company_id=?", (args.run_id, company["company_id"])
-                ).fetchone()[0]
-                == "done"
-            ):
-                queue.reset_job(company["company_id"])
+        for identifier in queue.completed_company_ids() - complete:
+            queue.reset_job(identifier)
         initial_pdf_count = pdf_count()
         control = store.cooldown_state()
         if control["reason"] == "daily_document_limit" and control["halted"] and not args.resume_after_site_limit:
@@ -820,8 +829,7 @@ async def execute(args, root: Path) -> int:
         ready_notified: set[str] = set()
         site_limit_cursor = 0
         while children and not stop.is_set():
-            counts = queue.counts()
-            if not counts["jobs"].get("pending", 0) and not counts["jobs"].get("leased", 0) and not dispatcher.active:
+            if not dispatcher.active and not queue.has_unfinished_jobs():
                 break
             for task in children:
                 if task.done() and not task.cancelled() and (failure := task.exception()):
@@ -829,9 +837,8 @@ async def execute(args, root: Path) -> int:
             control = store.cooldown_state()
             if control["halted"]:
                 break
-            if dispatcher.active or counts["jobs"].get("done", 0) > last_completed:
+            if dispatcher.active:
                 last_work = time.monotonic()
-                last_completed = counts["jobs"].get("done", 0)
             if args.idle_minutes and time.monotonic() - last_work > args.idle_minutes * 60:
                 summary["stop_reason"] = "no_working_proxies_timeout"
                 break
@@ -864,6 +871,11 @@ async def execute(args, root: Path) -> int:
                     )
                 site_limit_cursor = len(dispatcher.site_limits)
             if time.monotonic() >= next_checkpoint:
+                counts = queue.counts()
+                if counts["jobs"].get("done", 0) > last_completed:
+                    last_work = time.monotonic()
+                    last_completed = counts["jobs"]["done"]
+                total_pdfs = pdf_count()
                 summary.update(
                     run_id=args.run_id,
                     state="cooldown" if control["active"] else "running",
@@ -872,13 +884,13 @@ async def execute(args, root: Path) -> int:
                     active_browsers=len(dispatcher.active),
                     browser_limit=args.browsers,
                     ready_browsers=sum(bool(active.get("ready")) for active in worker.active.values()),
-                    new_pdfs=max(0, pdf_count() - initial_pdf_count),
+                    new_pdfs=max(0, total_pdfs - initial_pdf_count),
                     producer=producer.stats,
                     subnets=queue.subnet_status(),
                     cooldown=control,
                     proxy_reputation_mode=reputation_mode(),
                     site_limit_pauses=dispatcher.site_limits,
-                    total_pdfs=pdf_count(),
+                    total_pdfs=total_pdfs,
                     companies_with_pdf=store.db.execute(
                         "SELECT COUNT(DISTINCT cd.company_id) FROM company_documents cd JOIN "
                         "run_companies rc USING(company_id) JOIN document_files f USING(cve) WHERE rc.run_id=?",

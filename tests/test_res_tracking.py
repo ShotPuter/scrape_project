@@ -311,3 +311,26 @@ async def test_site_daily_limit_preserves_codigo_and_stops_other_workers(tmp_pat
         assert second["stop_reason"]["code"] == "daily_document_limit"
     finally:
         store.close()
+
+
+def test_pending_cves_lists_missing_documents_once_for_requested_run(tmp_path, capsys):
+    path = tmp_path / "tracking.sqlite3"
+    second = {**COMPANY, "company_id": "second", "rut": None}
+    other = {**COMPANY, "company_id": "other", "rut": None}
+    store = TrackingStore(path, "archive")
+    try:
+        store.register_run({}, [COMPANY, second])
+        store.search_result(COMPANY["company_id"], {"status": "completed", "cves": [CVE, CVE2]})
+        store.search_result(second["company_id"], {"status": "completed", "cves": [CVE2]})
+        saved = pilot.persist_pdf(tmp_path, CVE, PDF, LINK)
+        store.file_result(saved, tmp_path, COMPANY["company_id"])
+        other_store = TrackingStore(path, "outside")
+        try:
+            other_store.register_run({}, [other])
+            other_store.search_result(other["company_id"], {"status": "completed", "cves": ["ACOtherCVE01"]})
+        finally:
+            other_store.close()
+        assert main(["--db", str(path), "--run-id", "archive", "--action", "pending-cves", "--limit", "10"]) == 0
+        assert json.loads(capsys.readouterr().out) == [{"cve": CVE2, "status": "pending"}]
+    finally:
+        store.close()

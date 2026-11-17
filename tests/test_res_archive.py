@@ -51,3 +51,21 @@ def test_archive_orders_months_and_years_and_reads_inactive_csv():
 def test_archive_allows_all_companies_and_ten_browsers():
     args = parse_args(["--archive-from-year", "2026", "--limit", "0", "--browsers", "10"])
     assert args.limit == 0 and args.browsers == 10 and args.telegram_events == "summary"
+
+
+def test_archive_reads_three_years_concurrently_and_yields_newest_first(monkeypatch):
+    from threading import Barrier
+
+    all_started = Barrier(3, timeout=3)
+
+    def read_year(session, year, resource):
+        all_started.wait()
+        return {1: [resource]}
+
+    monkeypatch.setattr(open_data, "read_archive_year", read_year)
+    resources = {2024: "old", 2025: "middle", 2026: "new"}
+    assert list(open_data.archive_years(None, resources, workers=3)) == [
+        (2026, {1: ["new"]}),
+        (2025, {1: ["middle"]}),
+        (2024, {1: ["old"]}),
+    ]
