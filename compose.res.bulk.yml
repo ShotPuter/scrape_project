@@ -1,0 +1,33 @@
+# docker compose --env-file .env.res -f compose.res.yml -f compose.res.bulk.yml up
+services:
+  res:
+    image: chile-res:bulk
+    build:
+      args:
+        CAMOUFOX_ASSETS: none
+    command:
+      - bulk-run
+      - --start
+      - "${RES_START_DATE:-2025-07-29}"
+      - --end
+      - "${RES_END_DATE:-2025-07-29}"
+      - --db
+      - "data/res-bulk/${RES_BULK_RUN_ID:-res-bulk-2025-07-29}/tracking.sqlite3"
+      - --run-id
+      - "${RES_BULK_RUN_ID:-res-bulk-2025-07-29}"
+      - --kind
+      - "${RES_BULK_KIND:-action}"
+      - --limit
+      - "${RES_BULK_LIMIT:-100}"
+      - --max-tokens
+      - "${RES_BULK_MAX_TOKENS:-4}"
+      - --proxy-provider
+      - "${RES_BULK_PROXY_PROVIDER:-webshare}"
+      - --proxy-index
+      - "${RES_BULK_PROXY_INDEX:-0}"
+      - --captcha-timeout
+      - "${RES_CAPTCHA_TIMEOUT:-130}"
+      - --workers
+      - "${RES_BULK_WORKERS:-4}"
+      - --interval
+      - "${RES_BULK_INTERVAL:-0.1}"

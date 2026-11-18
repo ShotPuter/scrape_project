@@ -3,6 +3,8 @@
 Project map (including the separate PEP integration): [docs/project-index.md](docs/project-index.md).
 PEP stability test (native Chrome / nodriver, SQLite resume): [docs/pep-stability.md](docs/pep-stability.md).
 
+Automatic RES date search, reusable CAPTCHA tokens and PDF downloads in Docker: [docs/res-bulk-docker.md](docs/res-bulk-docker.md).
+
 An async Python scraper for Bolivia's Gaceta Electrónica de Comercio. It pulls publication and company metadata from the SEPREC API, saves the original PDFs, renders a PDF for publications that only have text, and keeps an incremental CSV index so reruns don't start from zero.
 
 > **Proxies.** The scraper rotates free public proxies, and that has a cost: they are slow, they die often, and a run can crawl while the pool is being checked or refilled. If you need steady speed, use a paid proxy service. For a small run (one year, one category) `PROXY_MODE=direct` is usually enough and skips proxies entirely.

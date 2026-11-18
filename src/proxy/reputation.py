@@ -154,6 +154,7 @@ def check_ip(value: str) -> None:
 def check_proxy(url: str | None) -> str | None:
     if not url:
         return None
+    reputation_mode()
     try:
         part = urlsplit(url)
         host = part.hostname
@@ -202,4 +203,6 @@ def check_proxy(url: str | None) -> str | None:
 
 
 async def screen_proxy(url: str | None) -> str | None:
+    if not url:
+        return None
     return await asyncio.to_thread(check_proxy, url)

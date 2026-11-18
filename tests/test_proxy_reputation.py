@@ -279,11 +279,13 @@ def test_check_is_last_after_blocklists(monkeypatch, mode):
     assert events == (["blocklists", "individual"] if mode == "strict" else ["blocklists"])
 
 
-@pytest.mark.parametrize("mode", ["unknown", "off", "", "false"])
+@pytest.mark.parametrize("mode", ["unknown", "off", "", "false", "disabled"])
 def test_invalid_mode_denies_connection(monkeypatch, mode):
     monkeypatch.setenv("PROXY_REPUTATION_MODE", mode)
     lookup = Mock()
     monkeypatch.setattr(rep, "_lookup", lookup)
     with pytest.raises(rep.ReputationDenied, match="PROXY_REPUTATION_MODE"):
         rep.check_ip("1.1.1.1")
+    with pytest.raises(rep.ReputationDenied, match="PROXY_REPUTATION_MODE"):
+        rep.check_proxy("http://1.1.1.1:8080")
     lookup.assert_not_called()

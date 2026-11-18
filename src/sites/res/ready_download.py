@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
+from src.proxy.reputation import screen_proxy
 from src.sites.dequienes.source import res_url, validate_cve
 from src.sites.res.document_lock import document_lock
 from src.sites.res.http_flow import CODIGO_PATTERN, daily_document_limit
@@ -72,17 +73,21 @@ async def fetch_pdf(client: httpx.AsyncClient, url: str) -> bytes:
     return bytes(body)
 
 
-def candidate_page(store, after):
+def candidate_page(store, after, *, audit_cache=False):
     return store.db.execute(
         """SELECT d.cve FROM documents d
            WHERE d.cve>? AND d.download_url IS NOT NULL AND d.status NOT IN ('expired_saved_link','expired_codigo')
+             AND (? OR d.status!='downloaded' OR NOT EXISTS (
+                 SELECT 1 FROM document_files f WHERE f.cve=d.cve
+             ))
              AND EXISTS (
-                 SELECT 1 FROM company_documents cd
-                 JOIN run_companies rc ON rc.company_id=cd.company_id AND rc.run_id=?
-                 WHERE cd.cve=d.cve
+                 SELECT 1 FROM company_documents cd WHERE cd.cve=d.cve
+                 AND EXISTS (
+                     SELECT 1 FROM run_companies rc WHERE rc.run_id=? AND rc.company_id=cd.company_id
+                 )
              )
            ORDER BY d.cve LIMIT 256""",
-        (after, store.run_id),
+        (after, audit_cache, store.run_id),
     ).fetchall()
 
 
@@ -94,7 +99,9 @@ def mark_unusable_link(store, cve, link):
         )
 
 
-async def download_ready(store, client, *, limit=100, workers=2, interval=1.0, progress=None, progress_interval=30):
+async def download_ready(
+    store, client, *, limit=100, workers=2, interval=1.0, progress=None, progress_interval=30, audit_cache=False
+):
     """Drain a bounded slice of the persistent link queue. Never verify or generate a certificate."""
     if not store.db.execute("SELECT 1 FROM runs WHERE run_id=?", (store.run_id,)).fetchone():
         raise ValueError("Unknown RES run")
@@ -162,6 +169,7 @@ async def download_ready(store, client, *, limit=100, workers=2, interval=1.0, p
         elapsed = time.monotonic() - started
         return {
             "run_id": store.run_id,
+            "audit_cache": audit_cache,
             "inspected": inspected,
             **{
                 name: counts[name]
@@ -181,7 +189,7 @@ async def download_ready(store, client, *, limit=100, workers=2, interval=1.0, p
     try:
         after = ""
         while can_request():
-            rows = candidate_page(store, after)
+            rows = candidate_page(store, after, audit_cache=audit_cache)
             if not rows:
                 break
             for offset in range(0, len(rows), workers):
@@ -213,11 +221,21 @@ def log_progress(stats):
 
 async def run(args):
     limit = args.limit if args.limit is not None else "all"
-    print(f"RES download-ready: запуск {args.run_id}, workers={args.workers}, limit={limit}", file=sys.stderr, flush=True)
+    print(f"RES download-ready: run={args.run_id}, workers={args.workers}, limit={limit}", file=sys.stderr, flush=True)
+    proxy = await screen_proxy(getattr(args, "proxy", None))
     store = TrackingStore(args.db, args.run_id)
     try:
-        async with httpx.AsyncClient(timeout=20, trust_env=False) as client:
-            result = await download_ready(store, client, limit=args.limit, workers=args.workers, progress=log_progress)
+        transport = httpx.AsyncHTTPTransport(proxy=proxy, trust_env=False, retries=2) if proxy else None
+        async with httpx.AsyncClient(timeout=20, trust_env=False, transport=transport) as client:
+            result = await download_ready(
+                store,
+                client,
+                limit=args.limit,
+                workers=args.workers,
+                interval=getattr(args, "interval", 1.0),
+                progress=log_progress,
+                audit_cache=args.audit_cache,
+            )
     finally:
         store.close()
     print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -236,12 +254,16 @@ def request_limit(value):
     return limit
 
 
-def main(argv=None):
+def main(argv=None, *, default_db=Path("data/res-benchmark/tracking.sqlite3"), default_run=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--db", type=Path, default=Path("data/res-benchmark/tracking.sqlite3"))
-    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--db", type=Path, default=default_db)
+    parser.add_argument("--run-id", default=default_run, required=default_run is None)
     parser.add_argument("--limit", type=request_limit, default=100, help="Max HTTP requests, or all ready links")
-    parser.add_argument("--workers", type=int, choices=(1, 2), default=2)
+    parser.add_argument("--workers", type=int, default=4, help="Concurrent download workers (default: 4)")
+    parser.add_argument("--interval", type=float, default=1.0, help="Interval between requests in seconds")
+    parser.add_argument("--proxy", help="Optional proxy URL for HTTP client (e.g. http://host:port)")
+    parser.add_argument("--audit-cache", action="store_true", help="Read and hash PDFs already marked as downloaded")
+
     args = parser.parse_args(argv)
     if not args.db.is_file():
         parser.error("An existing tracking database is required")

@@ -6,6 +6,7 @@
 !scripts/
 !scripts/res_free_pilot.py
 !scripts/res_audio_pilot.py
+!scripts/res_burst_live_check.py
 !src/
 !src/**
 **/__pycache__

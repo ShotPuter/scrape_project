@@ -130,6 +130,9 @@ async def test_browser_receives_proxy_and_requires_preflight(tmp_path, monkeypat
         return Context()
 
     monkeypatch.setitem(sys.modules, "camoufox.async_api", SimpleNamespace(AsyncCamoufox=browser))
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr("src.proxy.reputation.screen_proxy", AsyncMock(side_effect=lambda url: url))
     async with BrowserPool(tmp_path / "p", BrowserLayout(1, 2), proxy_provider="webshare") as pool:
         if success:
             await pool.page(0, 0)

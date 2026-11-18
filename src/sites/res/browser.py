@@ -33,9 +33,7 @@ async def solve_checkbox(page, *, timeout_ms=60000, captcha_seconds=30):
         raise SearchIssue("captcha_required", "CAPTCHA checkbox was not available") from exc
 
 
-async def lookup(page, company, *, timeout_ms=60000, captcha_seconds=30, captcha_solver=None, response_reader=None):
-    query = company.get("rut") or company["company_name"]
-    result = {**company, "query": query, "source_url": FORM_URL, "events": []}
+async def open_search_form(page, *, timeout_ms):
     response = await page.goto(FORM_URL, wait_until="domcontentloaded", timeout=timeout_ms)
     if not response or response.status != 200:
         status = response.status if response else 0
@@ -43,10 +41,9 @@ async def lookup(page, company, *, timeout_ms=60000, captcha_seconds=30, captcha
     if urlsplit(page.url).hostname != HOST or urlsplit(page.url).scheme != "https":
         raise SearchIssue("blocked", "Unexpected form redirect")
     await page.locator("#ddlTipoRegistro").select_option("1")
-    await page.locator("#ddlTipoBusqueda").select_option("1" if company.get("rut") else "2")
-    await page.locator("#txtRut" if company.get("rut") else "#txtRSocial").fill(query)
-    await (captcha_solver or solve_checkbox)(page, timeout_ms=timeout_ms, captcha_seconds=captcha_seconds)
 
+
+async def submit_search(page, *, timeout_ms, response_reader=None):
     def is_response(candidate, path):
         parts = urlsplit(candidate.url)
         return parts.scheme == "https" and parts.hostname == HOST and parts.path == path
@@ -67,7 +64,17 @@ async def lookup(page, company, *, timeout_ms=60000, captcha_seconds=30, captcha
             "blocked" if details_response.status in {403, 429} else "retry_wait",
             f"Action list HTTP {details_response.status}",
         )
-    actions = parse_actions(await (response_reader(details_response) if response_reader else details_response.json()))
+    return parse_actions(await (response_reader(details_response) if response_reader else details_response.json()))
+
+
+async def lookup(page, company, *, timeout_ms=60000, captcha_seconds=30, captcha_solver=None, response_reader=None):
+    query = company.get("rut") or company["company_name"]
+    result = {**company, "query": query, "source_url": FORM_URL, "events": []}
+    await open_search_form(page, timeout_ms=timeout_ms)
+    await page.locator("#ddlTipoBusqueda").select_option("1" if company.get("rut") else "2")
+    await page.locator("#txtRut" if company.get("rut") else "#txtRSocial").fill(query)
+    await (captcha_solver or solve_checkbox)(page, timeout_ms=timeout_ms, captcha_seconds=captcha_seconds)
+    actions = await submit_search(page, timeout_ms=timeout_ms, response_reader=response_reader)
     status, matched = match_actions(actions, company)
     result.update(status=status, events=matched, res_cves=sorted({e["cve"] for e in matched if e["cve"]}))
     if status == "ambiguous_match":

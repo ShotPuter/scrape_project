@@ -15,6 +15,39 @@ COMPANY = {"company_id": "rut:76615169-8", "company_name": "VERTIKAL GROUP SpA",
 LINK = f"https://www.registrodeempresasysociedades.cl/Certificados/Escritura.aspx?cve={CVE}&codigo=valid"
 
 
+def test_date_checkpoint_is_atomic_run_scoped_and_preserves_actions_without_cves(tmp_path):
+    store = TrackingStore(tmp_path / "tracking.sqlite3", "dates")
+    day = "2026-11-17"
+    company = {**COMPANY, "company_id": "existing-id"}
+    action = {"rut": COMPANY["rut"], "company_name": "Name from form", "cve": CVE, "attention_number": "1"}
+    actions = [action, {**action, "cve": "", "attention_number": "2"}]
+    try:
+        store.register_run({}, [company])
+        with pytest.raises(KeyError):
+            store.day_result(day, "action", [action, {}], complete=True)
+        assert not store.day_done(day, "action")
+        assert store.db.execute("SELECT count(*) FROM documents").fetchone()[0] == 0
+
+        store.day_result(day, "action", [action], complete=False)
+        assert not store.day_done(day, "action")
+        store.day_result(day, "action", actions, complete=True)
+        store.day_result(day, "action", [], complete=True)
+        assert store.day_done(day, "action")
+        assert not store.day_done(day, "registration")
+        assert json.loads(store.db.execute("SELECT actions_json FROM date_searches").fetchone()[0]) == actions
+        assert (
+            store.db.execute("SELECT company_id FROM company_documents WHERE cve=?", (CVE,)).fetchone()[0] == "existing-id"
+        )
+    finally:
+        store.close()
+
+    other_run = TrackingStore(tmp_path / "tracking.sqlite3", "other")
+    try:
+        assert not other_run.day_done(day, "action")
+    finally:
+        other_run.close()
+
+
 def fixture_run(tmp_path, *, partial=False):
     root = tmp_path / "sample"
     worker = root / "workers/w00"

@@ -17,6 +17,10 @@ def main():
             "free-stream",
             "pipeline",
             "collect",
+            "discover",
+            "verify-burst",
+            "bulk-run",
+            "documents",
             "search",
             "download",
             "download-ready",
@@ -26,9 +30,25 @@ def main():
         ],
     )
     args, remainder = parser.parse_known_args()
-    if args.stage == "download-ready":
+    if args.stage == "bulk-run":
+        from src.sites.res.bulk_pipeline import main as bulk_pipeline_main
+
+        raise SystemExit(bulk_pipeline_main(remainder))
+    if args.stage == "discover":
+        from src.sites.res.bulk import main as bulk_main
+
+        raise SystemExit(bulk_main(remainder))
+    if args.stage == "verify-burst":
+        from src.sites.res.burst_verifier import main as burst_main
+
+        raise SystemExit(burst_main(remainder))
+    if args.stage in {"documents", "download-ready"}:
         from src.sites.res.ready_download import main as download_ready_main
 
+        if args.stage == "documents":
+            from src.sites.res.bulk import DEFAULT_DB, DEFAULT_RUN
+
+            raise SystemExit(download_ready_main(remainder, default_db=DEFAULT_DB, default_run=DEFAULT_RUN))
         raise SystemExit(download_ready_main(remainder))
     if args.stage == "track":
         from src.sites.res.tracking import main as tracking_main

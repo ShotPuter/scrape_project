@@ -75,7 +75,12 @@ class TrackingStore:
                 cycles INTEGER NOT NULL DEFAULT 0, halted INTEGER NOT NULL DEFAULT 0, reason TEXT,
                 updated_at REAL NOT NULL
             );
-            PRAGMA user_version=2;
+            CREATE TABLE IF NOT EXISTS date_searches (
+                run_id TEXT NOT NULL REFERENCES runs(run_id), day TEXT NOT NULL, kind TEXT NOT NULL,
+                actions_json TEXT NOT NULL, complete INTEGER NOT NULL, discovered_at REAL NOT NULL,
+                PRIMARY KEY(run_id,day,kind)
+            );
+            PRAGMA user_version=4;
         """)
 
     def close(self):
@@ -227,6 +232,52 @@ class TrackingStore:
                     ON CONFLICT(company_id,cve) DO UPDATE SET action_json=COALESCE(excluded.action_json,action_json)""",
                     (company_id, cve, json.dumps(action, ensure_ascii=False) if action else None, when),
                 )
+
+    def day_result(self, day, kind, actions, *, complete):
+        """Commit the day's actions and CVE associations together."""
+        now = time.time()
+        with self.db:
+            saved = self.db.execute(
+                """INSERT INTO date_searches VALUES (?,?,?,?,?,?)
+                ON CONFLICT(run_id,day,kind) DO UPDATE SET
+                actions_json=excluded.actions_json,complete=excluded.complete,discovered_at=excluded.discovered_at
+                WHERE NOT date_searches.complete""",
+                (self.run_id, day, kind, json.dumps(actions, ensure_ascii=False), complete, now),
+            )
+            if not saved.rowcount:
+                return
+            for action in actions:
+                rut = action["rut"]
+                existing = self.db.execute("SELECT company_id FROM companies WHERE rut=?", (rut,)).fetchone()
+                company_id = existing["company_id"] if existing else "rut:" + rut
+                if not existing:
+                    self.db.execute(
+                        """INSERT INTO companies(company_id,company_name,rut,updated_at) VALUES (?,?,?,?)
+                        ON CONFLICT(company_id) DO UPDATE SET rut=excluded.rut,updated_at=excluded.updated_at
+                        WHERE companies.rut IS NULL""",
+                        (company_id, action["company_name"], rut, now),
+                    )
+                self.db.execute(
+                    "INSERT OR IGNORE INTO run_companies(run_id,company_id,status,updated_at) VALUES (?,?,'completed',?)",
+                    (self.run_id, company_id, now),
+                )
+                cve = action.get("cve")
+                if cve:
+                    self.db.execute("INSERT OR IGNORE INTO documents(cve,updated_at) VALUES (?,?)", (cve, now))
+                    self.db.execute(
+                        """INSERT INTO company_documents(company_id,cve,action_json,discovered_at) VALUES (?,?,?,?)
+                        ON CONFLICT(company_id,cve) DO UPDATE SET
+                        action_json=COALESCE(company_documents.action_json,excluded.action_json)""",
+                        (company_id, cve, json.dumps(action, ensure_ascii=False), now),
+                    )
+
+    def day_done(self, day, kind):
+        return (
+            self.db.execute(
+                "SELECT 1 FROM date_searches WHERE run_id=? AND day=? AND kind=? AND complete", (self.run_id, day, kind)
+            ).fetchone()
+            is not None
+        )
 
     def document_status(self, cve, status, company_id=None, *, error=None, record=None):
         now, message = time.time(), safe_message(error) if error else None

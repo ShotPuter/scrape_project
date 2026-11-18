@@ -5,10 +5,28 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import os
 from time import monotonic
 from urllib.parse import urlsplit
 
 from src.sites.res.source import SearchIssue
+
+
+def load_local_audio_solver(model_name="base", *, rounds=3):
+    """Load the same cached CPU model in local runs and offline containers."""
+    try:
+        from faster_whisper import WhisperModel
+
+        model = WhisperModel(
+            model_name,
+            device="cpu",
+            compute_type="int8",
+            download_root=os.getenv("RES_AUDIO_MODEL_PATH", "data/res-audio-models"),
+            cpu_threads=int(os.getenv("RES_AUDIO_THREADS", "2")),
+        )
+    except Exception as exc:
+        raise SearchIssue("captcha_required", "Local Whisper unavailable; check faster-whisper and the model cache") from exc
+    return LocalAudioSolver(model, rounds=rounds)
 
 
 def validate_audio_url(url):
@@ -34,8 +52,11 @@ class LocalAudioSolver:
         self.events = events if events is not None else []
 
     async def __call__(self, page, *, timeout_ms=60000, captcha_seconds=120, click_anchor=True):
-        async with asyncio.timeout(captcha_seconds):
-            await self.solve(page, timeout_ms=timeout_ms, click_anchor=click_anchor)
+        try:
+            async with asyncio.timeout(captcha_seconds):
+                await self.solve(page, timeout_ms=timeout_ms, click_anchor=click_anchor)
+        except TimeoutError as exc:
+            raise SearchIssue("captcha_required", "Local audio CAPTCHA solver timed out") from exc
 
     async def solve(self, page, *, timeout_ms, click_anchor=True):
         anchor = page.frame_locator('iframe[title="reCAPTCHA"]').locator("#recaptcha-anchor")

@@ -7,6 +7,28 @@ from src.sites.res.audio import LocalAudioSolver, validate_audio_url
 from src.sites.res.source import SearchIssue
 
 
+def test_local_model_uses_configured_cache_and_cpu(monkeypatch, tmp_path):
+    import sys
+    from unittest.mock import Mock
+
+    from src.sites.res.audio import load_local_audio_solver
+
+    model = Mock()
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=model))
+    monkeypatch.setenv("RES_AUDIO_MODEL_PATH", str(tmp_path))
+    monkeypatch.setenv("RES_AUDIO_THREADS", "3")
+    solver = load_local_audio_solver("base")
+    model.assert_called_once_with("base", device="cpu", compute_type="int8", download_root=str(tmp_path), cpu_threads=3)
+    assert solver.model is model.return_value
+
+
+async def test_audio_timeout_becomes_resumable_captcha_error(monkeypatch):
+    solver = LocalAudioSolver(None)
+    monkeypatch.setattr(solver, "solve", AsyncMock(side_effect=TimeoutError))
+    with pytest.raises(SearchIssue, match="timed out"):
+        await solver(SimpleNamespace(), captcha_seconds=1)
+
+
 @pytest.mark.parametrize(
     "url",
     [
@@ -26,6 +48,8 @@ def test_audio_rejects_unexpected_origins(url):
 def test_brightdata_preflight_rejects_modified_ca_before_network(tmp_path, monkeypatch):
     from scripts import res_audio_pilot
 
+    monkeypatch.setattr("src.proxy.threat_feeds.check_host", lambda _: None)
+    monkeypatch.setattr("src.proxy.reputation.check_proxy", lambda url: url)
     monkeypatch.setattr(
         res_audio_pilot,
         "dotenv_values",

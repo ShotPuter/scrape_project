@@ -8,6 +8,7 @@ import pytest
 
 from src.sites.dequienes.queue import QueueStore
 from src.sites.res.browser import lookup
+from src.sites.res.bulk import discover_day
 from src.sites.res.source import (
     DETAILS_PATH,
     FORM_URL,
@@ -125,10 +126,15 @@ class Element:
         self.page, self.selector = page, selector
 
     async def select_option(self, value):
-        pass
+        self.page.selection[self.selector] = value
 
     async def fill(self, value):
         self.page.query = value
+        self.page.field = self.selector
+
+    async def wait_for(self, **options):
+        assert self.selector == '#recaptcha-anchor[aria-checked="true"]'
+        assert options == {"state": "attached", "timeout": 1000}
 
     async def click(self, **kwargs):
         if self.selector == "#btnBuscar":
@@ -144,6 +150,7 @@ class Page:
     def __init__(self):
         self.url = FORM_URL
         self.futures = []
+        self.selection = {}
 
     async def goto(self, *args, **kwargs):
         self.futures = []
@@ -160,7 +167,7 @@ class Page:
 
     @asynccontextmanager
     async def expect_response(self, predicate, **kwargs):
-        actions = [row()] if self.query == "77755694-0" else []
+        actions = [row()] if self.query in {"77755694-0", "2023-05-07"} else []
         replies = [
             Reply(SEARCH_PATH, {"Result": "OK", "Link": "Busqueda/ActuacionDetalle.aspx?codigo=public"}),
             Reply(DETAILS_PATH, actions),
@@ -180,6 +187,17 @@ async def test_browser_waits_for_backend_rows_not_empty_dom():
     result = await lookup(Page(), {"company_id": "rut:77755694-0", "company_name": "AERO", "rut": "77755694-0"})
     assert result["status"] == "completed"
     assert result["res_cves"] == ["ACiWqbFTpsmy"]
+
+
+@pytest.mark.parametrize(
+    ("kind", "option", "field"), [("action", "3", "#txtFecha"), ("registration", "4", "#txtFechaRegistro")]
+)
+async def test_date_search_uses_the_form_and_keeps_all_backend_rows(kind, option, field):
+    page = Page()
+    actions = await discover_day(page, "2023-05-07", kind, captcha_wait_ms=1000)
+    assert page.selection == {"#ddlTipoRegistro": "1", "#ddlTipoBusqueda": option}
+    assert page.query == "2023-05-07" and page.field == field
+    assert actions == parse_actions(envelope([row()]))
 
 
 async def test_captcha_required_never_becomes_not_found():

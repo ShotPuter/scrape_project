@@ -39,6 +39,7 @@ RUN --network=none touch /opt/camoufox-cache/camoufox/.0.5_FLAG \
 FROM assets-${CAMOUFOX_ASSETS} AS final
 COPY src ./src
 COPY scripts/res_free_pilot.py scripts/res_audio_pilot.py ./scripts/
+COPY scripts/res_burst_live_check.py ./scripts/
 COPY docker/brightdata-proxy-ca.crt ./docker/brightdata-proxy-ca.crt
 ENV HF_HUB_OFFLINE=1
 STOPSIGNAL SIGINT
