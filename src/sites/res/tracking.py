@@ -304,6 +304,32 @@ class TrackingStore:
             return None
         return result if all(result[k] == v for k, v in metadata.items()) else None
 
+    def restore_pdf(self, directory, cve):
+        """Restore a valid shared PDF with a worker-local manifest."""
+        directory = Path(directory)
+        existing = cached_pdf(directory, cve)
+        if existing:
+            return existing
+        saved = self.existing_file(cve)
+        if not saved or not saved["download_url"]:
+            return None
+        relative = certificate_directory(cve) / f"{saved['sha256']}.pdf"
+        target = directory / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            valid = pdf_metadata(read_pdf(target))["sha256"] == saved["sha256"]
+        except (OSError, ValueError):
+            valid = False
+        if not valid:
+            target.unlink(missing_ok=True)
+            try:
+                os.link(self.base / saved["local_path"], target)
+            except OSError:
+                shutil.copyfile(self.base / saved["local_path"], target)
+        result = {**saved, "local_path": relative.as_posix(), "status": "downloaded"}
+        atomic_write_json(target.parent / "manifest.json", result)
+        return {**result, "reused": True}
+
     def restore_worker(self, directory, companies):
         """Recover JSON compatibility checkpoints from SQLite without website requests."""
         directory = Path(directory)
@@ -333,27 +359,7 @@ class TrackingStore:
                         "verified_at": doc["verified_at"],
                         "company_id": company["company_id"],
                     }
-                saved = self.existing_file(doc["cve"])
-                if not saved or cached_pdf(directory, doc["cve"]):
-                    continue
-                relative = certificate_directory(doc["cve"]) / f"{saved['sha256']}.pdf"
-                target = directory / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if target.exists():
-                    try:
-                        valid = pdf_metadata(read_pdf(target))["sha256"] == saved["sha256"]
-                    except (OSError, ValueError):
-                        valid = False
-                    if not valid:
-                        target.unlink()
-                if not target.exists():
-                    try:
-                        os.link(self.base / saved["local_path"], target)
-                    except OSError:
-                        shutil.copyfile(self.base / saved["local_path"], target)
-                atomic_write_json(
-                    target.parent / "manifest.json", {**saved, "local_path": relative.as_posix(), "status": "downloaded"}
-                )
+                self.restore_pdf(directory, doc["cve"])
             restored = True
         if restored:
             atomic_write_json(state_path, state)
@@ -518,7 +524,7 @@ def import_run(store, root, *, max_documents=0, selection=None):
         )
 
 
-def pending_cves(path: Path, run_id: str, limit: int) -> list[dict]:
+def pending_cves(path: Path, run_id: str, limit: int, *, needs_link: bool = False) -> list[dict]:
     """Read a bounded, deduplicated worklist while the collector writes to SQLite."""
     from contextlib import closing
 
@@ -532,13 +538,14 @@ def pending_cves(path: Path, run_id: str, limit: int) -> list[dict]:
                 """SELECT d.cve, d.status
                    FROM documents d LEFT JOIN document_files f USING(cve)
                    WHERE (f.cve IS NULL OR d.status != 'downloaded')
+                     AND (NOT ? OR d.download_url IS NULL OR d.status IN ('expired_saved_link', 'expired_codigo'))
                      AND EXISTS (
                         SELECT 1 FROM company_documents cd
                         JOIN run_companies rc ON rc.company_id=cd.company_id AND rc.run_id=?
                         WHERE cd.cve=d.cve
                      )
                    ORDER BY d.cve LIMIT ?""",
-                (run_id, limit),
+                (needs_link, run_id, limit),
             )
         ]
 
@@ -549,7 +556,9 @@ def main(argv=None):
     parser.add_argument("--run-id", default="res-2025-01-100")
     parser.add_argument("--db", type=Path)
     parser.add_argument(
-        "--action", choices=["sync", "status", "errors", "companies", "documents", "pending-cves"], default="status"
+        "--action",
+        choices=["sync", "status", "errors", "companies", "documents", "pending-cves", "needs-link"],
+        default="status",
     )
     parser.add_argument("--company", help="RUT or company name substring")
     parser.add_argument("--max-documents", type=int, default=0)
@@ -561,11 +570,11 @@ def main(argv=None):
     path = args.db or args.output / "tracking.sqlite3"
     if args.action != "sync" and not path.exists():
         parser.error("Tracking database not found; run --action sync first")
-    if args.action == "pending-cves":
+    if args.action in {"pending-cves", "needs-link"}:
         if args.limit < 1 or args.company:
-            parser.error("pending-cves requires a positive --limit and selects the entire run")
+            parser.error("The CVE worklist requires a positive --limit and selects the entire run")
         try:
-            result = pending_cves(path, args.run_id, args.limit)
+            result = pending_cves(path, args.run_id, args.limit, needs_link=args.action == "needs-link")
         except ValueError as error:
             parser.error(str(error))
         print(json.dumps(result, ensure_ascii=False, indent=2))

@@ -675,6 +675,8 @@ async def test_document_daily_limit_scope(tmp_path, monkeypatch, scope, halted):
 
     args = make_args(tmp_path, site_limit_scope=scope)
     tracker = Mock()
+    tracker.path = tmp_path / "tracking.sqlite3"
+    tracker.restore_pdf.return_value = None
     args.tracking_store = tracker
 
     async def limited(*args):

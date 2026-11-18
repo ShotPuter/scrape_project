@@ -19,12 +19,17 @@ def main():
             "collect",
             "search",
             "download",
+            "download-ready",
             "status",
             "export",
             "telegram-test",
         ],
     )
     args, remainder = parser.parse_known_args()
+    if args.stage == "download-ready":
+        from src.sites.res.ready_download import main as download_ready_main
+
+        raise SystemExit(download_ready_main(remainder))
     if args.stage == "track":
         from src.sites.res.tracking import main as tracking_main
 

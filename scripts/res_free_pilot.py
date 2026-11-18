@@ -529,7 +529,17 @@ async def ensure_document(cascade, http, cve, company_id, state, args, output, c
     tracking = getattr(args, "tracking_store", None)
     prior_events = getattr(cascade, "events", None)
     try:
-        return await _ensure_document(cascade, http, cve, company_id, state, args, output, counters)
+        if not tracking:
+            return await _ensure_document(cascade, http, cve, company_id, state, args, output, counters)
+        from src.sites.res.document_lock import document_lock
+
+        async with document_lock(tracking.path, cve):
+            cached = tracking.restore_pdf(output, cve)
+            if cached:
+                tracking.file_result(cached, output, company_id)
+                counters["reused"] += 1
+                return document_summary(cached)
+            return await _ensure_document(cascade, http, cve, company_id, state, args, output, counters)
     except Exception as exc:
         if tracking and getattr(exc, "status", None) == "daily_limit" and getattr(args, "site_limit_scope", "run") == "run":
             tracking.halt_daily_limit(getattr(exc, "daily_limit", 100))
