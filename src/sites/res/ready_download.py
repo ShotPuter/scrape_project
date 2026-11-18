@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import fcntl
 import json
+import sys
 import time
 from collections import Counter
 from pathlib import Path
@@ -93,7 +94,7 @@ def mark_unusable_link(store, cve, link):
         )
 
 
-async def download_ready(store, client, *, limit=100, workers=2, interval=1.0):
+async def download_ready(store, client, *, limit=100, workers=2, interval=1.0, progress=None, progress_interval=30):
     """Drain a bounded slice of the persistent link queue. Never verify or generate a certificate."""
     if not store.db.execute("SELECT 1 FROM runs WHERE run_id=?", (store.run_id,)).fetchone():
         raise ValueError("Unknown RES run")
@@ -103,15 +104,17 @@ async def download_ready(store, client, *, limit=100, workers=2, interval=1.0):
     destination = store.base / "ready-downloads"
     rate_lock = asyncio.Lock()
     next_request = 0.0
+    inspected = 0
 
     def can_request():
         return stop_reason is None and (limit is None or counts["requested"] < limit)
 
     async def process(cve):
-        nonlocal stop_reason, next_request
+        nonlocal stop_reason, next_request, inspected
         async with document_lock(store.path, cve):
             if not can_request():
                 return
+            inspected += 1
             if store.existing_file(cve):
                 counts["reused"] += 1
                 return
@@ -155,37 +158,66 @@ async def download_ready(store, client, *, limit=100, workers=2, interval=1.0):
                 counts["downloaded"] += 1
                 counts["bytes"] += saved["size_bytes"]
 
-    after = ""
-    while can_request():
-        rows = candidate_page(store, after)
-        if not rows:
-            break
-        for offset in range(0, len(rows), workers):
-            if not can_request():
-                break
-            async with asyncio.TaskGroup() as batch:
-                for row in rows[offset : offset + workers]:
-                    batch.create_task(process(row["cve"]))
-        after = rows[-1]["cve"]
+    def snapshot():
+        elapsed = time.monotonic() - started
+        return {
+            "run_id": store.run_id,
+            "inspected": inspected,
+            **{
+                name: counts[name]
+                for name in ("requested", "downloaded", "reused", "expired", "invalid_link", "failed", "bytes")
+            },
+            "elapsed_seconds": round(elapsed, 3),
+            "pdfs_per_minute": round(counts["downloaded"] * 60 / elapsed, 2) if elapsed else 0,
+            "stop_reason": stop_reason,
+        }
 
-    elapsed = time.monotonic() - started
-    return {
-        "run_id": store.run_id,
-        **{
-            name: counts[name]
-            for name in ("requested", "downloaded", "reused", "expired", "invalid_link", "failed", "bytes")
-        },
-        "elapsed_seconds": round(elapsed, 3),
-        "pdfs_per_minute": round(counts["downloaded"] * 60 / elapsed, 2) if elapsed else 0,
-        "stop_reason": stop_reason,
-    }
+    async def report_progress():
+        while True:
+            await asyncio.sleep(progress_interval)
+            progress(snapshot())
+
+    reporter = asyncio.create_task(report_progress()) if progress is not None else None
+    try:
+        after = ""
+        while can_request():
+            rows = candidate_page(store, after)
+            if not rows:
+                break
+            for offset in range(0, len(rows), workers):
+                if not can_request():
+                    break
+                current = rows[offset : offset + workers]
+                async with asyncio.TaskGroup() as batch:
+                    for row in current:
+                        batch.create_task(process(row["cve"]))
+            after = rows[-1]["cve"]
+        return snapshot()
+    finally:
+        if reporter is not None:
+            reporter.cancel()
+            await asyncio.gather(reporter, return_exceptions=True)
+
+
+def log_progress(stats):
+    print(
+        f"RES download-ready: прошло {stats['elapsed_seconds']:.0f} с, "
+        f"проверено ссылок {stats['inspected']}, HTTP-запросов {stats['requested']}, "
+        f"новых PDF {stats['downloaded']}, из кэша {stats['reused']}, "
+        f"просрочено {stats['expired']}, неверных ссылок {stats['invalid_link']}, "
+        f"ошибок {stats['failed']}, скорость {stats['pdfs_per_minute']:.2f} PDF/мин",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 async def run(args):
+    limit = args.limit if args.limit is not None else "all"
+    print(f"RES download-ready: запуск {args.run_id}, workers={args.workers}, limit={limit}", file=sys.stderr, flush=True)
     store = TrackingStore(args.db, args.run_id)
     try:
         async with httpx.AsyncClient(timeout=20, trust_env=False) as client:
-            result = await download_ready(store, client, limit=args.limit, workers=args.workers)
+            result = await download_ready(store, client, limit=args.limit, workers=args.workers, progress=log_progress)
     finally:
         store.close()
     print(json.dumps(result, ensure_ascii=False, indent=2))

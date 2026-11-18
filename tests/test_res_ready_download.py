@@ -114,3 +114,30 @@ async def test_all_drains_more_than_one_page_of_ready_links(tmp_path):
         assert sorted(requests) == cves
     finally:
         store.close()
+
+
+async def test_progress_is_reported_while_an_http_request_is_in_flight(tmp_path):
+    reported_in_flight = asyncio.Event()
+    snapshots = []
+
+    def progress(snapshot):
+        snapshots.append(snapshot)
+        if snapshot["requested"] == 1 and snapshot["downloaded"] == 0:
+            reported_in_flight.set()
+
+    async def transport(request):
+        await asyncio.wait_for(reported_in_flight.wait(), timeout=2)
+        return httpx.Response(200, headers={"content-type": "application/pdf"}, content=PDF)
+
+    store = TrackingStore(tmp_path / "tracking.sqlite3", RUN)
+    try:
+        seed(store)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+            result = await download_ready(
+                store, client, limit=1, interval=0, progress=progress, progress_interval=0.01
+            )
+        assert any(row["requested"] == 1 and row["downloaded"] == 0 for row in snapshots)
+        assert result["downloaded"] == result["requested"] == 1
+        assert result["inspected"] >= 1
+    finally:
+        store.close()
