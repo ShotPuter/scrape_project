@@ -35,7 +35,7 @@ mkdir -p data
 dc() { docker compose --env-file .env.res -f compose.res.yml -f compose.res.bulk.yml "$@"; }
 dc build res
 dc run --rm --user 0 --entrypoint sh res -c \
-  'mkdir -p /app/data/res-bulk && chown 1000:1000 /app/data/res-bulk'
+  'mkdir -p /app/data/res-bulk && chown 1000:1000 /app/data /app/data/res-bulk'
 ```
 
 Проверка с ограничением 10 документов на реальном сайте:
