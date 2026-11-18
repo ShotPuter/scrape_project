@@ -90,7 +90,12 @@ def fetch_pending_cves(store: TrackingStore, limit: int | None = None) -> list[s
 
 
 async def burst_verify(
-    store: TrackingStore, session: httpx.Client, token_minter: Any, *, limit: int = 100, max_tokens_per_session: int = 4
+    store: TrackingStore,
+    session: httpx.Client,
+    token_minter: Any,
+    *,
+    limit: int | None = 100,
+    max_tokens_per_session: int | None = 4,
 ) -> dict[str, Any]:
     """Verify up to limit documents using token multiplexing.
 
@@ -122,13 +127,13 @@ async def burst_verify(
     stop_reason: str | None = None
 
     for cve in pending:
-        if counts["verified"] >= limit:
+        if limit is not None and counts["verified"] >= limit:
             stop_reason = "limit_reached"
             break
 
         for attempt in range(2):
             if current_token is None:
-                if counts["tokens"] >= max_tokens_per_session:
+                if max_tokens_per_session is not None and counts["tokens"] >= max_tokens_per_session:
                     stop_reason = "max_tokens_reached"
                     break
                 counts["tokens"] += 1
@@ -148,8 +153,8 @@ async def burst_verify(
                 counts["verified"] += 1
                 break
             except SearchIssue as exc:
-                if exc.status == "daily_limit":
-                    stop_reason = "daily_limit"
+                if exc.status in {"daily_limit", "proxy_failed", "blocked"}:
+                    stop_reason = exc.status
                     store.document_status(cve, "pending", error=str(exc))
                     break
                 if exc.status == "captcha_required" and attempt == 0:
@@ -159,6 +164,13 @@ async def burst_verify(
                     continue
                 if exc.status == "captcha_required":
                     current_token = None
+                    stop_reason = exc.status
+                    store.document_status(cve, "pending", error=str(exc))
+                    break
+                if exc.status == "retry_wait":
+                    stop_reason = exc.status
+                    store.document_status(cve, "pending", error=str(exc))
+                    break
                 store.document_status(cve, "verify_error", error=str(exc))
                 counts["failed"] += 1
                 break

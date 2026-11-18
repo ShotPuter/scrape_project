@@ -153,7 +153,10 @@ async def download_ready(
             except ExpiredLink:
                 mark_unusable_link(store, cve, link)
                 counts["expired"] += 1
-            except (httpx.HTTPError, TimeoutError, ValueError):
+            except (httpx.TransportError, TimeoutError):
+                counts["network_failures"] += 1
+                counts["failed"] += 1
+            except (httpx.HTTPError, ValueError):
                 counts["failed"] += 1
             else:
                 try:
@@ -173,7 +176,16 @@ async def download_ready(
             "inspected": inspected,
             **{
                 name: counts[name]
-                for name in ("requested", "downloaded", "reused", "expired", "invalid_link", "failed", "bytes")
+                for name in (
+                    "requested",
+                    "downloaded",
+                    "reused",
+                    "expired",
+                    "invalid_link",
+                    "failed",
+                    "network_failures",
+                    "bytes",
+                )
             },
             "elapsed_seconds": round(elapsed, 3),
             "pdfs_per_minute": round(counts["downloaded"] * 60 / elapsed, 2) if elapsed else 0,

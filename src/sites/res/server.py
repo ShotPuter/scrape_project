@@ -20,6 +20,7 @@ def main():
             "discover",
             "verify-burst",
             "bulk-run",
+            "bulk-continuous",
             "documents",
             "search",
             "download",
@@ -30,6 +31,10 @@ def main():
         ],
     )
     args, remainder = parser.parse_known_args()
+    if args.stage == "bulk-continuous":
+        from src.sites.res.bulk_continuous import main as continuous_main
+
+        raise SystemExit(continuous_main(remainder))
     if args.stage == "bulk-run":
         from src.sites.res.bulk_pipeline import main as bulk_pipeline_main
 

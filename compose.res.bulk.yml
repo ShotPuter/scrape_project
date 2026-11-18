@@ -2,32 +2,33 @@
 services:
   res:
     image: chile-res:bulk
+    restart: unless-stopped
     build:
       args:
         CAMOUFOX_ASSETS: none
     command:
-      - bulk-run
+      - bulk-continuous
       - --start
-      - "${RES_START_DATE:-2025-07-29}"
-      - --end
-      - "${RES_END_DATE:-2025-07-29}"
+      - "${RES_CONTINUOUS_FROM_DATE:-2013-01-01}"
       - --db
-      - "data/res-bulk/${RES_BULK_RUN_ID:-res-bulk-2025-07-29}/tracking.sqlite3"
+      - "data/res-bulk/${RES_CONTINUOUS_RUN_ID:-res-continuous}/tracking.sqlite3"
       - --run-id
-      - "${RES_BULK_RUN_ID:-res-bulk-2025-07-29}"
+      - "${RES_CONTINUOUS_RUN_ID:-res-continuous}"
       - --kind
       - "${RES_BULK_KIND:-action}"
-      - --limit
-      - "${RES_BULK_LIMIT:-100}"
-      - --max-tokens
-      - "${RES_BULK_MAX_TOKENS:-4}"
-      - --proxy-provider
-      - "${RES_BULK_PROXY_PROVIDER:-webshare}"
-      - --proxy-index
-      - "${RES_BULK_PROXY_INDEX:-0}"
+      - --providers
+      - "${RES_CONTINUOUS_PROVIDERS:-webshare,brightdata,residential}"
+      - --batch-size
+      - "${RES_BULK_BATCH_SIZE:-0}"
       - --captcha-timeout
       - "${RES_CAPTCHA_TIMEOUT:-130}"
       - --workers
       - "${RES_BULK_WORKERS:-4}"
       - --interval
       - "${RES_BULK_INTERVAL:-0.1}"
+      - --telegram-minutes
+      - "${RES_TELEGRAM_INTERVAL_MINUTES:-5}"
+      - --quota-hours
+      - "${RES_BULK_QUOTA_HOURS:-24}"
+      - --network-retry-seconds
+      - "${RES_BULK_NETWORK_RETRY_SECONDS:-10}"

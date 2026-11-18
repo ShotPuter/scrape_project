@@ -183,3 +183,15 @@ async def test_token_minter_forwards_audio_budget():
     solver = AsyncMock()
     assert await mint_recaptcha_token(page, solver, timeout_seconds=130) == "t" * 80
     solver.assert_awaited_once_with(page, timeout_ms=130000, captcha_seconds=130)
+
+
+@pytest.mark.parametrize("status", ["proxy_failed", "blocked", "retry_wait"])
+async def test_burst_stops_on_route_failure_without_losing_queue(tracking_store, monkeypatch, status):
+    verify = MagicMock(side_effect=SearchIssue(status, "Temporary route failure"))
+    monkeypatch.setattr("src.sites.res.http_flow.verify", verify)
+    result = await burst_verify(
+        tracking_store, MagicMock(), AsyncMock(return_value="token"), limit=None, max_tokens_per_session=None
+    )
+    assert result["status"] == status
+    assert set(fetch_pending_cves(tracking_store)) == set(CVES)
+    verify.assert_called_once()
