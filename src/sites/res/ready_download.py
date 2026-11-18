@@ -104,10 +104,13 @@ async def download_ready(store, client, *, limit=100, workers=2, interval=1.0):
     rate_lock = asyncio.Lock()
     next_request = 0.0
 
+    def can_request():
+        return stop_reason is None and (limit is None or counts["requested"] < limit)
+
     async def process(cve):
         nonlocal stop_reason, next_request
         async with document_lock(store.path, cve):
-            if stop_reason or counts["requested"] >= limit:
+            if not can_request():
                 return
             if store.existing_file(cve):
                 counts["reused"] += 1
@@ -130,7 +133,7 @@ async def download_ready(store, client, *, limit=100, workers=2, interval=1.0):
             try:
                 async with rate_lock:
                     await asyncio.sleep(max(0.0, next_request - time.monotonic()))
-                    if stop_reason or counts["requested"] >= limit:
+                    if not can_request():
                         return
                     counts["requested"] += 1
                     next_request = time.monotonic() + interval
@@ -153,12 +156,12 @@ async def download_ready(store, client, *, limit=100, workers=2, interval=1.0):
                 counts["bytes"] += saved["size_bytes"]
 
     after = ""
-    while not stop_reason and counts["requested"] < limit:
+    while can_request():
         rows = candidate_page(store, after)
         if not rows:
             break
         for offset in range(0, len(rows), workers):
-            if stop_reason or counts["requested"] >= limit:
+            if not can_request():
                 break
             async with asyncio.TaskGroup() as batch:
                 for row in rows[offset : offset + workers]:
@@ -189,15 +192,27 @@ async def run(args):
     return 2 if result["stop_reason"] or result["failed"] else 0
 
 
+def request_limit(value):
+    if value == "all":
+        return None
+    try:
+        limit = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("Use a positive request limit or 'all'") from error
+    if limit < 1:
+        raise argparse.ArgumentTypeError("Use a positive request limit or 'all'")
+    return limit
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=Path, default=Path("data/res-benchmark/tracking.sqlite3"))
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--limit", type=int, default=100, help="Max number of HTTP requests")
+    parser.add_argument("--limit", type=request_limit, default=100, help="Max HTTP requests, or all ready links")
     parser.add_argument("--workers", type=int, choices=(1, 2), default=2)
     args = parser.parse_args(argv)
-    if args.limit < 1 or not args.db.is_file():
-        parser.error("An existing tracking DB and positive request limit are required")
+    if not args.db.is_file():
+        parser.error("An existing tracking database is required")
     database = args.db.resolve()
     with database.with_name(database.name + ".ready-download.lock").open("a") as lock:
         try:

@@ -90,3 +90,27 @@ async def test_shared_lock_prevents_duplicate_get_and_reuses_file(tmp_path):
         assert result["reused"] == 1 and result["requested"] == 0
     finally:
         store.close()
+
+
+async def test_all_drains_more_than_one_page_of_ready_links(tmp_path):
+    from src.sites.res.ready_download import request_limit
+
+    cves = [f"ACarchive{index:04d}" for index in range(260)]
+    requests = []
+
+    def transport(request):
+        requests.append(request.url.params["cve"])
+        return httpx.Response(200, headers={"content-type": "application/pdf"}, content=PDF)
+
+    store = TrackingStore(tmp_path / "tracking.sqlite3", RUN)
+    try:
+        store.register_run({}, [COMPANY])
+        store.search_result("company", {"cves": cves})
+        for cve in cves:
+            store.document_status(cve, "verified", record={"link": link(cve)})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+            result = await download_ready(store, client, limit=request_limit("all"), interval=0)
+        assert result["downloaded"] == len(cves)
+        assert sorted(requests) == cves
+    finally:
+        store.close()
