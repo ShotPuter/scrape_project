@@ -55,14 +55,33 @@ Bright Data добавляется в список провайдеров пос
 
 ## Сборка
 
-Из корня нужной версии репозитория:
+При обновлении существующего сервера Compose по умолчанию использует
+`RES_FLEET_ASSETS=image`: берёт браузер и модель отпечатков из прежнего локального
+образа `RES_IMAGE` (обычно `chile-res:local`). Неудачная сборка не заменяет этот
+образ. Новые код, зависимости и GeoIP собираются заново; PDF, профили и cookies
+из старого образа не копируются. Исчезнувший upstream-релиз Camoufox не нужен.
+
+Обновление из каталога проекта:
+
+```bash
+git pull --ff-only origin feature/chile-dequienes-res
+RES_FLEET_MODE=days RES_BROWSERS=10 RES_FLEET_PROVIDERS=webshare,free docker compose --env-file .env.res -f compose.res.yml -f compose.res.fleet.yml up -d --build --force-recreate res
+```
+
+Локальный образ с совместимым браузером должен существовать до сборки. Если
+образ-источник имеет другой тег, задайте `RES_FLEET_ASSET_IMAGE`. Отдельная
+сборка нового тега с браузером из прежнего:
 
 ```bash
 export RES_IMAGE="chile-res:fleet-$(git rev-parse --short HEAD)"
-docker build -f Dockerfile.res -t "$RES_IMAGE" .
+docker build -f Dockerfile.res -t "$RES_IMAGE" \
+  --build-arg CAMOUFOX_ASSETS=image \
+  --build-arg CAMOUFOX_ASSET_IMAGE=chile-res:local .
 ```
 
-Обычная сборка загружает зависимости, Camoufox, модель отпечатков, GeoIP и Whisper.
+На новом сервере без прежнего образа нужны совместимые assets (см. ниже).
+`CAMOUFOX_ASSETS=download` или `RES_FLEET_ASSETS=download` в Compose включают
+скачивание браузера; оно работает только при доступном закреплённом upstream-релизе.
 GeoIP явно использует `MaxMind GeoLite2` из списка источников Camoufox:
 его IPv4/IPv6-базы устанавливаются при сборке и выбираются при запуске браузера.
 Это исключает обращение к недоступному AIO-архиву по умолчанию (HTTP 404).

@@ -410,6 +410,11 @@ The container entry point also accepts `fleet` as a stage, e.g.
 `docker compose ... run --rm res fleet --help`. Bright Data sticky sessions need
 `docker/brightdata-proxy-ca.crt`; Webshare needs `WEBSHARE_API_TOKEN`.
 Production build, configuration and rollout: [RES fleet in Docker](docs/res-fleet-docker.md).
+Fleet Compose upgrades reuse the browser and fingerprint model from the previous
+local image by default (`RES_FLEET_ASSETS=image`), so an unavailable pinned
+Camoufox release does not block updates. Only these public assets are copied;
+the new code and GeoIP are built normally. First installs need compatible
+browser assets or an available upstream release; see the Docker guide.
 
 ### User-Agent fallback
 

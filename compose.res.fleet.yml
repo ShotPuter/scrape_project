@@ -7,6 +7,10 @@
 # Free routes are retired once dead or drained unless RES_FLEET_FREE_KEEP=1.
 services:
   res:
+    build:
+      args:
+        CAMOUFOX_ASSETS: ${RES_FLEET_ASSETS:-image}
+        CAMOUFOX_ASSET_IMAGE: ${RES_FLEET_ASSET_IMAGE:-${RES_IMAGE:-chile-res:local}}
     restart: ${RES_FLEET_RESTART_POLICY:-unless-stopped}
     environment:
       ALLOW_PUBLIC_PROXY_COLLECTION: "1"

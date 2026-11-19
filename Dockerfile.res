@@ -1,4 +1,7 @@
 ARG CAMOUFOX_ASSETS=download
+ARG CAMOUFOX_ASSET_IMAGE=chile-res:local
+FROM ${CAMOUFOX_ASSET_IMAGE} AS browser-image
+
 FROM python:3.11-slim-bookworm AS runtime
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 XDG_CACHE_HOME=/opt/camoufox-cache \
@@ -33,6 +36,15 @@ RUN timeout 3600 python -m camoufox fetch
 FROM runtime AS assets-cache
 COPY --from=browser-assets --chown=scraper:scraper / /opt/camoufox-cache/camoufox/browsers/
 COPY --from=model-assets --chown=scraper:scraper / /usr/local/lib/python3.11/site-packages/fpgen/data/
+RUN --network=none touch /opt/camoufox-cache/camoufox/.0.5_FLAG \
+    && python -c "from camoufox.fpgen_model import ensure_fpgen_model; from camoufox.pkgman import launch_path; ensure_fpgen_model(); print(launch_path())"
+
+# Upgrades reuse public assets from the installed image when the pinned
+# upstream release is unavailable. Packages, application code and GeoIP still
+# come from the new runtime; no profiles, credentials or output are copied.
+FROM runtime AS assets-image
+COPY --from=browser-image --chown=scraper:scraper /opt/camoufox-cache/camoufox/browsers/ /opt/camoufox-cache/camoufox/browsers/
+COPY --from=browser-image --chown=scraper:scraper /usr/local/lib/python3.11/site-packages/fpgen/data/ /usr/local/lib/python3.11/site-packages/fpgen/data/
 RUN --network=none touch /opt/camoufox-cache/camoufox/.0.5_FLAG \
     && python -c "from camoufox.fpgen_model import ensure_fpgen_model; from camoufox.pkgman import launch_path; ensure_fpgen_model(); print(launch_path())"
 
