@@ -24,7 +24,7 @@ import signal
 import sqlite3
 import time
 import uuid
-from contextlib import suppress
+from contextlib import closing, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -90,6 +90,7 @@ class FleetQueue:
     """
 
     def __init__(self, path: Path, run_id: str):
+        self.path = path
         self.run_id = run_id
         self.database = sqlite3.connect(path, timeout=30)
         self.database.row_factory = sqlite3.Row
@@ -207,6 +208,17 @@ class FleetQueue:
                 "UPDATE fleet_routes SET proxy_url=?,expected_ip=?,exit_ip=? WHERE route_id=?",
                 (proxy_url, expected_ip, expected_ip, route_id),
             )
+
+    def add_free_candidates(self, candidates: list[tuple[str, str]]) -> int:
+        """One bounded import transaction on a connection owned by the writer thread."""
+        now = time.time()
+        with closing(sqlite3.connect(self.path, timeout=30)) as database, database:
+            database.executemany(
+                "INSERT OR IGNORE INTO fleet_routes(route_id,provider,endpoint,state,source,seen_at) "
+                "VALUES(?,'free',?,'pending',?,?)",
+                ((f"free:{endpoint}", endpoint, source, now) for endpoint, source in candidates),
+            )
+            return database.total_changes
 
     def provider_spent(self, provider: str, day: str) -> int:
         row = self.database.execute(
@@ -600,13 +612,31 @@ class FleetProducer:
             max_records=self.args.source_records or None,
             max_response_bytes=16 * 1024 * 1024,
         )
-        raw = [(candidate.url, candidate.source) for candidate in sorted(catalog.candidates, key=lambda row: row.priority)]
+        extra = []
         if "free-proxy" in sources:
             try:
                 extra = await asyncio.wait_for(load_free_proxy_candidates(request_timeout=10), 35)
-                raw.extend((endpoint, "free-proxy") for endpoint in extra)
             except Exception as error:
                 catalog.errors["free-proxy"] = type(error).__name__
+        limited, stats = await asyncio.to_thread(self.prepare_candidates, catalog, extra)
+        self.stats.update(stats, queue_inserted=0, catalog_importing=True)
+        try:
+            for offset in range(0, len(limited), 128):
+                if self.stop.is_set():
+                    break
+                inserted = await asyncio.to_thread(self.queue.add_free_candidates, limited[offset : offset + 128])
+                self.stats["queue_inserted"] += inserted
+                self.changed.set()
+        finally:
+            self.stats["catalog_importing"] = False
+        self.stats["catalog_refreshes"] += 1
+        await asyncio.to_thread(self.trim_cache)
+        self.changed.set()
+
+    def prepare_candidates(self, catalog, extra: list[str]) -> tuple[list[tuple[str, str]], dict[str, Any]]:
+        """Parsing and reputation filters can process millions of rows off the event loop."""
+        raw = [(candidate.url, candidate.source) for candidate in sorted(catalog.candidates, key=lambda row: row.priority)]
+        raw.extend((endpoint, "free-proxy") for endpoint in extra)
         seen: set[str] = set()
         ipv4_rows: list[tuple[str, str, str]] = []
         for endpoint, source in raw:
@@ -625,29 +655,21 @@ class FleetProducer:
                 continue
             ipv4_rows.append((endpoint, source, str(address)))
         # Screen blocklists and threat feeds once, off the event loop, before probing.
-        screened, rejected = await asyncio.to_thread(filter_candidate_ips, ipv4_rows)
+        screened, rejected = filter_candidate_ips(ipv4_rows)
         candidates = [
             (endpoint, source) for endpoint, source in screened if endpoint_allowed(endpoint, self.exceptions, self.ports)
         ]
         limited = candidates[: self.args.max_candidates] if self.args.max_candidates else candidates
-        inserted = 0
-        for endpoint, source in limited:
-            before = self.queue.database.execute(
-                "SELECT 1 FROM fleet_routes WHERE route_id=?", (f"free:{endpoint}",)
-            ).fetchone()
-            if not before:
-                self.queue.add_route("free", endpoint, source=source)
-                inserted += 1
-        self.stats.update(
-            catalog_candidates=len(raw),
-            catalog_unique=len(seen),
-            screened=len(screened),
-            screened_rejected=rejected,
-            port_eligible=len(candidates),
-            selected_candidates=len(limited),
-            queue_inserted=inserted,
-        )
-        self.stats["catalog_refreshes"] += 1
+        return limited, {
+            "catalog_candidates": len(raw),
+            "catalog_unique": len(seen),
+            "screened": len(screened),
+            "screened_rejected": rejected,
+            "port_eligible": len(candidates),
+            "selected_candidates": len(limited),
+        }
+
+    def trim_cache(self) -> None:
         cached = sorted((self.root / "source-cache").glob("*"), key=lambda path: path.stat().st_mtime)
         retained = sum(path.stat().st_size for path in cached if path.is_file())
         for path in cached:
@@ -656,7 +678,6 @@ class FleetProducer:
             if path.is_file():
                 retained -= path.stat().st_size
                 path.unlink(missing_ok=True)
-        self.changed.set()
 
     async def verify(self, endpoint: str) -> str:
         pinned = await screen_proxy(endpoint)
