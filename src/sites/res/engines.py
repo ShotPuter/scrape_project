@@ -79,6 +79,9 @@ async def launch_context(profile, *, proxy=None, engine="patchright", headed=Fal
             # Reuse a verified egress when available. A second IP lookup would
             # otherwise need the provider's CA and could observe another route.
             options["geoip"] = str(ipaddress.ip_address(proxy_ip)) if proxy_ip else True
+            # The default AIO release asset returns 404. Match the source
+            # installed by Dockerfile.res, including when an old config is cached.
+            options["geoip_db"] = "MaxMind GeoLite2"
         if pdf:
             options.update(accept_downloads=True, firefox_user_prefs={"pdfjs.disabled": True})
         async with AsyncCamoufox(**options) as context:

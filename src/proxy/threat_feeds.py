@@ -171,6 +171,22 @@ def _lock(path: Path) -> Iterator[None]:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+def _read_cache(path: Path, source: str, now: float, max_age: float) -> tuple[dict[str, Any], FeedData | None]:
+    if path.stat().st_size > MAX_BYTES * 2:
+        raise ValueError("Oversized cache")
+    state = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        payload = state["payload"]
+        if state["sha256"] != hashlib.sha256(payload.encode()).hexdigest():
+            raise ValueError("Cache digest mismatch")
+        if not 0 <= now - state["fetched_at"] < max_age:
+            raise ValueError("Expired cache")
+        return state, parse_feed(source, payload)
+    except (ValueError, KeyError, TypeError):
+        # Keep failure backoff metadata even when there is no reusable payload.
+        return state, None
+
+
 def snapshot(source: str) -> FeedData:
     """Refresh once per process group; use prior data only within maximum age."""
     try:
@@ -188,19 +204,21 @@ def snapshot(source: str) -> FeedData:
             return cached_memory[1]
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / (source + ".json")
+        # Atomic cache writes let readers validate a fresh snapshot without
+        # serializing every browser and proxy check behind the refresh lock.
+        try:
+            state, parsed = _read_cache(path, source, now, max_age)
+            if parsed and now - state["fetched_at"] < refresh:
+                _memory[memory_key] = (min(now + 60, state["fetched_at"] + max_age), parsed)
+                return parsed
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
         with _lock(directory / (source + ".lock")):
             state: dict[str, Any] = {}
             parsed: FeedData | None = None
             try:
-                if path.stat().st_size > MAX_BYTES * 2:
-                    raise ValueError("Oversized cache")
-                state = json.loads(path.read_text(encoding="utf-8"))
-                payload = state["payload"]
-                if state["sha256"] != hashlib.sha256(payload.encode()).hexdigest():
-                    raise ValueError("Cache digest mismatch")
-                if not 0 <= now - state["fetched_at"] < max_age:
-                    raise ValueError("Expired cache")
-                parsed = parse_feed(source, payload)
+                # Recheck after waiting: another process may have refreshed it.
+                state, parsed = _read_cache(path, source, now, max_age)
             except (OSError, ValueError, KeyError, TypeError):
                 # Preserve a valid failure backoff, but never reuse expired data.
                 parsed = None

@@ -11,7 +11,6 @@ from src.sites.dequienes.navigation import navigate
 from src.sites.res.engines import launch_context
 
 
-
 @pytest.fixture(autouse=True)
 def isolate_proxy_reputation_for_engine_unit_tests(monkeypatch):
     # Reputation network policy is exercised separately in test_proxy_reputation.
@@ -34,6 +33,7 @@ async def test_camoufox_proxy_enables_geoip_using_verified_egress(tmp_path, monk
     async with launch_context(tmp_path, engine="camoufox", proxy=proxy, proxy_ip=proxy_ip):
         pass
     assert options["geoip"] == (proxy_ip or True)
+    assert options["geoip_db"] == "MaxMind GeoLite2"
     assert options["proxy"] == proxy
 
 

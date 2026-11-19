@@ -80,6 +80,19 @@ def test_cache_reused_across_process_memory_and_original_payload_preserved():
     assert feeds._download.call_count == 3
 
 
+def test_valid_fresh_cache_is_read_while_another_process_holds_refresh_lock(monkeypatch):
+    import fcntl
+
+    feeds.snapshot("firehol_level1")
+    feeds._memory.clear()
+    lock = Path(feeds.os.environ["PROXY_THREAT_CACHE"]) / "firehol_level1.lock"
+    with lock.open("a") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        monkeypatch.setattr(feeds, "_lock", Mock(side_effect=AssertionError("Fresh cache must not wait for refresh")))
+        assert feeds.snapshot("firehol_level1").networks
+    assert feeds._download.call_count == 1
+
+
 def test_expired_cache_and_feed_failure_denies_with_backoff(monkeypatch):
     feeds.snapshot("firehol_level1")
     now = time.time()
