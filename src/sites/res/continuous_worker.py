@@ -160,7 +160,13 @@ async def consume_session(cascade, http, initial, queue, args, state, counters, 
 async def scan_continuously(proxies, args, state, counters, report, audio, vlm_model, token_records):
     if len(proxies) != 1 or not args.stream_owner or not getattr(args, "tracking_store", None):
         raise ValueError("Continuous worker requires one proxy, an owner lease and tracking DB")
-    queue = FreeQueue(args.stream_db, args.tracking_run_id, initialize=False)
+    daily = getattr(args, "stream_task_mode", "companies") == "days"
+    if daily:
+        from src.sites.res.daily_queue import DailyQueue
+
+        queue = DailyQueue(args.stream_db, args.tracking_run_id, initialize=False)
+    else:
+        queue = FreeQueue(args.stream_db, args.tracking_run_id, initialize=False)
     if getattr(args, "fleet_route_docs", 0):
         args.fleet_quota = FleetQuota(
             queue.database, args.stream_owner, args.fleet_route_docs, args.fleet_provider_budget, args.fleet_reset_hour
@@ -169,8 +175,12 @@ async def scan_continuously(proxies, args, state, counters, report, audio, vlm_m
     report["proxies"].append(stats)
     args.solves_per_proxy = 0
     report["continuous_session"] = True
-    pilot.say("continuous session: one company at a time; no company or token budget")
-    initial = pilot.load_companies(args.db, 1)[0]
+    pilot.say(
+        "daily session: date discovery and CVEs, verification token reuse"
+        if daily
+        else "continuous session: one company at a time; no company or token budget"
+    )
+    initial = None if daily else pilot.load_companies(args.db, 1)[0]
     try:
         endpoint = await pilot.resolve_proxy(proxies[0], args)
         stats.update(pilot.new_stats(0, endpoint))
@@ -180,7 +190,12 @@ async def scan_continuously(proxies, args, state, counters, report, audio, vlm_m
             http,
         ):
             checkpoint(args, report, counters, {})
-            await consume_session(cascade, http, initial, queue, args, state, counters, report, stats)
+            if daily:
+                from src.sites.res.daily_worker import consume_days
+
+                await consume_days(cascade, http, queue, args, state, counters, report, stats)
+            else:
+                await consume_session(cascade, http, initial, queue, args, state, counters, report, stats)
     except asyncio.CancelledError:
         raise
     except Exception as error:

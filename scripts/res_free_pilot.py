@@ -604,7 +604,9 @@ async def _fetch_document(cascade, http, cve, company_id, state, args, output, c
                 tracking.document_status(cve, "downloading", company_id, record=record)
             data = measured(counters, "download", http_flow.download, http, record["link"])
         except SearchIssue as exc:
-            if exc.status != "retry_wait" or not str(exc).startswith("Certificate HTTP 302"):
+            if exc.status != "retry_wait" or not str(exc).startswith(
+                ("Certificate HTTP 302", "Certificate HTTP 404", "Certificate HTTP 410")
+            ):
                 raise
             say(f"  cached codigo for {cve} is stale ({safe_message(exc)}); re-verifying")
             state["cves"].pop(cve, None)
@@ -1284,6 +1286,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--stream-db", type=Path)
     parser.add_argument("--stream-owner")
+    parser.add_argument("--stream-task-mode", choices=("companies", "days"), default="companies")
     parser.add_argument("--stream-company-attempts", type=int, default=3)
     parser.add_argument("--stream-network-retries", type=int, choices=(0, 1, 2), default=2)
     parser.add_argument("--stream-retry-delay", type=float, default=3)

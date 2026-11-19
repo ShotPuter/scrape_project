@@ -121,12 +121,13 @@ def test_route_outcome_classifies_daily_limit_and_dead_routes(tmp_path):
     assert dispatcher.route_outcome(SimpleNamespace(quota_limited=False, retry_connection=False, error=None)) == "ok"
 
 
-def test_parse_args_defaults_to_five_browsers_and_all_paid_providers(monkeypatch):
+def test_parse_args_defaults_to_daily_ten_browsers_webshare_and_free(monkeypatch):
     for name in ("RES_BROWSERS", "RES_FLEET_PROVIDERS", "RES_FLEET_BUDGET_FREE"):
         monkeypatch.delenv(name, raising=False)
     args = fleet.parse_args([])
-    assert args.browsers == 5
-    assert args.provider_set == {"webshare", "brightdata", "free"}
+    assert args.browsers == 10
+    assert args.provider_set == {"webshare", "free"}
+    assert args.mode == "days"
     assert args.route_docs == 95
     assert args.reset_hour == 0
     assert args.free_keep is False

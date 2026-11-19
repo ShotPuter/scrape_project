@@ -2,23 +2,32 @@
 #   docker compose --env-file .env.res -f compose.res.yml -f compose.res.fleet.yml up
 #
 # Runs the mixed-provider fleet: Webshare + Bright Data + public free proxies in
-# `RES_BROWSERS` browser slots. A route is drained to its daily document cap
+# `RES_BROWSERS` browser slots, newest completed RES day first. A route is drained to its daily document cap
 # (or the RES per-IP limit), then parked until the next `--reset-hour` (UTC).
 # Free routes are retired once dead or drained unless RES_FLEET_FREE_KEEP=1.
 services:
   res:
+    restart: ${RES_FLEET_RESTART_POLICY:-unless-stopped}
     environment:
       ALLOW_PUBLIC_PROXY_COLLECTION: "1"
       PROXY_REPUTATION_MODE: ${PROXY_REPUTATION_MODE:-strict}
       PROXY_PAID_FILE: ${PROXY_PAID_FILE:-data/paid-proxies.txt}
-      RES_FLEET_PROVIDERS: ${RES_FLEET_PROVIDERS:-webshare,brightdata,free}
+      RES_FLEET_PROVIDERS: ${RES_FLEET_PROVIDERS:-webshare,free}
       RES_FLEET_FREE_KEEP: ${RES_FLEET_FREE_KEEP:-0}
+      RES_CONTINUOUS_RUN_ID: ${RES_CONTINUOUS_RUN_ID:-res-continuous}
+      RES_FLEET_END_DATE: ${RES_FLEET_END_DATE:-}
     command:
       - fleet
+      - --mode
+      - "${RES_FLEET_MODE:-days}"
+      - --start
+      - "${RES_CONTINUOUS_FROM_DATE:-2013-01-01}"
+      - --kind
+      - "${RES_BULK_KIND:-action}"
       - --providers
-      - "${RES_FLEET_PROVIDERS:-webshare,brightdata,free}"
+      - "${RES_FLEET_PROVIDERS:-webshare,free}"
       - --browsers
-      - "${RES_BROWSERS:-5}"
+      - "${RES_BROWSERS:-10}"
       - --archive-from-year
       - "${RES_FREE_ARCHIVE_FROM_YEAR:-0}"
       - --year
@@ -54,7 +63,7 @@ services:
       - --source-records
       - "${RES_FREE_SOURCE_RECORDS:-0}"
       - --proxy-ports
-      - "${RES_FREE_PROXY_PORTS:-80,443}"
+      - "${RES_FREE_PROXY_PORTS:-80,443,1080,3128,8080,8000,8888,8081,8088}"
       - --allowed-proxy-endpoints
       - "${RES_FREE_ALLOWED_PROXY_ENDPOINTS:-}"
       - --proxy-check-concurrency

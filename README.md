@@ -368,11 +368,13 @@ real run (not `--demo`) is needed before they appear in the pool.
 
 ### RES mixed-provider fleet
 
-`src/sites/res/fleet.py` is the production RES driver built on the same lifecycle.
-It replaces the single-provider `free-stream`/`benchmark` stages when several paid
-and free sources must work at once:
+`src/sites/res/fleet.py` defaults to daily collection: yesterday in Santiago back
+to 2013-01-01, then new completed days. One browser discovers a day's actions;
+all available slots drain its CVEs before the previous day starts. Accepted
+verification tokens are reused. `--mode companies` explicitly selects the old
+company/RUT selection instead.
 
-- `RES_BROWSERS` (default 5) browser slots each lease one route; providers are
+- `RES_BROWSERS` (Compose default 10) browser slots each lease one route; providers are
   tried in `RES_FLEET_PROVIDERS` order (`webshare`, `brightdata`, `paid`, `free`).
 - Paid routes (Webshare inventory, Bright Data sticky sessions, a static paid
   file) are drained to `RES_FLEET_ROUTE_DOCS` documents (default 95) or the RES
@@ -390,10 +392,14 @@ and free sources must work at once:
   worker is killed during a request, its reservation stays charged until reset
   because RES may already have generated the document. Route counters and
   provider budgets use the same configured UTC reset hour.
+- Existing fleet PDFs and tracking stay in place. Legacy bulk PDFs and completed
+  date searches are imported read-only, using hard links when possible. A day is
+  completed only after every discovered CVE has a valid saved PDF; failures remain
+  queued, and interrupted discovery is rebuilt from its committed checkpoint.
 
 ```bash
 # Local
-python -m src.sites.res.fleet --providers webshare,brightdata,free --browsers 5 \
+python -m src.sites.res.fleet --mode days --providers webshare,free --browsers 10 \
   --run-id res-fleet-2025-01-100 --output data/res-benchmark
 
 # Docker (uses credentials from .env.res)

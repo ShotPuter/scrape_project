@@ -553,6 +553,15 @@ class FleetQueue:
             is not None
         )
 
+    def has_available_job(self) -> bool:
+        return (
+            self.database.execute(
+                "SELECT 1 FROM free_jobs WHERE run_id=? AND state='pending' AND next_at<=? LIMIT 1",
+                (self.run_id, time.time()),
+            ).fetchone()
+            is not None
+        )
+
     def counts(self) -> dict[str, dict[str, int]]:
         return {
             "jobs": {
@@ -857,6 +866,8 @@ class FleetBrowserWorker(BrowserWorker):
         )
         if route["expected_ip"]:
             command.extend(["--expected-proxy-ip", route["expected_ip"]])
+        if getattr(self.args, "mode", "companies") == "days":
+            command.extend(["--stream-task-mode", "days", "--stream-retry-delay", str(self.args.retry_seconds)])
         if route["ca_file"]:
             command.extend(["--proxy-ca-file", route["ca_file"]])
         return await self.run_child(slot, route, companies, owner, directory, prior, command)
@@ -895,7 +906,7 @@ class FleetBrowserWorker(BrowserWorker):
             "exit_ip": route["expected_ip"],
             "owner": owner,
             "directory": str(directory),
-            "prior_reports": list(prior),
+            "prior_reports": prior,
             "log": str(log),
             "ready": False,
         }
@@ -914,7 +925,11 @@ class FleetBrowserWorker(BrowserWorker):
                         "browser_started",
                         f"🖥 RES fleet: запущен слот {slot + 1}\n"
                         f"Провайдер: {route['provider']}; прокси: {route['endpoint']}\n"
-                        "Непрерывная сессия: компании по одной, без лимита числа; подготовка браузера",
+                        + (
+                            "Дневная очередь: поиск по дате и параллельная обработка CVE; подготовка браузера"
+                            if getattr(self.args, "mode", "companies") == "days"
+                            else "Непрерывная сессия: компании по одной, без лимита числа; подготовка браузера"
+                        ),
                     )
                 try:
                     waiter = asyncio.create_task(process.wait())
@@ -1046,7 +1061,7 @@ class FleetBrowserWorker(BrowserWorker):
             self.notifications.activity(
                 "browser_finished",
                 f"🔁 RES fleet: сессия слота {slot + 1} завершена\n"
-                f"Провайдер: {route['provider']}; компаний: {len(result.completed)}; новых PDF: {result.new_pdfs}\n"
+                f"Провайдер: {route['provider']}; заданий: {len(result.completed)}; новых PDF: {result.new_pdfs}\n"
                 + (
                     "Причина: лимит RES; маршрут уйдёт до завтра"
                     if result.quota_limited
@@ -1145,6 +1160,11 @@ class FleetDispatcher:
                 with suppress(TimeoutError):
                     await asyncio.wait_for(self.stop.wait(), 0.5)
                 continue
+            if not self.queue.has_available_job():
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(self.changed.wait(), 0.5)
+                self.changed.clear()
+                continue
             self.rollover_day()
             owner = uuid.uuid4().hex
             route = self.queue.claim_route(owner, self.provider_order, self.budgets, self.day, self.args.route_docs)
@@ -1177,6 +1197,8 @@ class FleetDispatcher:
                 raise
             except Exception as error:
                 result.error = safe_message(error)
+                if getattr(self.worker, "notifications", None):
+                    self.worker.notifications.activity("worker_error", f"RES slot {slot + 1}: {result.error}")
             finally:
                 outcome = self.route_outcome(result, route["provider"])
                 self.rollover_day()
@@ -1592,16 +1614,26 @@ async def wake_routes(queue: FleetQueue, stop: asyncio.Event) -> None:
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    from src.sites.res.bulk import iso_day, santiago_today
+
+    parser.add_argument("--mode", choices=("days", "companies"), default=os.getenv("RES_FLEET_MODE", "days"))
+    parser.add_argument("--start", type=iso_day, default=os.getenv("RES_CONTINUOUS_FROM_DATE", "2013-01-01"))
+    parser.add_argument("--end", type=iso_day, default=os.getenv("RES_FLEET_END_DATE") or None)
+    parser.add_argument("--kind", choices=("action", "registration"), default="action")
+    parser.add_argument("--poll-seconds", type=float, default=600)
+    parser.add_argument(
+        "--import-db", type=Path, action="append", default=[], help="Additional legacy bulk tracking DB (read-only)"
+    )
     parser.add_argument("--archive-from-year", type=int, default=0)
     parser.add_argument("--telegram-events", choices=("summary", "details"), default="summary")
     parser.add_argument("--year", type=int, default=2025)
     parser.add_argument("--month", type=int, default=1)
     parser.add_argument("--limit", type=int, default=100)
-    parser.add_argument("--browsers", type=int, default=int(os.getenv("RES_BROWSERS", "5")))
+    parser.add_argument("--browsers", type=int, default=int(os.getenv("RES_BROWSERS", "10")))
     parser.add_argument("--session-network-retries", type=int, choices=(0, 1, 2), default=2)
     parser.add_argument(
         "--providers",
-        default=os.getenv("RES_FLEET_PROVIDERS", "webshare,brightdata,free"),
+        default=os.getenv("RES_FLEET_PROVIDERS", "webshare,free"),
         help=f"Comma subset of {', '.join(PROVIDERS)}; free needs public collection allowed",
     )
     parser.add_argument("--paid-file", default=os.getenv("PROXY_PAID_FILE", "data/paid-proxies.txt"))
@@ -1666,7 +1698,13 @@ def parse_args(argv=None):
         parser.error(f"providers must be a subset of {', '.join(PROVIDERS)}")
     if not 1 <= args.browsers <= 10 or not 1 <= args.month <= 12:
         parser.error("browsers: 1..10; month: 1..12")
-    if args.limit < 0 if args.archive_from_year else not 1 <= args.limit <= 10000:
+    if args.mode == "days" and (
+        args.start < iso_day("2013-01-01")
+        or args.start > (args.end or santiago_today())
+        or (args.end and args.end > santiago_today())
+    ):
+        parser.error("Invalid daily date range")
+    if args.mode == "companies" and (args.limit < 0 if args.archive_from_year else not 1 <= args.limit <= 10000):
         parser.error("limit out of range")
     if (
         not 0 <= args.reset_hour <= 23
@@ -1694,6 +1732,7 @@ def parse_args(argv=None):
         args.captcha_timeout,
         args.checkpoint_seconds,
         args.telegram_minutes,
+        args.poll_seconds,
     )
     if any(not math.isfinite(value) or value <= 0 for value in timing) or any(
         not math.isfinite(value) or value < 0
@@ -1727,6 +1766,10 @@ def main(argv=None):
             return 1
         args.runtime_lock_fd = lock.fileno()
         try:
+            if args.mode == "days":
+                from src.sites.res.daily_fleet import execute_daily
+
+                return asyncio.run(execute_daily(args, root))
             return asyncio.run(execute(args, root))
         except (KeyboardInterrupt, asyncio.CancelledError):
             print("RES fleet dispatcher interrupted; routes and progress saved", flush=True)

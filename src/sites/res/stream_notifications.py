@@ -134,7 +134,7 @@ class StreamNotifications:
         return (
             f"{title} — RES {self.args.run_id}\n"
             f"Состояние: {state}\n"
-            f"Завершено компаний: {jobs.get('done', 0)}/{sum(jobs.values())}; "
+            f"Завершено {snapshot.get('job_unit', 'компаний')}: {jobs.get('done', 0)}/{sum(jobs.values())}; "
             f"в работе: {jobs.get('leased', 0)}; в очереди: {jobs.get('pending', 0)}; "
             f"ошибки: {jobs.get('error', 0)}\n"
             f"PDF у компаний: {snapshot.get('companies_with_pdf', 0)}; "
@@ -164,6 +164,12 @@ class StreamNotifications:
             f"Источники с ошибками: {len(errors)}; "
             f"лимитов RES за запуск: {len(snapshot.get('site_limit_pauses', []))}\n"
             f"Прошло: {elapsed / 60:.1f} мин"
+            + (
+                f"\nДень RES: {snapshot.get('current_date') or 'архив обработан'}; "
+                f"завершено дней: {snapshot.get('days_completed', 0)}"
+                if snapshot.get("mode") == "days"
+                else ""
+            )
         )
 
     def update(self, snapshot: dict[str, Any]) -> None:
