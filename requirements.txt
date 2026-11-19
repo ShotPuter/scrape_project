@@ -11,3 +11,4 @@ fake-useragent>=2.2,<3.0
 openpyxl>=3.1,<4.0
 playwright>=1.50,<2.0
 certifi>=2024.2.2
+httpx[socks]>=0.27,<1.0

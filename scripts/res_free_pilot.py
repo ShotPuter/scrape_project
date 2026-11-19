@@ -30,7 +30,7 @@ import sqlite3
 import ssl
 import time
 from collections import Counter, deque
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -152,6 +152,16 @@ async def load_proxy_endpoints(args) -> list[ProxyEndpoint]:
                 raise ValueError("--expected-proxy-ip requires exactly one proxy endpoint")
             endpoint = endpoints[0]
             endpoints = [ProxyEndpoint(endpoint.url, endpoint.browser, endpoint.label, args.expected_proxy_ip)]
+        ca_file = getattr(args, "proxy_ca_file", None)
+        if ca_file:
+            # Fleet routes lease Bright Data sticky sessions through the same
+            # residential file path; their intercepting CA must be pinned too.
+            endpoints = [
+                ProxyEndpoint(
+                    endpoint.url, endpoint.browser, endpoint.label, endpoint.expected_ip, Path(ca_file), endpoint.dynamic_ip
+                )
+                for endpoint in endpoints
+            ]
     elif args.proxy_provider == "webshare":
         token = os.getenv("WEBSHARE_API_TOKEN", "").strip()
         if not token:
@@ -580,6 +590,13 @@ async def _ensure_document(cascade, http, cve, company_id, state, args, output, 
             tracking.file_result(reused, output, company_id)
         counters["reused"] += 1
         return document_summary(reused)
+    quota = getattr(args, "fleet_quota", None)
+    with quota.document() if quota else nullcontext():
+        return await _fetch_document(cascade, http, cve, company_id, state, args, output, counters)
+
+
+async def _fetch_document(cascade, http, cve, company_id, state, args, output, counters):
+    tracking = getattr(args, "tracking_store", None)
     record = state["cves"].get(cve)
     if record:
         try:
@@ -717,7 +734,14 @@ async def process_company(cascade, http, company, state, args, output, counters)
                     "audio_events": getattr(exc, "audio_events", []),
                 }
             )
-            if exc.status in {"blocked", "proxy_exhausted", "proxy_failed", "daily_limit"}:
+            if exc.status in {
+                "blocked",
+                "proxy_exhausted",
+                "proxy_failed",
+                "daily_limit",
+                "fleet_route_limit",
+                "fleet_provider_limit",
+            }:
                 raise
             continue
         result["documents"].append(document)
@@ -1263,6 +1287,9 @@ def parse_args(argv=None):
     parser.add_argument("--stream-company-attempts", type=int, default=3)
     parser.add_argument("--stream-network-retries", type=int, choices=(0, 1, 2), default=2)
     parser.add_argument("--stream-retry-delay", type=float, default=3)
+    parser.add_argument("--fleet-route-docs", type=int, default=0)
+    parser.add_argument("--fleet-provider-budget", type=int, default=0)
+    parser.add_argument("--fleet-reset-hour", type=int, default=0)
     parser.add_argument("--db", type=Path, default=Path("data/dequienes-companies-2025/companies.sqlite3"))
     parser.add_argument("--limit", type=int, default=10, help="Companies to scan; 0 means all")
     parser.add_argument("--cve", help="Process a single CVE without a company search")
@@ -1284,6 +1311,12 @@ def parse_args(argv=None):
         help="Require a single proxy to retain its verified HTTP/browser exit",
     )
     parser.add_argument("--proxy-limit", type=int, default=0, help="Use at most this many proxy endpoints; 0 means all")
+    parser.add_argument(
+        "--proxy-ca-file",
+        type=Path,
+        default=None,
+        help="CA bundle for residential proxies that intercept TLS (Bright Data sticky sessions)",
+    )
     parser.add_argument("--lazy-proxies", action="store_true", help="Create Bright Data sessions only when needed")
     parser.add_argument("--solves-per-proxy", type=int, default=0, help="Rotate after this many tokens; 0 means unlimited")
     parser.add_argument(
@@ -1325,6 +1358,10 @@ def parse_args(argv=None):
     )
     parser.add_argument("--max-cooldowns", type=int, default=3, help="Maximum pauses before stopping the remaining queue")
     args = parser.parse_args(argv)
+    if args.fleet_route_docs < 0 or args.fleet_provider_budget < 0 or not 0 <= args.fleet_reset_hour <= 23:
+        parser.error("Invalid fleet document limits")
+    if args.fleet_route_docs and not args.stream_db:
+        parser.error("Fleet document limits require continuous mode")
     if args.stream_db and (not args.stream_owner or not args.tracking_db or not args.tracking_run_id):
         parser.error("Continuous mode requires owner, tracking DB and run ID")
     if args.stream_company_attempts < 1 or not math.isfinite(args.stream_retry_delay) or args.stream_retry_delay < 0:

@@ -56,6 +56,7 @@ class BatchResult:
     terminal_errors: set[str] = field(default_factory=set)
     quota_companies: set[str] = field(default_factory=set)
     quota_limited: bool = False
+    fleet_limit: str | None = None
     retry_connection: bool = False
     new_pdfs: int = 0
     error: str | None = None

@@ -15,6 +15,7 @@ def main():
             "track",
             "benchmark",
             "free-stream",
+            "fleet",
             "pipeline",
             "collect",
             "discover",
@@ -69,6 +70,10 @@ def main():
         from src.sites.res.free_stream import main as stream_main
 
         raise SystemExit(stream_main(remainder))
+    if args.stage == "fleet":
+        from src.sites.res.fleet import main as fleet_main
+
+        raise SystemExit(fleet_main(remainder))
     if args.stage == "benchmark":
         from src.sites.res.benchmark import main as benchmark_main
 

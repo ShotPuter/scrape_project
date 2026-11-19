@@ -8,6 +8,7 @@ from collections import deque
 from scripts import res_free_pilot as pilot
 from src.proxy.reputation import check_ip, check_proxy
 from src.sites.res import cooldown
+from src.sites.res.fleet_quota import FleetQuota
 from src.sites.res.free_queue import FreeQueue
 from src.utils.atomic import atomic_write_json
 from src.utils.error_details import safe_message
@@ -118,7 +119,7 @@ async def consume_session(cascade, http, initial, queue, args, state, counters, 
             company["company_id"],
             args.stream_owner,
             complete=successful,
-            attempted=attempted and result["status"] != "daily_limit",
+            attempted=attempted and result["status"] not in {"daily_limit", "fleet_route_limit", "fleet_provider_limit"},
             limit=1 if result["status"] == "ambiguous_match" else args.stream_company_attempts,
             retry=30,
             error=result.get("error"),
@@ -160,6 +161,10 @@ async def scan_continuously(proxies, args, state, counters, report, audio, vlm_m
     if len(proxies) != 1 or not args.stream_owner or not getattr(args, "tracking_store", None):
         raise ValueError("Continuous worker requires one proxy, an owner lease and tracking DB")
     queue = FreeQueue(args.stream_db, args.tracking_run_id, initialize=False)
+    if getattr(args, "fleet_route_docs", 0):
+        args.fleet_quota = FleetQuota(
+            queue.database, args.stream_owner, args.fleet_route_docs, args.fleet_provider_budget, args.fleet_reset_hour
+        )
     stats = pilot.new_stats(0, proxies[0])
     report["proxies"].append(stats)
     args.solves_per_proxy = 0

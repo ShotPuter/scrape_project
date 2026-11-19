@@ -324,6 +324,87 @@ receipt; recovery requires a real readiness check or a newer collector result.
 The stage-2 rate limit counts individual HTTP requests, including custom profiles
 with multiple requests. Collector and scraper processes retain separate budgets.
 
+### Multi-browser proxy fleet
+
+`src/proxy/fleet.py` runs several browser slots in parallel, each leasing one proxy
+route at a time from every configured provider (`webshare`, `brightdata`, `paid`,
+`free`). It is a standalone module with its own durable state, separate from the
+collector database:
+
+- Every provider has a daily document budget (`--budget-*`, default 500/500/500/200).
+- A route is drained until its per-route cap (`--route-docs`, default 95), the
+  provider budget, or the scraper's own daily-limit signal.
+- Drained routes are parked until the next reset (`--reset-hour`, UTC, default 0)
+  and reused the following day. Free routes are re-verified before reuse; with
+  `--no-free-keep` they are deleted instead of parked.
+- Free proxies come from the public catalog (`--sources`, default `public`) and are
+  verified in the background at `--proxy-rate-per-minute`; paid routes are seeded
+  once at startup and stay ready.
+- Bright Data routes are minted lazily through an optional `session_minter`
+  callback; without one, `BRIGHTDATA_PROXY_USERNAME`/`BRIGHTDATA_PROXY_PASSWORD`
+  (and optionally `BRIGHTDATA_PROXY_SERVER`) must be set.
+- State lives in `<output>/fleet.sqlite3`, so a restart resumes routes, budgets
+  and parked deadlines. `--browsers` accepts 1-10 slots (default 5).
+
+The module ships only a demo worker. Import `run_fleet` and pass a
+`worker_factory(slot, route)` that returns a `LeaseResult`; `route_proxy_options()`
+turns a leased route into `proxy_url`/`ca_file`/`expected_ip` for the browser.
+
+```bash
+# Inspect persisted routes and today's budgets
+python -m src.proxy.fleet --output data/fleet --status
+
+# Demo worker: one lease per browser, then exit (needs data/paid-proxies.txt)
+python -m src.proxy.fleet --output data/fleet --providers paid --demo
+
+# Paid-only fleet: paid list plus Webshare, 1000 documents/day each
+WEBSHARE_API_TOKEN=... python -m src.proxy.fleet --output data/fleet \
+  --providers webshare,paid --budget-webshare 1000 --budget-paid 1000 --demo
+```
+
+Free-proxy discovery still requires `ALLOW_PUBLIC_PROXY_COLLECTION=1`; without it
+only paid providers are seeded. Free routes are verified in the background, so a
+real run (not `--demo`) is needed before they appear in the pool.
+
+### RES mixed-provider fleet
+
+`src/sites/res/fleet.py` is the production RES driver built on the same lifecycle.
+It replaces the single-provider `free-stream`/`benchmark` stages when several paid
+and free sources must work at once:
+
+- `RES_BROWSERS` (default 5) browser slots each lease one route; providers are
+  tried in `RES_FLEET_PROVIDERS` order (`webshare`, `brightdata`, `paid`, `free`).
+- Paid routes (Webshare inventory, Bright Data sticky sessions, a static paid
+  file) are drained to `RES_FLEET_ROUTE_DOCS` documents (default 95) or the RES
+  per-IP daily limit, then parked until the next `RES_FLEET_RESET_HOUR` UTC.
+- Free routes are discovered in the background, reputation-screened and probed;
+  they are removed when dead or drained unless `RES_FLEET_FREE_KEEP=1`, in which
+  case they are parked and re-probed at the next reset. Their verification TTL
+  (`--proxy-ttl`, default 600s) forces a fresh probe while they stay in the pool.
+- Optional daily provider budgets (`RES_FLEET_BUDGET_*`, 0 = no extra cap) park
+  the whole provider when reached. Progress, budgets and parked deadlines live in
+  `<output>/fleet-runtime.sqlite3` (shared by restarts), so a restart resumes them.
+- Each document reserves quota in SQLite before network I/O, including within a
+  company with many CVEs. All browser processes share the provider budget; reused
+  local PDFs consume no quota. Failed operations release their reservation. If a
+  worker is killed during a request, its reservation stays charged until reset
+  because RES may already have generated the document. Route counters and
+  provider budgets use the same configured UTC reset hour.
+
+```bash
+# Local
+python -m src.sites.res.fleet --providers webshare,brightdata,free --browsers 5 \
+  --run-id res-fleet-2025-01-100 --output data/res-benchmark
+
+# Docker (uses credentials from .env.res)
+docker compose --env-file .env.res -f compose.res.yml -f compose.res.fleet.yml up
+```
+
+The container entry point also accepts `fleet` as a stage, e.g.
+`docker compose ... run --rm res fleet --help`. Bright Data sticky sessions need
+`docker/brightdata-proxy-ca.crt`; Webshare needs `WEBSHARE_API_TOKEN`.
+Production build, configuration and rollout: [RES fleet in Docker](docs/res-fleet-docker.md).
+
 ### User-Agent fallback
 
 The collector uses [fake-useragent](https://pypi.org/project/fake-useragent/) to

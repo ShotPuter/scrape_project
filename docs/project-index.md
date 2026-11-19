@@ -13,9 +13,12 @@
 | `collect_proxies.py`, `python -m src.proxy` | Одноразовая или непрерывная проверка прокси |
 | `python -m src.sites.pep` | Excel → ссылки Ley 2013 → документы → SQLite/JSON |
 | `python -m src.sites.pep.benchmark` | Ограниченная выборка PEP, метрики, Webshare/direct, уведомления |
+| `python -m src.sites.res.fleet` | RES с несколькими провайдерами прокси: Webshare/Bright Data/платные/бесплатные, квоты и парковка до сброса |
 | `bash scripts/test_pep_stability.sh` | 10–20 одинаковых ссылок: persistent nodriver и native Chrome, затем ограниченный проход временных ошибок |
 | `python -m src.sites.pep.stability_report` | Офлайн-сводка первого прохода и результата восстановления |
 | `config.py`, `.env.example` | Настройки SEPREC/прокси; PEP в основном использует отдельные аргументы CLI |
+
+Запуск fleet на сервере: [res-fleet-docker.md](res-fleet-docker.md).
 
 ## Что уже реализовано
 

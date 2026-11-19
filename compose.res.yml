@@ -1,6 +1,6 @@
 services:
   res:
-    image: chile-res:local
+    image: ${RES_IMAGE:-chile-res:local}
     build:
       context: .
       dockerfile: Dockerfile.res

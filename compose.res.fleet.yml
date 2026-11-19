@@ -1,0 +1,101 @@
+# Explicit opt-in overlay:
+#   docker compose --env-file .env.res -f compose.res.yml -f compose.res.fleet.yml up
+#
+# Runs the mixed-provider fleet: Webshare + Bright Data + public free proxies in
+# `RES_BROWSERS` browser slots. A route is drained to its daily document cap
+# (or the RES per-IP limit), then parked until the next `--reset-hour` (UTC).
+# Free routes are retired once dead or drained unless RES_FLEET_FREE_KEEP=1.
+services:
+  res:
+    environment:
+      ALLOW_PUBLIC_PROXY_COLLECTION: "1"
+      PROXY_REPUTATION_MODE: ${PROXY_REPUTATION_MODE:-strict}
+      PROXY_PAID_FILE: ${PROXY_PAID_FILE:-data/paid-proxies.txt}
+      RES_FLEET_PROVIDERS: ${RES_FLEET_PROVIDERS:-webshare,brightdata,free}
+      RES_FLEET_FREE_KEEP: ${RES_FLEET_FREE_KEEP:-0}
+    command:
+      - fleet
+      - --providers
+      - "${RES_FLEET_PROVIDERS:-webshare,brightdata,free}"
+      - --browsers
+      - "${RES_BROWSERS:-5}"
+      - --archive-from-year
+      - "${RES_FREE_ARCHIVE_FROM_YEAR:-0}"
+      - --year
+      - "${RES_YEAR:-2025}"
+      - --month
+      - "${RES_MONTH:-1}"
+      - --limit
+      - "${RES_LIMIT:-100}"
+      - --run-id
+      - "${RES_FLEET_RUN_ID:-res-fleet-2025-01-100}"
+      - --output
+      - data/res-benchmark
+      - --route-docs
+      - "${RES_FLEET_ROUTE_DOCS:-95}"
+      - --budget-webshare
+      - "${RES_FLEET_BUDGET_WEBSHARE:-0}"
+      - --budget-brightdata
+      - "${RES_FLEET_BUDGET_BRIGHTDATA:-0}"
+      - --budget-paid
+      - "${RES_FLEET_BUDGET_PAID:-0}"
+      - --budget-free
+      - "${RES_FLEET_BUDGET_FREE:-0}"
+      - --reset-hour
+      - "${RES_FLEET_RESET_HOUR:-0}"
+      - --brightdata-sessions
+      - "${RES_FLEET_BRIGHTDATA_SESSIONS:-0}"
+      - --route-failures
+      - "${RES_FLEET_ROUTE_FAILURES:-3}"
+      - --sources
+      - "${RES_FREE_SOURCES:-all}"
+      - --max-candidates
+      - "${RES_FREE_MAX_CANDIDATES:-0}"
+      - --source-records
+      - "${RES_FREE_SOURCE_RECORDS:-0}"
+      - --proxy-ports
+      - "${RES_FREE_PROXY_PORTS:-80,443}"
+      - --allowed-proxy-endpoints
+      - "${RES_FREE_ALLOWED_PROXY_ENDPOINTS:-}"
+      - --proxy-check-concurrency
+      - "${RES_FREE_CHECK_CONCURRENCY:-12}"
+      - --proxy-rate-per-minute
+      - "${RES_FREE_CHECK_RATE_PER_MINUTE:-120}"
+      - --proxy-timeout
+      - "${RES_FREE_PROXY_TIMEOUT:-15}"
+      - --proxy-ttl
+      - "${RES_FREE_PROXY_TTL:-600}"
+      - --catalog-seconds
+      - "${RES_FREE_CATALOG_SECONDS:-600}"
+      - --proxy-retry-seconds
+      - "${RES_FREE_PROXY_RETRY_SECONDS:-300}"
+      - --session-network-retries
+      - "${RES_FREE_SESSION_NETWORK_RETRIES:-2}"
+      - --worker-timeout
+      - "${RES_FREE_WORKER_TIMEOUT:-1800}"
+      - --idle-minutes
+      - "${RES_FREE_IDLE_MINUTES:-0}"
+      - --max-failures
+      - "${RES_MAX_FAILURES:-20}"
+      - --error-cooldown-minutes
+      - "${RES_ERROR_COOLDOWN_MINUTES:-10}"
+      - --max-cooldowns
+      - "${RES_FREE_MAX_COOLDOWNS:-0}"
+      - --max-documents
+      - "${RES_MAX_DOCUMENTS:-0}"
+      - --company-attempts
+      - "${RES_COMPANY_ATTEMPTS:-3}"
+      - --tokens-per-proxy
+      - "${RES_TOKENS_PER_PROXY:-20}"
+      - --timeout
+      - "${RES_TIMEOUT:-40}"
+      - --captcha-timeout
+      - "${RES_CAPTCHA_TIMEOUT:-130}"
+      - --delay
+      - "${RES_DELAY:-3}"
+      - --checkpoint-seconds
+      - "${RES_CHECKPOINT_INTERVAL:-15}"
+      - --telegram-minutes
+      - "${RES_FREE_TELEGRAM_INTERVAL_MINUTES:-30}"
+      - --telegram-events
+      - "${RES_FREE_TELEGRAM_EVENTS:-summary}"
