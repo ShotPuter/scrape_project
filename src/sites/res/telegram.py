@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import aiohttp
 
-from src.services.telegram import send_telegram
+from src.services.telegram import check_telegram, send_telegram, telegram_error_summary
 from src.utils.proxy_url import redact_proxy_credentials
 
 
@@ -188,9 +188,9 @@ class RunNotifications:
                 await send_telegram(self.session, self.token, self.chat, format_message(event))
                 delivered = True
                 self.state["sent"] += 1
-            except Exception:
+            except Exception as error:
                 self.state["failed"] += 1
-                print("RES Telegram delivery failed; collection and local reports continue", flush=True)
+                print(f"RES Telegram delivery failed ({telegram_error_summary(error)})", flush=True)
             finally:
                 try:
                     append_event(self.path, {**event, "delivered": delivered})
@@ -236,4 +236,21 @@ async def test_delivery():
         print("RES Telegram test failed; check credentials, chat access and network", flush=True)
         return 1
     print("RES Telegram test delivered", flush=True)
+    return 0
+
+
+async def check_connection():
+    """Diagnose bot and chat access without sending a message."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    chat = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    if not token or not chat:
+        print("RES Telegram check: set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID", flush=True)
+        return 1
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10), trust_env=False) as session:
+            await check_telegram(session, token, chat)
+    except Exception as error:
+        print(f"RES Telegram check failed ({telegram_error_summary(error)})", flush=True)
+        return 1
+    print("RES Telegram check: getMe and getChat OK", flush=True)
     return 0

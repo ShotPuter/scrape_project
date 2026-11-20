@@ -29,6 +29,7 @@ def main():
             "status",
             "export",
             "telegram-test",
+            "telegram-check",
         ],
     )
     args, remainder = parser.parse_known_args()
@@ -60,12 +61,13 @@ def main():
         from src.sites.res.tracking import main as tracking_main
 
         raise SystemExit(tracking_main(remainder))
-    if args.stage == "telegram-test":
+    if args.stage in {"telegram-test", "telegram-check"}:
         if remainder:
-            parser.error("telegram-test takes no additional options")
-        from src.sites.res.telegram import test_delivery
+            parser.error(f"{args.stage} takes no additional options")
+        from src.sites.res.telegram import check_connection, test_delivery
 
-        raise SystemExit(asyncio.run(test_delivery()))
+        command = check_connection if args.stage == "telegram-check" else test_delivery
+        raise SystemExit(asyncio.run(command()))
     if args.stage == "free-stream":
         from src.sites.res.free_stream import main as stream_main
 

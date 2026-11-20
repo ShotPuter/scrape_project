@@ -187,3 +187,18 @@ def test_summary_mode_suppresses_proxy_and_browser_delivery(tmp_path, monkeypatc
     assert notifications.queue.qsize() == 1
     assert notifications.queue.get_nowait() == ("progress", "thirty-minute summary")
     assert len(records(notifications)) == 4
+
+
+async def test_delivery_log_includes_safe_http_failure_reason(tmp_path, monkeypatch):
+    from src.services.telegram import TelegramDeliveryError
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "test-chat")
+    deliver = AsyncMock(side_effect=[TelegramDeliveryError("sendMessage: HTTP 403"), None])
+    notifications = StreamNotifications(settings(no_telegram=False), tmp_path, deliver=deliver)
+    await notifications.start()
+    notifications.publish("started", "hello")
+    await notifications.finish("done")
+
+    failures = [row["text"] for row in records(notifications) if row["event"] == "telegram_failed"]
+    assert len(failures) == 1 and "sendMessage: HTTP 403" in failures[0]

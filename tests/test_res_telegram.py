@@ -214,3 +214,30 @@ async def test_runner_sends_start_and_interrupted_final_after_cancellation(tmp_p
         assert store.status()["queues"][queue] == {"retry_wait": 1}
     finally:
         store.close()
+
+
+async def test_connection_check_validates_chat_without_sending_a_message(monkeypatch, capsys):
+    from unittest.mock import AsyncMock, MagicMock
+
+    session = MagicMock()
+    response = AsyncMock()
+    response.status = 200
+    response.json.return_value = {"ok": True}
+    session.post.return_value.__aenter__.return_value = response
+    factory = MagicMock()
+    factory.return_value.__aenter__.return_value = session
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake-bot-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "fake-chat-id")
+    monkeypatch.setattr(telegram.aiohttp, "ClientSession", factory)
+
+    assert await telegram.check_connection() == 0
+    assert [call.args[0].rsplit("/", 1)[-1] for call in session.post.call_args_list] == ["getMe", "getChat"]
+    assert session.post.call_args.kwargs["json"] == {"chat_id": "fake-chat-id"}
+
+    response.status = 401
+    session.post.reset_mock()
+    assert await telegram.check_connection() == 1
+    assert session.post.call_count == 1
+    output = capsys.readouterr().out
+    assert "getMe: HTTP 401" in output
+    assert "fake-bot-token" not in output and "fake-chat-id" not in output

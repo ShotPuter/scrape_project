@@ -13,7 +13,7 @@ from typing import Any
 
 import aiohttp
 
-from src.services.telegram import send_telegram
+from src.services.telegram import send_telegram, telegram_error_summary
 from src.utils.proxy_url import redact_proxy_credentials
 
 
@@ -109,9 +109,10 @@ class StreamNotifications:
             try:
                 await self.deliver(text)
                 self.state["sent"] += 1
-            except Exception:
+            except Exception as error:
                 self.state["failed"] += 1
-                self.record("telegram_failed", f"Не доставлено уведомление {event}; сбор продолжается")
+                reason = telegram_error_summary(error)
+                self.record("telegram_failed", f"Не доставлено уведомление {event} ({reason}); сбор продолжается")
             finally:
                 self.queue.task_done()
 
